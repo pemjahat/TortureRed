@@ -1,0 +1,15 @@
+create CMake for my project with this specification.
+- C++ Windows application as startup project
+- Use SDL_Window to link static lib and dll
+- Code structure based on this folder:
+-- Bin - for all the compiled binary output
+-- Build - for all intermediate build files
+-- Content - for asset that will be used by application, example when load gltf it will be from this folder
+-- ThirdParty - for all downloaded package like SDL, DXC
+-- Sources - for all source codes, cpp, h, hlsl
+- Add gitignore for these folders: Bin, Build, ThirdParty and Content
+- No try catch, just assert directly
+
+
+
+
