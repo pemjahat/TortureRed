@@ -22,4 +22,8 @@ Configure CMake to get ImGui
 Use ImGui for debugging for this renderer using this specification.
 - Add simple RGB option to change background color of renderer
 
-
+Add functionality to load Gltf model using this specification
+- Use cgltf helper, setup CMake to get cgltf
+- Load box gltf under folder Content/Box, file is already exist no need to do anything
+- Need support material that used in box gltf file
+- Use DirectX header helper to create view projection matrix

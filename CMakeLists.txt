@@ -58,6 +58,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# Download cgltf (GLTF loader)
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.13
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/cgltf
+)
+FetchContent_MakeAvailable(cgltf)
+
 # Create ImGui library
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -85,6 +94,7 @@ include_directories(${sdl2_SOURCE_DIR}/include)
 include_directories(${directx_headers_SOURCE_DIR}/include)
 include_directories(${imgui_SOURCE_DIR})
 include_directories(${imgui_SOURCE_DIR}/backends)
+include_directories(${cgltf_SOURCE_DIR})
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -170,7 +180,7 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui (automatically downloaded)")
+message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf (automatically downloaded)")
 message(STATUS "Windowing: SDL2")
 message(STATUS "Rendering: DirectX 12")
 message(STATUS "Debugging: ImGui")
