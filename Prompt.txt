@@ -11,5 +11,9 @@ create CMake for my project with this specification.
 - No try catch, just assert directly
 
 
-
+Use directx12 API for this renderer, replace SDL renderer, but keep SDL Window.
+Configure CMake to fetch DirectXHeaders and DXC and use it for this renderer.
+For renderer follow this specification.
+- Simple vertex and pixel shader to render Triangle, all under Sources/Shaders/
+- Application will compile shader source with dxc and load it runtime
 

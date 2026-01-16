@@ -1,0 +1,31 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug TortureRed (MSVC)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/Bin/Debug/TortureRed.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/Bin/Debug",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "build-debug",
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "Release TortureRed (MSVC)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/Bin/Release/TortureRed.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/Bin/Release",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "build-release",
+            "internalConsoleOptions": "openOnSessionStart"
+        }
+    ]
+}

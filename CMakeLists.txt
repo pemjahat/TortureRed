@@ -32,9 +32,27 @@ set(SDL_TEST OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(SDL2)
 
+# Download DirectX Headers
+FetchContent_Declare(
+    directx_headers
+    GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
+    GIT_TAG v1.614.0
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/DirectX-Headers
+)
+FetchContent_MakeAvailable(directx_headers)
+
+# Download and configure DXC (DirectX Shader Compiler)
+FetchContent_Declare(
+    dxc
+    URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.7.2308/dxc_2023_08_14.zip
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/DXC
+)
+FetchContent_MakeAvailable(dxc)
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/Sources)
 include_directories(${sdl2_SOURCE_DIR}/include)
+include_directories(${directx_headers_SOURCE_DIR}/include)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -43,30 +61,59 @@ file(GLOB_RECURSE SOURCES
     "${CMAKE_SOURCE_DIR}/Sources/*.hpp"
 )
 
+# Collect shader files separately (don't include in SOURCES to avoid MSBuild compilation)
+file(GLOB_RECURSE SHADER_SOURCES
+    "${CMAKE_SOURCE_DIR}/Sources/Shaders/*.hlsl"
+)
+
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-# Link SDL2 libraries
+# Link libraries
 target_link_libraries(${PROJECT_NAME}
     SDL2::SDL2
     SDL2::SDL2main
+    d3d12.lib
+    dxgi.lib
+    dxguid.lib
+    dxcompiler.lib
 )
 
-# Copy SDL2.dll to output directory for Windows
+# Copy shader source files to output directory
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/Sources/Shaders
+    $<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders
+)
+
+# Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)
 if(WIN32)
+    # Remove existing DLLs first to avoid conflicts
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:SDL2::SDL2>
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND ${CMAKE_COMMAND} -E remove $<TARGET_FILE_DIR:${PROJECT_NAME}>/SDL2.dll
+        COMMAND ${CMAKE_COMMAND} -E remove $<TARGET_FILE_DIR:${PROJECT_NAME}>/dxcompiler.dll
+        COMMAND ${CMAKE_COMMAND} -E remove $<TARGET_FILE_DIR:${PROJECT_NAME}>/dxil.dll
+    )
+
+    # Create hardlinks using PowerShell (works without admin privileges)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND powershell -Command "New-Item -ItemType HardLink -Path '$<TARGET_FILE_DIR:${PROJECT_NAME}>/SDL2.dll' -Target '$<TARGET_FILE:SDL2::SDL2>' -Force"
+    )
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND powershell -Command "New-Item -ItemType HardLink -Path '$<TARGET_FILE_DIR:${PROJECT_NAME}>/dxcompiler.dll' -Target '${dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll' -Force"
+    )
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND powershell -Command "New-Item -ItemType HardLink -Path '$<TARGET_FILE_DIR:${PROJECT_NAME}>/dxil.dll' -Target '${dxc_SOURCE_DIR}/bin/x64/dxil.dll' -Force"
     )
 endif()
 
 # Windows specific settings
 if(WIN32)
-    # Set Windows subsystem to Windows (not console)
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-        WIN32_EXECUTABLE TRUE
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+    # Link additional Windows libraries needed for DirectX
+    target_link_libraries(${PROJECT_NAME}
+        d3dcompiler.lib
     )
 endif()
 
@@ -90,7 +137,10 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Dependencies: SDL2 (automatically downloaded)")
+message(STATUS "Dependencies: SDL2, DirectX Headers, DXC (automatically downloaded)")
+message(STATUS "Windowing: SDL2")
+message(STATUS "Rendering: DirectX 12")
 message(STATUS "ThirdParty Directory: ${CMAKE_SOURCE_DIR}/ThirdParty")
 message(STATUS "Output Directory: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS "Runtime Shader Compilation: Triangle.hlsl -> VS/PS shaders (SM 6.5)")
 message(STATUS "=====================================")
