@@ -49,10 +49,42 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dxc)
 
+# Download ImGui
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.89.9
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/ImGui
+)
+FetchContent_MakeAvailable(imgui)
+
+# Create ImGui library
+set(IMGUI_SOURCES
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+)
+
+add_library(ImGui STATIC ${IMGUI_SOURCES})
+target_include_directories(ImGui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+
+target_link_libraries(ImGui PUBLIC
+    d3d12.lib
+    dxgi.lib
+)
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/Sources)
 include_directories(${sdl2_SOURCE_DIR}/include)
 include_directories(${directx_headers_SOURCE_DIR}/include)
+include_directories(${imgui_SOURCE_DIR})
+include_directories(${imgui_SOURCE_DIR}/backends)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -77,6 +109,7 @@ target_link_libraries(${PROJECT_NAME}
     dxgi.lib
     dxguid.lib
     dxcompiler.lib
+    ImGui
 )
 
 # Copy shader source files to output directory
@@ -137,9 +170,10 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Dependencies: SDL2, DirectX Headers, DXC (automatically downloaded)")
+message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui (automatically downloaded)")
 message(STATUS "Windowing: SDL2")
 message(STATUS "Rendering: DirectX 12")
+message(STATUS "Debugging: ImGui")
 message(STATUS "ThirdParty Directory: ${CMAKE_SOURCE_DIR}/ThirdParty")
 message(STATUS "Output Directory: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "Runtime Shader Compilation: Triangle.hlsl -> VS/PS shaders (SM 6.5)")

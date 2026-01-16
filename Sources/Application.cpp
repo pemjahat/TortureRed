@@ -177,6 +177,9 @@ void Application::InitializeDirectX()
 
     // Create vertex buffer
     CreateVertexBuffer();
+
+    // Initialize ImGui
+    InitializeImGui();
 }
 
 void Application::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)
@@ -315,6 +318,34 @@ void Application::CreateVertexBuffer()
     m_VertexBufferView.SizeInBytes = vertexBufferSize;
 }
 
+void Application::InitializeImGui()
+{
+    // Create descriptor heap for ImGui
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    desc.NumDescriptors = 1;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    CHECK_HR(m_Device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_ImGuiDescriptorHeap)), "CreateDescriptorHeap for ImGui failed");
+
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+
+    // Setup Platform/Renderer backends
+    CHECK_BOOL(ImGui_ImplSDL2_InitForD3D(m_Window), "ImGui_ImplSDL2_InitForD3D failed");
+    CHECK_BOOL(ImGui_ImplDX12_Init(m_Device.Get(), 2,
+        DXGI_FORMAT_R8G8B8A8_UNORM, m_ImGuiDescriptorHeap.Get(),
+        m_ImGuiDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),
+        m_ImGuiDescriptorHeap->GetGPUDescriptorHandleForHeapStart()), "ImGui_ImplDX12_Init failed");
+}
+
 std::vector<char> Application::LoadShader(const std::string& filename)
 {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -405,6 +436,11 @@ void Application::Shutdown()
     // Wait for the GPU to be done with all resources
     WaitForPreviousFrame();
 
+    // Shutdown ImGui
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+
     if (m_FenceEvent)
     {
         CloseHandle(m_FenceEvent);
@@ -426,6 +462,9 @@ void Application::ProcessEvents()
     SDL_Event event;
     while (SDL_PollEvent(&event))
     {
+        // Pass events to ImGui first
+        ImGui_ImplSDL2_ProcessEvent(&event);
+
         switch (event.type)
         {
         case SDL_QUIT:
@@ -476,14 +515,28 @@ void Application::Render()
     rtvHandle.ptr += m_FrameIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
-    // Clear the render target
-    const float clearColor[] = { 0.098f, 0.098f, 0.439f, 1.0f }; // Dark blue
+    // Clear the render target with configurable background color
+    const float clearColor[] = { m_BackgroundColor[0], m_BackgroundColor[1], m_BackgroundColor[2], 1.0f };
     m_CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
     // Draw triangle
     m_CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_CommandList->IASetVertexBuffers(0, 1, &m_VertexBufferView);
     m_CommandList->DrawInstanced(3, 1, 0, 0);
+
+    // Start the Dear ImGui frame
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+
+    // Render ImGui UI
+    RenderImGui();
+
+    // Render ImGui draw data
+    ImGui::Render();
+    ID3D12DescriptorHeap* descriptorHeaps[] = { m_ImGuiDescriptorHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_CommandList.Get());
 
     // Indicate that the back buffer will now be used to present
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -518,4 +571,32 @@ void Application::WaitForPreviousFrame()
     }
 
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+void Application::RenderImGui()
+{
+    // Create a simple debug window
+    ImGui::Begin("Renderer Debug");
+
+    // RGB Color Picker for background
+    ImGui::ColorEdit3("Background Color", m_BackgroundColor);
+
+    // Display current FPS (basic implementation)
+    static float lastTime = 0.0f;
+    static int frameCount = 0;
+    static float fps = 0.0f;
+
+    float currentTime = SDL_GetTicks() / 1000.0f;
+    frameCount++;
+
+    if (currentTime - lastTime >= 1.0f)
+    {
+        fps = frameCount / (currentTime - lastTime);
+        frameCount = 0;
+        lastTime = currentTime;
+    }
+
+    ImGui::Text("FPS: %.1f", fps);
+
+    ImGui::End();
 }

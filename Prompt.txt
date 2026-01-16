@@ -16,4 +16,10 @@ Configure CMake to fetch DirectXHeaders and DXC and use it for this renderer.
 For renderer follow this specification.
 - Simple vertex and pixel shader to render Triangle, all under Sources/Shaders/
 - Application will compile shader source with dxc and load it runtime
+- Don't use throw, prompt error msg using SDL and assert directly
+
+Configure CMake to get ImGui
+Use ImGui for debugging for this renderer using this specification.
+- Add simple RGB option to change background color of renderer
+
 

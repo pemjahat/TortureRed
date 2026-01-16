@@ -7,6 +7,9 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <imgui.h>
+#include <imgui_impl_dx12.h>
+#include <imgui_impl_sdl2.h>
 #include <iostream>
 
 // Error checking macro that always asserts in both debug and release
@@ -42,6 +45,8 @@ private:
     void CreateRootSignature();
     void CreatePipelineState();
     void CreateVertexBuffer();
+    void InitializeImGui();
+    void RenderImGui();
     std::vector<char> LoadShader(const std::string& filename);
     std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
     void WaitForPreviousFrame();
@@ -69,6 +74,10 @@ private:
     // Vertex buffer
     Microsoft::WRL::ComPtr<ID3D12Resource> m_VertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView;
+
+    // ImGui
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_ImGuiDescriptorHeap;
+    float m_BackgroundColor[3] = { 0.098f, 0.098f, 0.439f }; // Default: Dark blue
 
     // Prevent copying
     Application(const Application&) = delete;
