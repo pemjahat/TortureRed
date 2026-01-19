@@ -1,0 +1,16 @@
+{
+    "folders": [
+        {
+            "name": "Torture",
+            "path": "D:\\Torture"
+        },
+        {
+            "name": "TortureRed",
+            "path": "D:\\TortureRed"
+        }
+    ],
+    "settings": {
+        "cmake.configureOnOpen": false,
+        "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+    }
+}
