@@ -1,14 +1,25 @@
 #pragma once
 
 #include <d3d12.h>
+#include <d3dx12.h>
 #include <wrl.h>
 #include <vector>
 #include <string>
+#include <DirectXMath.h>
+#include <DirectXTex.h>
 
 // Forward declarations for cgltf
 struct cgltf_data;
 
-// GLTF Model structures
+// Material constants matching the shader
+struct MaterialConstants
+{
+    DirectX::XMFLOAT4 baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    UINT hasBaseColorTexture;
+    UINT padding[1]; // Pad to 16 bytes
+};
 struct GLTFVertex
 {
     float position[3];
@@ -16,11 +27,21 @@ struct GLTFVertex
     float texCoord[2];
 };
 
+struct GLTFTexture
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    UINT srvIndex = UINT(-1); // Descriptor index
+    DirectX::ScratchImage* image = nullptr;
+};
+
 struct GLTFMaterial
 {
     float baseColorFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float metallicFactor = 1.0f;
     float roughnessFactor = 1.0f;
+    GLTFTexture* baseColorTexture = nullptr;
+    GLTFTexture* normalTexture = nullptr;
+    // Add more as needed
 };
 
 struct GLTFMesh
@@ -34,9 +55,39 @@ struct GLTFMesh
     D3D12_INDEX_BUFFER_VIEW indexBufferView;
 };
 
+struct GLTFNode
+{
+    std::string name;
+    GLTFMesh* mesh = nullptr;
+    std::vector<GLTFNode*> children;
+    DirectX::XMFLOAT4X4 transform;
+    GLTFNode* parent = nullptr;
+};
+
+struct GLTFAnimationChannel
+{
+    enum Type { Translation, Rotation, Scale };
+    Type type;
+    GLTFNode* targetNode = nullptr;
+    std::vector<float> times;
+    std::vector<DirectX::XMFLOAT3> translations; // for translation
+    std::vector<DirectX::XMFLOAT4> rotations; // for rotation
+    std::vector<DirectX::XMFLOAT3> scales; // for scale
+};
+
+struct GLTFAnimation
+{
+    std::string name;
+    std::vector<GLTFAnimationChannel> channels;
+};
+
 struct GLTFModel
 {
     std::vector<GLTFMesh> meshes;
+    std::vector<GLTFNode> nodes;
+    std::vector<GLTFAnimation> animations;
+    std::vector<GLTFTexture> textures;
+    std::vector<GLTFNode*> rootNodes;
     cgltf_data* data = nullptr; // Raw cgltf data
 };
 
@@ -48,6 +99,7 @@ public:
 
     bool LoadGLTFModel(ID3D12Device* device, const std::string& filepath);
     void Render(ID3D12GraphicsCommandList* commandList);
+    void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, ID3D12DescriptorHeap* srvHeap);
 
     // Prevent copying
     Model(const Model&) = delete;
@@ -55,6 +107,13 @@ public:
 
 private:
     void CreateGLTFResources(ID3D12Device* device);
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void LoadTextures(ID3D12Device* device);
+    void BuildNodeHierarchy();
+    void LoadAnimations();
 
     GLTFModel m_GltfModel;
+    std::wstring fileDirectory;
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHeapStart;
+    UINT srvDescriptorSize;
 };

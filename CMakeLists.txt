@@ -67,6 +67,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cgltf)
 
+# Download DirectXTex
+FetchContent_Declare(
+    directxtex
+    GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
+    GIT_TAG jun2023
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/DirectXTex
+)
+FetchContent_MakeAvailable(directxtex)
+
 # Create ImGui library
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -95,6 +104,7 @@ include_directories(${directx_headers_SOURCE_DIR}/include)
 include_directories(${imgui_SOURCE_DIR})
 include_directories(${imgui_SOURCE_DIR}/backends)
 include_directories(${cgltf_SOURCE_DIR})
+include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -120,6 +130,7 @@ target_link_libraries(${PROJECT_NAME}
     dxguid.lib
     dxcompiler.lib
     ImGui
+    DirectXTex
 )
 
 # Copy shader source files to output directory

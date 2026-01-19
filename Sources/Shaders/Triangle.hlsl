@@ -25,6 +25,19 @@ cbuffer ViewProjection : register(b0)
     row_major float4x4 viewProjection;
 };
 
+// Material constants
+cbuffer MaterialConstants : register(b1)
+{
+    float4 baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    uint hasBaseColorTexture;
+};
+
+// Textures
+Texture2D baseColorTexture : register(t0);
+SamplerState samplerState : register(s0);
+
 // Vertex shader
 PSInput VSMain(VSInput input)
 {
@@ -40,19 +53,25 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
-// Pixel shader - simple shading using normal for color
+// Pixel shader - texture sampling with fallback to normal color
 PSOutput PSMain(PSInput input)
 {
     PSOutput output;
 
-    // Use normal as color (simple visualization)
-    // Transform normal from [-1,1] to [0,1] range for color
-    float3 color = (input.normal * 0.5f) + 0.5f;
+    float4 color = baseColorFactor;
 
-    // Add some basic lighting effect
-    float lighting = dot(input.normal, normalize(float3(1.0f, 1.0f, 1.0f))) * 0.5f + 0.5f;
-    color *= lighting;
+    if (hasBaseColorTexture)
+    {
+        color *= baseColorTexture.Sample(samplerState, input.texCoord);
+    }
+    else
+    {
+        // Fallback to normal color
+        float3 normalColor = (input.normal * 0.5f) + 0.5f;
+        float lighting = dot(input.normal, normalize(float3(1.0f, 1.0f, 1.0f))) * 0.5f + 0.5f;
+        color = float4(normalColor * lighting, 1.0f);
+    }
 
-    output.color = float4(color, 1.0f);
+    output.color = color;
     return output;
 }

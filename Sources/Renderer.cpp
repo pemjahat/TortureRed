@@ -1,4 +1,5 @@
 #include "Renderer.h"
+#include "Utility.h"
 #include <iostream>
 #include <fstream>
 #include <dxcapi.h>
@@ -228,6 +229,21 @@ bool Renderer::Initialize(HWND hwnd)
         }
     }
 
+    // Create SRV descriptor heap for textures
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+        srvHeapDesc.NumDescriptors = 1024; // Enough for many textures
+        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+        hr = m_Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_SRVHeap));
+        if (FAILED(hr))
+        {
+            std::cerr << "CreateDescriptorHeap for SRV failed" << std::endl;
+            return false;
+        }
+    }
+
     // Create command allocator
     hr = m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator));
     if (FAILED(hr))
@@ -319,6 +335,10 @@ void Renderer::BeginFrame()
     // Set necessary state
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
 
+    // Set descriptor heaps
+    ID3D12DescriptorHeap* heaps[] = { m_SRVHeap.Get() };
+    m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
     // Set constant buffer (view-projection matrix)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress());
 
@@ -388,20 +408,65 @@ void Renderer::Present()
     // This is now handled in EndFrame
 }
 
+void Renderer::ExecuteCommandList()
+{
+    CHECK_HR(m_CommandList->Close(), "CommandList Close failed");
+    ID3D12CommandList* cmds[] = { m_CommandList.Get() };
+    m_CommandQueue->ExecuteCommandLists(_countof(cmds), cmds);
+    WaitForPreviousFrame();
+}
+
 void Renderer::CreateRootSignature()
 {
-    // Create root parameter for constant buffer (view-projection matrix)
-    D3D12_ROOT_PARAMETER rootParameter = {};
-    rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameter.Descriptor.ShaderRegister = 0;  // b0
-    rootParameter.Descriptor.RegisterSpace = 0;
-    rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    D3D12_DESCRIPTOR_RANGE textureRange = {};
+    textureRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    textureRange.NumDescriptors = 1;
+    textureRange.BaseShaderRegister = 0;  // t0
+    textureRange.RegisterSpace = 0;
+    textureRange.OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_ROOT_PARAMETER rootParameters[3] = {};
+
+    // View-projection matrix
+    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameters[0].Descriptor.ShaderRegister = 0;  // b0
+    rootParameters[0].Descriptor.RegisterSpace = 0;
+    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    // Material constants (baseColorFactor, metallic, roughness, hasTexture)
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParameters[1].Constants.ShaderRegister = 1;  // b1
+    rootParameters[1].Constants.RegisterSpace = 0;
+    rootParameters[1].Constants.Num32BitValues = 8;  // 4 for float4 + 2 floats + 2 UINTs
+    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // Base color texture descriptor table
+    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[2].DescriptorTable.pDescriptorRanges = &textureRange;
+    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // Static sampler
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MipLODBias = 0.0f;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    sampler.MinLOD = 0.0f;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;  // s0
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-    rootSignatureDesc.NumParameters = 1;
-    rootSignatureDesc.pParameters = &rootParameter;
-    rootSignatureDesc.NumStaticSamplers = 0;
-    rootSignatureDesc.pStaticSamplers = nullptr;
+    rootSignatureDesc.NumParameters = _countof(rootParameters);
+    rootSignatureDesc.pParameters = rootParameters;
+    rootSignatureDesc.NumStaticSamplers = 1;
+    rootSignatureDesc.pStaticSamplers = &sampler;
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     Microsoft::WRL::ComPtr<ID3DBlob> signature;

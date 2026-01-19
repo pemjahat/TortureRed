@@ -42,8 +42,13 @@ public:
     // Getters
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
     ID3D12GraphicsCommandList* GetCommandList() const { return m_CommandList.Get(); }
+    ID3D12CommandQueue* GetCommandQueue() const { return m_CommandQueue.Get(); }
+    ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return m_PipelineState.Get(); }
+    ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
+
+    void ExecuteCommandList();
 
     // Background color
     float m_BackgroundColor[3] = { 0.098f, 0.098f, 0.439f }; // Default: Dark blue
@@ -67,6 +72,9 @@ private:
     // Depth Buffer
     Microsoft::WRL::ComPtr<ID3D12Resource> m_DepthStencilBuffer;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;
+
+    // SRV Heap for textures
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_SRVHeap;
 
     // Constant Buffer for view-projection matrix
     Microsoft::WRL::ComPtr<ID3D12Resource> m_ConstantBuffer;

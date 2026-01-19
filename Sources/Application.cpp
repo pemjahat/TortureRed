@@ -68,10 +68,13 @@ void Application::Initialize()
     CHECK_BOOL(m_Renderer.Initialize(hwnd), "Renderer initialization failed");
 
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/Box/Box.gltf"))
+    if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
+
+    // Upload textures to GPU
+    m_Model.UploadTextures(m_Renderer.GetDevice(), m_Renderer.GetCommandList(), m_Renderer.GetCommandQueue(), m_Renderer.GetCommandAllocator(), m_Renderer.GetSRVHeap());
 
     // Initialize ImGui
     InitializeImGui();

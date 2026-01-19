@@ -5,22 +5,10 @@
 #include <imgui_impl_dx12.h>
 #include <imgui_impl_sdl2.h>
 
+#include "Utility.h"
 #include "Camera.h"
 #include "Model.h"
 #include "Renderer.h"
-
-// Error checking macro that always asserts in both debug and release
-#define CHECK_HR(hr, msg) \
-    if (FAILED(hr)) { \
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "DirectX Error: %s (HRESULT: 0x%08X)", msg, hr); \
-        assert(false); \
-    }
-
-#define CHECK_BOOL(condition, msg) \
-    if (!(condition)) { \
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Application Error: %s", msg); \
-        assert(false); \
-    }
 
 
 class Application
