@@ -22,7 +22,7 @@ struct PSOutput
 // Simple view-projection matrix for 3D rendering
 cbuffer ViewProjection : register(b0)
 {
-    float4x4 viewProjection;
+    row_major float4x4 viewProjection;
 };
 
 // Vertex shader

@@ -592,7 +592,7 @@ void Renderer::UpdateViewProjectionMatrix(const DirectX::XMMATRIX& viewMatrix)
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
     float fovY = 45.0f * (3.14159265359f / 180.0f); // 45 degrees in radians
     float nearZ = 0.1f;
-    float farZ = 100.0f;
+    float farZ = 1000.0f;
 
     // Create projection matrix (left-handed perspective)
     DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(fovY, aspectRatio, nearZ, farZ);
