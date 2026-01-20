@@ -203,8 +203,20 @@ void Application::Update(float deltaTime)
     // Update camera
     m_Camera.Update(deltaTime);
 
-    // Update view-projection matrix (camera can move anytime in first-person mode)
-    m_Renderer.UpdateViewProjectionMatrix(m_Camera.GetViewMatrix());
+    // Update model animation
+    m_Model.UpdateAnimation(deltaTime);
+
+    // Compute view-projection matrix
+    DirectX::XMMATRIX view = m_Camera.GetViewMatrix();
+    float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
+    float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
+    float nearZ = 0.1f;
+    float farZ = 1000.0f;
+    DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(fovY, aspectRatio, nearZ, farZ);
+    m_ViewProj = view * proj;
+
+    // Update Frame CB
+    m_Renderer.UpdateFrameCB(m_ViewProj);
 }
 
 void Application::Render()
@@ -213,7 +225,7 @@ void Application::Render()
     m_Renderer.BeginFrame();
 
     // Render GLTF model
-    m_Model.Render(m_Renderer.GetCommandList());
+    m_Model.Render(m_Renderer.GetCommandList(), &m_Renderer);
 
     // Start the Dear ImGui frame
     ImGui_ImplDX12_NewFrame();

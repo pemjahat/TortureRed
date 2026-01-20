@@ -1,11 +1,14 @@
+#define NOMINMAX
 #include "Model.h"
 #include "Utility.h"
+#include "Renderer.h"
 #include <iostream>
 #include <cgltf.h>
 #define CGLTF_IMPLEMENTATION
 #include <wrl/client.h>
 #include <DirectXTex.h>
 #include <cstdint>
+#include <algorithm>
 
 Model::Model()
 {
@@ -212,6 +215,8 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
 
     BuildNodeHierarchy();
     LoadAnimations();
+    if (!m_GltfModel.animations.empty())
+        m_CurrentAnimation = &m_GltfModel.animations[0];
 
     // Create DirectX 12 resources for the loaded model
     CreateGLTFResources(device);
@@ -337,67 +342,6 @@ void Model::CreateGLTFResources(ID3D12Device* device)
     }
 }
 
-void Model::Render(ID3D12GraphicsCommandList* commandList)
-{
-    for (auto root : m_GltfModel.rootNodes)
-    {
-        RenderNode(commandList, root, DirectX::XMMatrixIdentity());
-    }
-}
-
-void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform)
-{
-    DirectX::XMMATRIX localTransform = DirectX::XMLoadFloat4x4(&node->transform);
-    DirectX::XMMATRIX worldTransform = localTransform * parentTransform;
-
-    // TODO: Set worldTransform to constant buffer for shader
-
-    if (node->mesh)
-    {
-        // Set material constants
-        MaterialConstants matConstants;
-        matConstants.baseColorFactor = DirectX::XMFLOAT4(
-            node->mesh->material.baseColorFactor[0],
-            node->mesh->material.baseColorFactor[1],
-            node->mesh->material.baseColorFactor[2],
-            node->mesh->material.baseColorFactor[3]
-        );
-        matConstants.metallicFactor = node->mesh->material.metallicFactor;
-        matConstants.roughnessFactor = node->mesh->material.roughnessFactor;
-        matConstants.hasBaseColorTexture = (node->mesh->material.baseColorTexture != nullptr) ? 1 : 0;
-
-        commandList->SetGraphicsRoot32BitConstants(1, sizeof(MaterialConstants) / 4, &matConstants, 0);
-
-        // Bind texture if available
-        if (node->mesh->material.baseColorTexture && node->mesh->material.baseColorTexture->srvIndex != UINT(-1))
-        {
-            commandList->SetGraphicsRootDescriptorTable(2, // Assuming t0 is at root parameter 2
-                CD3DX12_GPU_DESCRIPTOR_HANDLE(srvHeapStart, node->mesh->material.baseColorTexture->srvIndex, srvDescriptorSize));
-        }
-
-        // Set vertex buffer
-        commandList->IASetVertexBuffers(0, 1, &node->mesh->vertexBufferView);
-
-        // Set index buffer if available
-        if (!node->mesh->indices.empty())
-        {
-            commandList->IASetIndexBuffer(&node->mesh->indexBufferView);
-            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            commandList->DrawIndexedInstanced(static_cast<UINT>(node->mesh->indices.size()), 1, 0, 0, 0);
-        }
-        else
-        {
-            commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            commandList->DrawInstanced(static_cast<UINT>(node->mesh->vertices.size()), 1, 0, 0);
-        }
-    }
-
-    for (auto child : node->children)
-    {
-        RenderNode(commandList, child, worldTransform);
-    }
-}
-
 void Model::LoadTextures(ID3D12Device* device)
 {
     m_GltfModel.textures.resize(m_GltfModel.data->textures_count);
@@ -485,13 +429,23 @@ void Model::BuildNodeHierarchy()
         if (node->has_matrix)
         {
             memcpy(&gltfNode.transform, node->matrix, sizeof(float) * 16);
+            // Decompose to TRS for animation
+            DirectX::XMMATRIX mat = DirectX::XMLoadFloat4x4(&gltfNode.transform);
+            DirectX::XMVECTOR scale, rotQuat, trans;
+            DirectX::XMMatrixDecompose(&scale, &rotQuat, &trans, mat);
+            DirectX::XMStoreFloat3(&gltfNode.scale, scale);
+            DirectX::XMStoreFloat4(&gltfNode.rotation, rotQuat);
+            DirectX::XMStoreFloat3(&gltfNode.translation, trans);
         }
         else
         {
-            // Decompose TRS
-            DirectX::XMMATRIX t = DirectX::XMMatrixTranslation(node->translation[0], node->translation[1], node->translation[2]);
-            DirectX::XMMATRIX r = DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]));
-            DirectX::XMMATRIX s = DirectX::XMMatrixScaling(node->scale[0], node->scale[1], node->scale[2]);
+            gltfNode.translation = DirectX::XMFLOAT3(node->translation[0], node->translation[1], node->translation[2]);
+            gltfNode.rotation = DirectX::XMFLOAT4(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
+            gltfNode.scale = DirectX::XMFLOAT3(node->scale[0], node->scale[1], node->scale[2]);
+            // Compute matrix
+            DirectX::XMMATRIX t = DirectX::XMMatrixTranslation(gltfNode.translation.x, gltfNode.translation.y, gltfNode.translation.z);
+            DirectX::XMMATRIX r = DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(gltfNode.rotation.x, gltfNode.rotation.y, gltfNode.rotation.z, gltfNode.rotation.w));
+            DirectX::XMMATRIX s = DirectX::XMMatrixScaling(gltfNode.scale.x, gltfNode.scale.y, gltfNode.scale.z);
             DirectX::XMMATRIX m = s * r * t;
             DirectX::XMStoreFloat4x4(&gltfNode.transform, m);
         }
@@ -546,7 +500,16 @@ void Model::LoadAnimations()
             // Times
             cgltf_accessor* timeAccessor = channel->sampler->input;
             gltfChannel.times.resize(timeAccessor->count);
-            cgltf_accessor_read_float(timeAccessor, 0, gltfChannel.times.data(), timeAccessor->count);
+            if (timeAccessor->component_type == cgltf_component_type_r_32f) {
+                for (size_t i = 0; i < timeAccessor->count; ++i) {
+                    if (!cgltf_accessor_read_float(timeAccessor, i, &gltfChannel.times[i], 1)) {
+                        std::cerr << "Failed to read animation time at index " << i << std::endl;
+                        break;
+                    }
+                }
+            } else {
+                std::cerr << "Unsupported time accessor component type: " << timeAccessor->component_type << std::endl;
+            }
             // Values
             cgltf_accessor* valueAccessor = channel->sampler->output;
             if (gltfChannel.type == GLTFAnimationChannel::Translation)
@@ -580,6 +543,82 @@ void Model::LoadAnimations()
                 }
             }
         }
+    }
+}
+
+void Model::UpdateAnimation(float deltaTime)
+{
+    if (!m_CurrentAnimation)
+        return;
+
+    m_AnimationTime += deltaTime;
+
+    // For simplicity, loop the animation
+    float animDuration = 0.0f;
+    for (auto& channel : m_CurrentAnimation->channels)
+    {
+        if (!channel.times.empty())
+            animDuration = std::max(animDuration, channel.times.back());
+    }
+    if (animDuration > 0.0f)
+        m_AnimationTime = fmod(m_AnimationTime, animDuration);
+
+    // Update each channel
+    for (auto& channel : m_CurrentAnimation->channels)
+    {
+        if (channel.times.empty())
+            continue;
+
+        // Find the two keyframes
+        size_t key0 = 0, key1 = 0;
+        for (size_t i = 0; i < channel.times.size() - 1; ++i)
+        {
+            if (m_AnimationTime >= channel.times[i] && m_AnimationTime <= channel.times[i + 1])
+            {
+                key0 = i;
+                key1 = i + 1;
+                break;
+            }
+        }
+
+        float t0 = channel.times[key0];
+        float t1 = channel.times[key1];
+        float factor = (m_AnimationTime - t0) / (t1 - t0);
+        factor = std::clamp(factor, 0.0f, 1.0f);
+
+        if (channel.type == GLTFAnimationChannel::Translation)
+        {
+            DirectX::XMFLOAT3 v0 = channel.translations[key0];
+            DirectX::XMFLOAT3 v1 = channel.translations[key1];
+            channel.targetNode->translation.x = v0.x + (v1.x - v0.x) * factor;
+            channel.targetNode->translation.y = v0.y + (v1.y - v0.y) * factor;
+            channel.targetNode->translation.z = v0.z + (v1.z - v0.z) * factor;
+        }
+        else if (channel.type == GLTFAnimationChannel::Rotation)
+        {
+            DirectX::XMFLOAT4 q0 = channel.rotations[key0];
+            DirectX::XMFLOAT4 q1 = channel.rotations[key1];
+            // Simple linear interpolation for testing
+            channel.targetNode->rotation.x = q0.x + (q1.x - q0.x) * factor;
+            channel.targetNode->rotation.y = q0.y + (q1.y - q0.y) * factor;
+            channel.targetNode->rotation.z = q0.z + (q1.z - q0.z) * factor;
+            channel.targetNode->rotation.w = q0.w + (q1.w - q0.w) * factor;
+        }
+        else if (channel.type == GLTFAnimationChannel::Scale)
+        {
+            DirectX::XMFLOAT3 v0 = channel.scales[key0];
+            DirectX::XMFLOAT3 v1 = channel.scales[key1];
+            channel.targetNode->scale.x = v0.x + (v1.x - v0.x) * factor;
+            channel.targetNode->scale.y = v0.y + (v1.y - v0.y) * factor;
+            channel.targetNode->scale.z = v0.z + (v1.z - v0.z) * factor;
+        }
+
+        // Recompute matrix
+        DirectX::XMMATRIX t = DirectX::XMMatrixTranslation(channel.targetNode->translation.x, channel.targetNode->translation.y, channel.targetNode->translation.z);
+        DirectX::XMMATRIX r = DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(channel.targetNode->rotation.x, channel.targetNode->rotation.y, channel.targetNode->rotation.z, channel.targetNode->rotation.w));
+        DirectX::XMMATRIX s = DirectX::XMMatrixScaling(channel.targetNode->scale.x, channel.targetNode->scale.y, channel.targetNode->scale.z);
+        DirectX::XMMATRIX m = s * r * t;
+        DirectX::XMStoreFloat4x4(&channel.targetNode->transform, m);
     }
 }
 
@@ -699,6 +738,8 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
 
         device->CreateShaderResourceView(gltfTex.resource.Get(), &srvDesc, srvHandle);
 
+        gltfTex.srvHandle = CD3DX12_GPU_DESCRIPTOR_HANDLE(srvHeapStart).Offset(gltfTex.srvIndex, srvDescriptorSize);
+
         // Clean up
         delete gltfTex.image;
         gltfTex.image = nullptr;
@@ -719,4 +760,57 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     CloseHandle(eventHandle);
 
     // The command list remains closed; BeginFrame will reset it
+}
+
+void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer)
+{
+    // Bind Material CB
+    commandList->SetGraphicsRootConstantBufferView(1, renderer->GetMaterialCB()->GetGPUVirtualAddress());
+
+    for (auto* rootNode : m_GltfModel.rootNodes)
+    {
+        RenderNode(commandList, rootNode, DirectX::XMMatrixIdentity(), renderer);
+    }
+}
+
+void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer)
+{
+    DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
+
+    if (node->mesh)
+    {
+        // Update Material CB
+        MaterialConstants matCB;
+        matCB.baseColorFactor.x = node->mesh->material.baseColorFactor[0];
+        matCB.baseColorFactor.y = node->mesh->material.baseColorFactor[1];
+        matCB.baseColorFactor.z = node->mesh->material.baseColorFactor[2];
+        matCB.baseColorFactor.w = node->mesh->material.baseColorFactor[3];
+        matCB.metallicFactor = node->mesh->material.metallicFactor;
+        matCB.roughnessFactor = node->mesh->material.roughnessFactor;
+        matCB.hasBaseColorTexture = node->mesh->material.baseColorTexture ? 1 : 0;
+        renderer->UpdateMaterialCB(matCB);
+
+        // Set world matrix as root constants
+        float worldFloats[16];
+        DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
+        commandList->SetGraphicsRoot32BitConstants(2, 16, worldFloats, 0);
+
+        commandList->SetGraphicsRootConstantBufferView(1, renderer->GetMaterialCB()->GetGPUVirtualAddress());
+
+        // Set texture descriptor table if has texture
+        if (node->mesh->material.baseColorTexture)
+        {
+            commandList->SetGraphicsRootDescriptorTable(3, node->mesh->material.baseColorTexture->srvHandle);
+        }
+
+        // Render the mesh
+        commandList->IASetVertexBuffers(0, 1, &node->mesh->vertexBufferView);
+        commandList->IASetIndexBuffer(&node->mesh->indexBufferView);
+        commandList->DrawIndexedInstanced(static_cast<UINT>(node->mesh->indices.size()), 1, 0, 0, 0);
+    }
+
+    for (auto* child : node->children)
+    {
+        RenderNode(commandList, child, world, renderer);
+    }
 }

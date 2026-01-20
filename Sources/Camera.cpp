@@ -9,7 +9,7 @@ Camera::Camera()
     , m_LookDirection(0.0f, 0.0f, 1.0f)
     , m_UpDirection(0.0f, 1.0f, 0.0f)
     , m_MoveSpeed(5.0f)
-    , m_RotationSpeed(0.005f)
+    , m_RotationSpeed(0.0005f)
     , m_ZoomSpeed(2.0f)
     , m_CameraModeActive(false)
 {

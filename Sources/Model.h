@@ -8,8 +8,9 @@
 #include <DirectXMath.h>
 #include <DirectXTex.h>
 
-// Forward declarations for cgltf
+// Forward declarations
 struct cgltf_data;
+class Renderer;
 
 // Material constants matching the shader
 struct MaterialConstants
@@ -31,6 +32,7 @@ struct GLTFTexture
 {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     UINT srvIndex = UINT(-1); // Descriptor index
+    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle;
     DirectX::ScratchImage* image = nullptr;
 };
 
@@ -62,6 +64,10 @@ struct GLTFNode
     std::vector<GLTFNode*> children;
     DirectX::XMFLOAT4X4 transform;
     GLTFNode* parent = nullptr;
+    // TRS for animation
+    DirectX::XMFLOAT3 translation = {0.0f, 0.0f, 0.0f};
+    DirectX::XMFLOAT4 rotation = {0.0f, 0.0f, 0.0f, 1.0f};
+    DirectX::XMFLOAT3 scale = {1.0f, 1.0f, 1.0f};
 };
 
 struct GLTFAnimationChannel
@@ -98,7 +104,8 @@ public:
     ~Model();
 
     bool LoadGLTFModel(ID3D12Device* device, const std::string& filepath);
-    void Render(ID3D12GraphicsCommandList* commandList);
+    void UpdateAnimation(float deltaTime);
+    void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer);
     void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, ID3D12DescriptorHeap* srvHeap);
 
     // Prevent copying
@@ -107,7 +114,7 @@ public:
 
 private:
     void CreateGLTFResources(ID3D12Device* device);
-    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer);    
     void LoadTextures(ID3D12Device* device);
     void BuildNodeHierarchy();
     void LoadAnimations();
@@ -116,4 +123,7 @@ private:
     std::wstring fileDirectory;
     CD3DX12_GPU_DESCRIPTOR_HANDLE srvHeapStart;
     UINT srvDescriptorSize;
+    // Animation
+    GLTFAnimation* m_CurrentAnimation = nullptr;
+    float m_AnimationTime = 0.0f;
 };

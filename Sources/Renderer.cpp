@@ -183,10 +183,8 @@ bool Renderer::Initialize(HWND hwnd)
         m_Device->CreateDepthStencilView(m_DepthStencilBuffer.Get(), nullptr, m_DSVHeap->GetCPUDescriptorHandleForHeapStart());
     }
 
-    // Create constant buffer for view-projection matrix
-    {
-        const UINT constantBufferSize = sizeof(float) * 16; // 4x4 matrix
-
+    // Create constant buffers
+    auto createCB = [&](Microsoft::WRL::ComPtr<ID3D12Resource>& cb, void*& data, size_t size) {
         D3D12_HEAP_PROPERTIES heapProps = {};
         heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
         heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
@@ -195,7 +193,7 @@ bool Renderer::Initialize(HWND hwnd)
         D3D12_RESOURCE_DESC resourceDesc = {};
         resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         resourceDesc.Alignment = 0;
-        resourceDesc.Width = constantBufferSize;
+        resourceDesc.Width = size;
         resourceDesc.Height = 1;
         resourceDesc.DepthOrArraySize = 1;
         resourceDesc.MipLevels = 1;
@@ -211,7 +209,7 @@ bool Renderer::Initialize(HWND hwnd)
             &resourceDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ,
             nullptr,
-            IID_PPV_ARGS(&m_ConstantBuffer)
+            IID_PPV_ARGS(&cb)
         );
         if (FAILED(hr))
         {
@@ -221,13 +219,17 @@ bool Renderer::Initialize(HWND hwnd)
 
         // Map the constant buffer
         D3D12_RANGE readRange = { 0, 0 };
-        hr = m_ConstantBuffer->Map(0, &readRange, &m_ConstantBufferData);
+        hr = cb->Map(0, &readRange, &data);
         if (FAILED(hr))
         {
             std::cerr << "Map constant buffer failed" << std::endl;
             return false;
         }
-    }
+        return true;
+    };
+
+    if (!createCB(m_FrameCB, m_FrameCBData, sizeof(float) * 16)) return false; // viewProj
+    if (!createCB(m_MaterialCB, m_MaterialCBData, sizeof(MaterialConstants))) return false;
 
     // Create SRV descriptor heap for textures
     {
@@ -295,11 +297,16 @@ void Renderer::Shutdown()
     // Wait for the GPU to be done with all resources
     WaitForPreviousFrame();
 
-    // Cleanup constant buffer
-    if (m_ConstantBuffer && m_ConstantBufferData)
+    // Cleanup constant buffers
+    if (m_FrameCB && m_FrameCBData)
     {
-        m_ConstantBuffer->Unmap(0, nullptr);
-        m_ConstantBufferData = nullptr;
+        m_FrameCB->Unmap(0, nullptr);
+        m_FrameCBData = nullptr;
+    }
+    if (m_MaterialCB && m_MaterialCBData)
+    {
+        m_MaterialCB->Unmap(0, nullptr);
+        m_MaterialCBData = nullptr;
     }
 
     if (m_FenceEvent)
@@ -339,8 +346,8 @@ void Renderer::BeginFrame()
     ID3D12DescriptorHeap* heaps[] = { m_SRVHeap.Get() };
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
-    // Set constant buffer (view-projection matrix)
-    m_CommandList->SetGraphicsRootConstantBufferView(0, m_ConstantBuffer->GetGPUVirtualAddress());
+    // Set Frame constant buffer (viewProj)
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB->GetGPUVirtualAddress());
 
     m_CommandList->RSSetViewports(1, &CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT)));
     m_CommandList->RSSetScissorRects(1, &CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT));
@@ -425,26 +432,32 @@ void Renderer::CreateRootSignature()
     textureRange.RegisterSpace = 0;
     textureRange.OffsetInDescriptorsFromTableStart = 0;
 
-    D3D12_ROOT_PARAMETER rootParameters[3] = {};
+    D3D12_ROOT_PARAMETER rootParameters[4] = {};
 
-    // View-projection matrix
+    // Frame CB: viewProj
     rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     rootParameters[0].Descriptor.ShaderRegister = 0;  // b0
     rootParameters[0].Descriptor.RegisterSpace = 0;
     rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    // Material constants (baseColorFactor, metallic, roughness, hasTexture)
-    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[1].Constants.ShaderRegister = 1;  // b1
-    rootParameters[1].Constants.RegisterSpace = 0;
-    rootParameters[1].Constants.Num32BitValues = 8;  // 4 for float4 + 2 floats + 2 UINTs
+    // Material CB
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameters[1].Descriptor.ShaderRegister = 1;  // b1
+    rootParameters[1].Descriptor.RegisterSpace = 0;
     rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // Mesh constants: world matrix (16 floats)
+    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParameters[2].Constants.ShaderRegister = 2;  // b2
+    rootParameters[2].Constants.RegisterSpace = 0;
+    rootParameters[2].Constants.Num32BitValues = 16;
+    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
     // Base color texture descriptor table
-    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[2].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[2].DescriptorTable.pDescriptorRanges = &textureRange;
-    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[3].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[3].DescriptorTable.pDescriptorRanges = &textureRange;
+    rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // Static sampler
     D3D12_STATIC_SAMPLER_DESC sampler = {};
@@ -652,25 +665,16 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
     return compiledShader;
 }
 
-void Renderer::UpdateViewProjectionMatrix(const DirectX::XMMATRIX& viewMatrix)
+void Renderer::UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix)
 {
-    float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
-    float fovY = 45.0f * (3.14159265359f / 180.0f); // 45 degrees in radians
-    float nearZ = 0.1f;
-    float farZ = 1000.0f;
+    float viewProj[16];
+    DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(viewProj), viewProjMatrix);
+    memcpy(m_FrameCBData, viewProj, sizeof(viewProj));
+}
 
-    // Create projection matrix (left-handed perspective)
-    DirectX::XMMATRIX projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(fovY, aspectRatio, nearZ, farZ);
-
-    // Combine view and projection matrices (view * projection)
-    DirectX::XMMATRIX viewProjectionMatrix = DirectX::XMMatrixMultiply(viewMatrix, projectionMatrix);
-
-    // Store as float array for constant buffer
-    float viewProjection[16];
-    DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(viewProjection), viewProjectionMatrix);
-
-    // Update constant buffer
-    memcpy(m_ConstantBufferData, viewProjection, sizeof(viewProjection));
+void Renderer::UpdateMaterialCB(const MaterialConstants& material)
+{
+    memcpy(m_MaterialCBData, &material, sizeof(MaterialConstants));
 }
 
 void Renderer::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)

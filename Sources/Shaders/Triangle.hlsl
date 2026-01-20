@@ -19,19 +19,26 @@ struct PSOutput
     float4 color : SV_TARGET;
 };
 
-// Simple view-projection matrix for 3D rendering
-cbuffer ViewProjection : register(b0)
+// Frame constant buffer - shared per frame
+cbuffer FrameCB : register(b0)
 {
-    row_major float4x4 viewProjection;
+    row_major float4x4 viewProj;
 };
 
-// Material constants
-cbuffer MaterialConstants : register(b1)
+// Material constant buffer - per material
+cbuffer MaterialCB : register(b1)
 {
     float4 baseColorFactor;
     float metallicFactor;
     float roughnessFactor;
     uint hasBaseColorTexture;
+    uint padding[1]; // Pad to 16 bytes
+};
+
+// Mesh constant buffer - per mesh
+cbuffer MeshCB : register(b2)
+{
+    row_major float4x4 world;
 };
 
 // Textures
@@ -43,8 +50,8 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
 
-    // Transform position to clip space
-    output.position = mul(float4(input.position, 1.0f), viewProjection);
+    // Transform position to clip space: world * viewProj
+    output.position = mul(float4(input.position, 1.0f), mul(world, viewProj));
 
     // Transform normal (simplified - assumes no non-uniform scaling)
     output.normal = input.normal;
