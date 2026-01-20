@@ -229,7 +229,6 @@ bool Renderer::Initialize(HWND hwnd)
     };
 
     if (!createCB(m_FrameCB, m_FrameCBData, sizeof(float) * 16)) return false; // viewProj
-    if (!createCB(m_MaterialCB, m_MaterialCBData, sizeof(MaterialConstants))) return false;
 
     // Create SRV descriptor heap for textures
     {
@@ -303,11 +302,6 @@ void Renderer::Shutdown()
         m_FrameCB->Unmap(0, nullptr);
         m_FrameCBData = nullptr;
     }
-    if (m_MaterialCB && m_MaterialCBData)
-    {
-        m_MaterialCB->Unmap(0, nullptr);
-        m_MaterialCBData = nullptr;
-    }
 
     if (m_FenceEvent)
     {
@@ -341,6 +335,17 @@ void Renderer::BeginFrame()
 
     // Set necessary state
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
+
+    // Set pipeline state
+    if (m_PipelineState)
+    {
+        m_CommandList->SetPipelineState(m_PipelineState.Get());
+    }
+    else
+    {
+        std::cerr << "Pipeline state is null - rendering will fail" << std::endl;
+        return;
+    }
 
     // Set descriptor heaps
     ID3D12DescriptorHeap* heaps[] = { m_SRVHeap.Get() };
@@ -440,15 +445,16 @@ void Renderer::CreateRootSignature()
     rootParameters[0].Descriptor.RegisterSpace = 0;
     rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    // Material CB
-    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameters[1].Descriptor.ShaderRegister = 1;  // b1
-    rootParameters[1].Descriptor.RegisterSpace = 0;
+    // Material constants: baseColorFactor, metallicFactor, roughnessFactor, hasBaseColorTexture
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParameters[1].Constants.ShaderRegister = 1;  // b1-b4
+    rootParameters[1].Constants.RegisterSpace = 0;
+    rootParameters[1].Constants.Num32BitValues = 8;  // 4 floats + 2 floats + 2 uints
     rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // Mesh constants: world matrix (16 floats)
     rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[2].Constants.ShaderRegister = 2;  // b2
+    rootParameters[2].Constants.ShaderRegister = 3;  // b3
     rootParameters[2].Constants.RegisterSpace = 0;
     rootParameters[2].Constants.Num32BitValues = 16;
     rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -504,6 +510,12 @@ void Renderer::CreatePipelineState()
     std::vector<char> vertexShader = CompileShader("Shaders/Triangle.hlsl", "VSMain", "vs_6_0");
     std::vector<char> pixelShader = CompileShader("Shaders/Triangle.hlsl", "PSMain", "ps_6_0");
 
+    if (vertexShader.empty() || pixelShader.empty())
+    {
+        std::cerr << "Shader compilation failed - vertex: " << vertexShader.size() << " bytes, pixel: " << pixelShader.size() << " bytes" << std::endl;
+        return;
+    }
+
     // Define input layout for GLTF models
     D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
     {
@@ -539,7 +551,12 @@ void Renderer::CreatePipelineState()
     HRESULT hr = m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PipelineState));
     if (FAILED(hr))
     {
-        std::cerr << "CreateGraphicsPipelineState failed" << std::endl;
+        std::cerr << "CreateGraphicsPipelineState failed with error: " << std::hex << hr << std::endl;
+        return;
+    }
+    else
+    {
+        std::cout << "Pipeline state created successfully" << std::endl;
     }
 }
 
@@ -670,11 +687,6 @@ void Renderer::UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix)
     float viewProj[16];
     DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(viewProj), viewProjMatrix);
     memcpy(m_FrameCBData, viewProj, sizeof(viewProj));
-}
-
-void Renderer::UpdateMaterialCB(const MaterialConstants& material)
-{
-    memcpy(m_MaterialCBData, &material, sizeof(MaterialConstants));
 }
 
 void Renderer::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)

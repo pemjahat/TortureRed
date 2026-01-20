@@ -19,6 +19,11 @@ public:
     DirectX::XMMATRIX GetViewMatrix() const;
     DirectX::XMFLOAT3 GetPosition() const { return m_Position; }
 
+    // Projection matrix
+    void SetProjectionParameters(float fovY, float aspectRatio, float nearZ, float farZ);
+    DirectX::XMMATRIX GetProjMatrix() const;
+    DirectX::XMMATRIX GetInvViewMatrix() const;
+
     // Camera control state
     void SetCameraMode(bool active) { m_CameraModeActive = active; }
     bool IsCameraModeActive() const { return m_CameraModeActive; }
@@ -39,6 +44,12 @@ private:
     // Camera mode state
     bool m_CameraModeActive;
     bool m_Keys[4]; // W, S, A, D
+
+    // Projection parameters
+    float m_FovY;
+    float m_AspectRatio;
+    float m_NearZ;
+    float m_FarZ;
 
     // Update vectors based on current rotation
     DirectX::XMVECTOR GetForwardVector() const;

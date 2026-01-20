@@ -38,7 +38,6 @@ public:
 
     // Constant buffer management
     void UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix);
-    void UpdateMaterialCB(const MaterialConstants& material);
 
     // Getters
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -48,7 +47,6 @@ public:
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return m_PipelineState.Get(); }
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
-    ID3D12Resource* GetMaterialCB() const { return m_MaterialCB.Get(); }
 
     void ExecuteCommandList();
 
@@ -81,8 +79,6 @@ private:
     // Constant Buffers
     Microsoft::WRL::ComPtr<ID3D12Resource> m_FrameCB;
     void* m_FrameCBData = nullptr;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_MaterialCB;
-    void* m_MaterialCBData = nullptr;
 
     // Synchronization
     UINT m_FrameIndex;

@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <DirectXMath.h>
+#include <DirectXCollision.h>
 #include <DirectXTex.h>
 
 // Forward declarations
@@ -21,6 +22,12 @@ struct MaterialConstants
     UINT hasBaseColorTexture;
     UINT padding[1]; // Pad to 16 bytes
 };
+
+struct InstanceData
+{
+    DirectX::XMFLOAT4X4 transform;
+};
+
 struct GLTFVertex
 {
     float position[3];
@@ -55,6 +62,9 @@ struct GLTFMesh
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView;
     Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
     D3D12_INDEX_BUFFER_VIEW indexBufferView;
+    Microsoft::WRL::ComPtr<ID3D12Resource> vertexStaging;
+    Microsoft::WRL::ComPtr<ID3D12Resource> indexStaging;
+    DirectX::BoundingBox aabb;
 };
 
 struct GLTFNode
@@ -64,6 +74,7 @@ struct GLTFNode
     std::vector<GLTFNode*> children;
     DirectX::XMFLOAT4X4 transform;
     GLTFNode* parent = nullptr;
+    DirectX::BoundingBox worldAabb;
     // TRS for animation
     DirectX::XMFLOAT3 translation = {0.0f, 0.0f, 0.0f};
     DirectX::XMFLOAT4 rotation = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -105,8 +116,13 @@ public:
 
     bool LoadGLTFModel(ID3D12Device* device, const std::string& filepath);
     void UpdateAnimation(float deltaTime);
-    void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer);
+    void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum);
     void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, ID3D12DescriptorHeap* srvHeap);
+
+    // Getters for debug counters
+    size_t GetTotalNodes() const { return m_TotalNodes; }
+    size_t GetTotalRootNodes() const { return m_TotalRootNodes; }
+    size_t GetNodesSurviveFrustum() const { return m_NodesSurviveFrustum; }
 
     // Prevent copying
     Model(const Model&) = delete;
@@ -114,7 +130,8 @@ public:
 
 private:
     void CreateGLTFResources(ID3D12Device* device);
-    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer);    
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum);
+    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(ID3D12Device* device);
     void BuildNodeHierarchy();
     void LoadAnimations();
@@ -126,4 +143,9 @@ private:
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;
     float m_AnimationTime = 0.0f;
+
+    // Debug counters
+    size_t m_TotalNodes = 0;
+    size_t m_TotalRootNodes = 0;
+    size_t m_NodesSurviveFrustum = 0;
 };

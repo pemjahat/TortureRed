@@ -4,6 +4,7 @@
 #include <iostream>
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
+#include <DirectXCollision.h>
 
 const char* WINDOW_TITLE = "TortureRed";
 
@@ -67,7 +68,15 @@ void Application::Initialize()
 
     CHECK_BOOL(m_Renderer.Initialize(hwnd), "Renderer initialization failed");
 
+    // Set camera projection parameters
+    float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
+    float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
+    float nearZ = 0.1f;
+    float farZ = 1000.0f;
+    m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
+
     // Load GLTF model
+    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/FlyingWorld/FlyingWorld-BattleOfTheTrashGod.gltf"))
     if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
@@ -176,6 +185,9 @@ void Application::ProcessEvents()
                 int mouseX, mouseY;
                 SDL_GetRelativeMouseState(&mouseX, &mouseY);
                 m_Camera.ProcessMouseMovement(static_cast<float>(mouseX), static_cast<float>(mouseY));
+
+                // Keep mouse cursor centered to prevent hitting screen edges
+                SDL_WarpMouseInWindow(m_Window, WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2);
             }
             break;
 
@@ -208,11 +220,7 @@ void Application::Update(float deltaTime)
 
     // Compute view-projection matrix
     DirectX::XMMATRIX view = m_Camera.GetViewMatrix();
-    float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
-    float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
-    float nearZ = 0.1f;
-    float farZ = 1000.0f;
-    DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(fovY, aspectRatio, nearZ, farZ);
+    DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
     m_ViewProj = view * proj;
 
     // Update Frame CB
@@ -224,8 +232,18 @@ void Application::Render()
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
+    // Compute frustum for culling
+    //DirectX::BoundingFrustum frustum;
+    //DirectX::BoundingFrustum::CreateFromMatrix(frustum, m_ViewProj, false);
+    DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
+    DirectX::BoundingFrustum frustum(proj, false);
+
+    // Transform frustum to world space (inverse view matrix)
+    DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
+    frustum.Transform(frustum, invView);
+
     // Render GLTF model
-    m_Model.Render(m_Renderer.GetCommandList(), &m_Renderer);
+    m_Model.Render(m_Renderer.GetCommandList(), &m_Renderer, frustum);
 
     // Start the Dear ImGui frame
     ImGui_ImplDX12_NewFrame();
@@ -269,6 +287,11 @@ void Application::RenderImGui()
     }
 
     ImGui::Text("FPS: %.1f", fps);
+
+    // Debug values from Model
+    ImGui::Text("Total Nodes Read: %zu", m_Model.GetTotalNodes());
+    ImGui::Text("Total Root Nodes: %zu", m_Model.GetTotalRootNodes());
+    ImGui::Text("Nodes Survive Frustum: %zu", m_Model.GetNodesSurviveFrustum());
 
     ImGui::End();
 }

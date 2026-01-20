@@ -12,6 +12,10 @@ Camera::Camera()
     , m_RotationSpeed(0.0005f)
     , m_ZoomSpeed(2.0f)
     , m_CameraModeActive(false)
+    , m_FovY(XM_PI / 3.0f)  // 60 degrees default
+    , m_AspectRatio(16.0f / 9.0f)
+    , m_NearZ(0.1f)
+    , m_FarZ(1000.0f)
 {
     m_Keys[0] = m_Keys[1] = m_Keys[2] = m_Keys[3] = false;
 }
@@ -96,4 +100,23 @@ DirectX::XMVECTOR Camera::GetRightVector() const
     XMVECTOR look = XMLoadFloat3(&m_LookDirection);
     XMVECTOR up = XMLoadFloat3(&m_UpDirection);
     return XMVector3Cross(look, up);
+}
+
+void Camera::SetProjectionParameters(float fovY, float aspectRatio, float nearZ, float farZ)
+{
+    m_FovY = fovY;
+    m_AspectRatio = aspectRatio;
+    m_NearZ = nearZ;
+    m_FarZ = farZ;
+}
+
+DirectX::XMMATRIX Camera::GetProjMatrix() const
+{
+    return XMMatrixPerspectiveFovLH(m_FovY, m_AspectRatio, m_NearZ, m_FarZ);
+}
+
+DirectX::XMMATRIX Camera::GetInvViewMatrix() const
+{
+    XMMATRIX view = GetViewMatrix();
+    return XMMatrixInverse(nullptr, view);
 }
