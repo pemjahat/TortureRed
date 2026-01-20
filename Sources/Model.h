@@ -53,7 +53,7 @@ struct GLTFMaterial
     // Add more as needed
 };
 
-struct GLTFMesh
+struct GLTFPrimitive
 {
     std::vector<GLTFVertex> vertices;
     std::vector<uint32_t> indices;
@@ -65,6 +65,12 @@ struct GLTFMesh
     Microsoft::WRL::ComPtr<ID3D12Resource> vertexStaging;
     Microsoft::WRL::ComPtr<ID3D12Resource> indexStaging;
     DirectX::BoundingBox aabb;
+};
+
+struct GLTFMesh
+{
+    std::string name;
+    std::vector<GLTFPrimitive> primitives;
 };
 
 struct GLTFNode

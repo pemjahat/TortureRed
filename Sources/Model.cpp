@@ -68,18 +68,20 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
 
     LoadTextures(device);
 
+    m_GltfModel.meshes.reserve(m_GltfModel.data->meshes_count);
+
     // Process meshes
     for (size_t i = 0; i < m_GltfModel.data->meshes_count; ++i)
     {
         cgltf_mesh* mesh = &m_GltfModel.data->meshes[i];
+        GLTFMesh gltfMesh;
+        if (mesh->name) gltfMesh.name = mesh->name;
 
         for (size_t j = 0; j < mesh->primitives_count; ++j)
         {
             cgltf_primitive* primitive = &mesh->primitives[j];
 
-            GLTFMesh gltfMesh;
-            gltfMesh.vertices.clear();
-            gltfMesh.indices.clear();
+            GLTFPrimitive gltfPrim;
 
             // Process material
             if (primitive->material)
@@ -88,20 +90,20 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 if (material->has_pbr_metallic_roughness)
                 {
                     // Base color factor
-                    memcpy(gltfMesh.material.baseColorFactor,
+                    memcpy(gltfPrim.material.baseColorFactor,
                            material->pbr_metallic_roughness.base_color_factor,
                            sizeof(float) * 4);
 
                     // Metallic and roughness factors
-                    gltfMesh.material.metallicFactor = material->pbr_metallic_roughness.metallic_factor;
-                    gltfMesh.material.roughnessFactor = material->pbr_metallic_roughness.roughness_factor;
+                    gltfPrim.material.metallicFactor = material->pbr_metallic_roughness.metallic_factor;
+                    gltfPrim.material.roughnessFactor = material->pbr_metallic_roughness.roughness_factor;
 
                     // Base color texture
                     if (material->pbr_metallic_roughness.base_color_texture.texture)
                     {
                         size_t texIndex = material->pbr_metallic_roughness.base_color_texture.texture - m_GltfModel.data->textures;
                         if (texIndex < m_GltfModel.textures.size())
-                            gltfMesh.material.baseColorTexture = &m_GltfModel.textures[texIndex];
+                            gltfPrim.material.baseColorTexture = &m_GltfModel.textures[texIndex];
                     }
                 }
 
@@ -110,7 +112,7 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 {
                     size_t texIndex = material->normal_texture.texture - m_GltfModel.data->textures;
                     if (texIndex < m_GltfModel.textures.size())
-                        gltfMesh.material.normalTexture = &m_GltfModel.textures[texIndex];
+                        gltfPrim.material.normalTexture = &m_GltfModel.textures[texIndex];
                 }
             }
 
@@ -144,12 +146,12 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
 
             // Read vertices
             size_t vertexCount = positionAccessor->count;
-            gltfMesh.vertices.resize(vertexCount);
+            gltfPrim.vertices.resize(vertexCount);
 
             // Read positions
             for (size_t k = 0; k < vertexCount; ++k)
             {
-                if (!cgltf_accessor_read_float(positionAccessor, k, gltfMesh.vertices[k].position, 3))
+                if (!cgltf_accessor_read_float(positionAccessor, k, gltfPrim.vertices[k].position, 3))
                 {
                     std::cerr << "Failed to read position data from GLTF buffer" << std::endl;
                     return false;
@@ -171,7 +173,7 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
             {
                 minPos = {FLT_MAX, FLT_MAX, FLT_MAX};
                 maxPos = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-                for (const auto& v : gltfMesh.vertices)
+                for (const auto& v : gltfPrim.vertices)
                 {
                     minPos.x = std::min(minPos.x, v.position[0]);
                     minPos.y = std::min(minPos.y, v.position[1]);
@@ -191,7 +193,7 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 (maxPos.y - minPos.y) * 0.5f,
                 (maxPos.z - minPos.z) * 0.5f
             };
-            gltfMesh.aabb = DirectX::BoundingBox(center, extents);
+            gltfPrim.aabb = DirectX::BoundingBox(center, extents);
 
             // Read normals (if available)
             if (normalAccessor)
@@ -199,7 +201,7 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 for (size_t k = 0; k < vertexCount; ++k)
                 {
                     cgltf_accessor_read_float(normalAccessor, k,
-                        gltfMesh.vertices[k].normal, 3);
+                        gltfPrim.vertices[k].normal, 3);
                 }
             }
             else
@@ -207,9 +209,9 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 // Generate default normals
                 for (size_t k = 0; k < vertexCount; ++k)
                 {
-                    gltfMesh.vertices[k].normal[0] = 0.0f;
-                    gltfMesh.vertices[k].normal[1] = 1.0f;
-                    gltfMesh.vertices[k].normal[2] = 0.0f;
+                    gltfPrim.vertices[k].normal[0] = 0.0f;
+                    gltfPrim.vertices[k].normal[1] = 1.0f;
+                    gltfPrim.vertices[k].normal[2] = 0.0f;
                 }
             }
 
@@ -219,7 +221,7 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 for (size_t k = 0; k < vertexCount; ++k)
                 {
                     cgltf_accessor_read_float(texCoordAccessor, k,
-                        gltfMesh.vertices[k].texCoord, 2);
+                        gltfPrim.vertices[k].texCoord, 2);
                 }
             }
             else
@@ -227,8 +229,8 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
                 // Generate default texture coordinates
                 for (size_t k = 0; k < vertexCount; ++k)
                 {
-                    gltfMesh.vertices[k].texCoord[0] = 0.0f;
-                    gltfMesh.vertices[k].texCoord[1] = 0.0f;
+                    gltfPrim.vertices[k].texCoord[0] = 0.0f;
+                    gltfPrim.vertices[k].texCoord[1] = 0.0f;
                 }
             }
 
@@ -236,17 +238,20 @@ bool Model::LoadGLTFModel(ID3D12Device* device, const std::string& filepath)
             if (primitive->indices)
             {
                 size_t indexCount = primitive->indices->count;
-                gltfMesh.indices.resize(indexCount);
+                gltfPrim.indices.resize(indexCount);
 
                 for (size_t k = 0; k < indexCount; ++k)
                 {
-                    gltfMesh.indices[k] = cgltf_accessor_read_index(primitive->indices, k);
+                    gltfPrim.indices[k] = cgltf_accessor_read_index(primitive->indices, k);
                 }
             }
 
-            m_GltfModel.meshes.push_back(gltfMesh);
+            gltfMesh.primitives.push_back(std::move(gltfPrim));
         }
+
+        m_GltfModel.meshes.push_back(std::move(gltfMesh));
     }
+
 
     std::cout << "Successfully loaded GLTF model: " << filepath << " (" << m_GltfModel.meshes.size() << " meshes)" << std::endl;
 
@@ -265,148 +270,151 @@ void Model::CreateGLTFResources(ID3D12Device* device)
 {
     for (auto& mesh : m_GltfModel.meshes)
     {
-        if (mesh.vertices.empty())
-            continue;
-
-        // Create vertex buffer in default heap
+        for (auto& prim : mesh.primitives)
         {
-            const UINT vertexBufferSize = static_cast<UINT>(mesh.vertices.size() * sizeof(GLTFVertex));
+            if (prim.vertices.empty())
+                continue;
 
-            D3D12_HEAP_PROPERTIES heapProps = {};
-            heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-            heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-            heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
-            D3D12_RESOURCE_DESC resourceDesc = {};
-            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            resourceDesc.Alignment = 0;
-            resourceDesc.Width = vertexBufferSize;
-            resourceDesc.Height = 1;
-            resourceDesc.DepthOrArraySize = 1;
-            resourceDesc.MipLevels = 1;
-            resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-            resourceDesc.SampleDesc.Count = 1;
-            resourceDesc.SampleDesc.Quality = 0;
-            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-            HRESULT hr = device->CreateCommittedResource(
-                &heapProps,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                nullptr,
-                IID_PPV_ARGS(&mesh.vertexBuffer)
-            );
-            if (FAILED(hr))
+            // Create vertex buffer in default heap
             {
-                std::cerr << "CreateCommittedResource for vertex buffer failed" << std::endl;
-                return;
+                const UINT vertexBufferSize = static_cast<UINT>(prim.vertices.size() * sizeof(GLTFVertex));
+
+                D3D12_HEAP_PROPERTIES heapProps = {};
+                heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+                heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+                D3D12_RESOURCE_DESC resourceDesc = {};
+                resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                resourceDesc.Alignment = 0;
+                resourceDesc.Width = vertexBufferSize;
+                resourceDesc.Height = 1;
+                resourceDesc.DepthOrArraySize = 1;
+                resourceDesc.MipLevels = 1;
+                resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+                resourceDesc.SampleDesc.Count = 1;
+                resourceDesc.SampleDesc.Quality = 0;
+                resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+                HRESULT hr = device->CreateCommittedResource(
+                    &heapProps,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resourceDesc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    nullptr,
+                    IID_PPV_ARGS(&prim.vertexBuffer)
+                );
+                if (FAILED(hr))
+                {
+                    std::cerr << "CreateCommittedResource for vertex buffer failed" << std::endl;
+                    return;
+                }
+
+                // Create staging buffer
+                heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+                hr = device->CreateCommittedResource(
+                    &heapProps,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resourceDesc,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    nullptr,
+                    IID_PPV_ARGS(&prim.vertexStaging)
+                );
+                if (FAILED(hr))
+                {
+                    std::cerr << "CreateCommittedResource for vertex staging failed" << std::endl;
+                    return;
+                }
+
+                // Copy vertex data to staging
+                UINT8* pVertexDataBegin;
+                D3D12_RANGE readRange = { 0, 0 };
+                hr = prim.vertexStaging->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin));
+                if (FAILED(hr))
+                {
+                    std::cerr << "Map vertex staging failed" << std::endl;
+                    return;
+                }
+                memcpy(pVertexDataBegin, prim.vertices.data(), vertexBufferSize);
+                prim.vertexStaging->Unmap(0, nullptr);
+
+                // Initialize vertex buffer view
+                prim.vertexBufferView.BufferLocation = prim.vertexBuffer->GetGPUVirtualAddress();
+                prim.vertexBufferView.StrideInBytes = sizeof(GLTFVertex);
+                prim.vertexBufferView.SizeInBytes = vertexBufferSize;
             }
 
-            // Create staging buffer
-            heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-            hr = device->CreateCommittedResource(
-                &heapProps,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&mesh.vertexStaging)
-            );
-            if (FAILED(hr))
+            // Create index buffer (if indices exist)
+            if (!prim.indices.empty())
             {
-                std::cerr << "CreateCommittedResource for vertex staging failed" << std::endl;
-                return;
+                const UINT indexBufferSize = static_cast<UINT>(prim.indices.size() * sizeof(uint32_t));
+
+                D3D12_HEAP_PROPERTIES heapProps = {};
+                heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+                heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+                D3D12_RESOURCE_DESC resourceDesc = {};
+                resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                resourceDesc.Alignment = 0;
+                resourceDesc.Width = indexBufferSize;
+                resourceDesc.Height = 1;
+                resourceDesc.DepthOrArraySize = 1;
+                resourceDesc.MipLevels = 1;
+                resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+                resourceDesc.SampleDesc.Count = 1;
+                resourceDesc.SampleDesc.Quality = 0;
+                resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+                HRESULT hr = device->CreateCommittedResource(
+                    &heapProps,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resourceDesc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    nullptr,
+                    IID_PPV_ARGS(&prim.indexBuffer)
+                );
+                if (FAILED(hr))
+                {
+                    std::cerr << "CreateCommittedResource for index buffer failed" << std::endl;
+                    return;
+                }
+
+                // Create staging buffer
+                heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+                hr = device->CreateCommittedResource(
+                    &heapProps,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resourceDesc,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    nullptr,
+                    IID_PPV_ARGS(&prim.indexStaging)
+                );
+                if (FAILED(hr))
+                {
+                    std::cerr << "CreateCommittedResource for index staging failed" << std::endl;
+                    return;
+                }
+
+                // Copy index data to staging
+                UINT8* pIndexDataBegin;
+                D3D12_RANGE readRange = { 0, 0 };
+                hr = prim.indexStaging->Map(0, &readRange, reinterpret_cast<void**>(&pIndexDataBegin));
+                if (FAILED(hr))
+                {
+                    std::cerr << "Map index staging failed" << std::endl;
+                    return;
+                }
+                memcpy(pIndexDataBegin, prim.indices.data(), indexBufferSize);
+                prim.indexStaging->Unmap(0, nullptr);
+
+                // Initialize index buffer view
+                prim.indexBufferView.BufferLocation = prim.indexBuffer->GetGPUVirtualAddress();
+                prim.indexBufferView.Format = DXGI_FORMAT_R32_UINT;
+                prim.indexBufferView.SizeInBytes = indexBufferSize;
             }
-
-            // Copy vertex data to staging
-            UINT8* pVertexDataBegin;
-            D3D12_RANGE readRange = { 0, 0 };
-            hr = mesh.vertexStaging->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin));
-            if (FAILED(hr))
-            {
-                std::cerr << "Map vertex staging failed" << std::endl;
-                return;
-            }
-            memcpy(pVertexDataBegin, mesh.vertices.data(), vertexBufferSize);
-            mesh.vertexStaging->Unmap(0, nullptr);
-
-            // Initialize vertex buffer view
-            mesh.vertexBufferView.BufferLocation = mesh.vertexBuffer->GetGPUVirtualAddress();
-            mesh.vertexBufferView.StrideInBytes = sizeof(GLTFVertex);
-            mesh.vertexBufferView.SizeInBytes = vertexBufferSize;
-        }
-
-        // Create index buffer (if indices exist)
-        if (!mesh.indices.empty())
-        {
-            const UINT indexBufferSize = static_cast<UINT>(mesh.indices.size() * sizeof(uint32_t));
-
-            D3D12_HEAP_PROPERTIES heapProps = {};
-            heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-            heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-            heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
-            D3D12_RESOURCE_DESC resourceDesc = {};
-            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            resourceDesc.Alignment = 0;
-            resourceDesc.Width = indexBufferSize;
-            resourceDesc.Height = 1;
-            resourceDesc.DepthOrArraySize = 1;
-            resourceDesc.MipLevels = 1;
-            resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-            resourceDesc.SampleDesc.Count = 1;
-            resourceDesc.SampleDesc.Quality = 0;
-            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-            HRESULT hr = device->CreateCommittedResource(
-                &heapProps,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                nullptr,
-                IID_PPV_ARGS(&mesh.indexBuffer)
-            );
-            if (FAILED(hr))
-            {
-                std::cerr << "CreateCommittedResource for index buffer failed" << std::endl;
-                return;
-            }
-
-            // Create staging buffer
-            heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-            hr = device->CreateCommittedResource(
-                &heapProps,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&mesh.indexStaging)
-            );
-            if (FAILED(hr))
-            {
-                std::cerr << "CreateCommittedResource for index staging failed" << std::endl;
-                return;
-            }
-
-            // Copy index data to staging
-            UINT8* pIndexDataBegin;
-            D3D12_RANGE readRange = { 0, 0 };
-            hr = mesh.indexStaging->Map(0, &readRange, reinterpret_cast<void**>(&pIndexDataBegin));
-            if (FAILED(hr))
-            {
-                std::cerr << "Map index staging failed" << std::endl;
-                return;
-            }
-            memcpy(pIndexDataBegin, mesh.indices.data(), indexBufferSize);
-            mesh.indexStaging->Unmap(0, nullptr);
-
-            // Initialize index buffer view
-            mesh.indexBufferView.BufferLocation = mesh.indexBuffer->GetGPUVirtualAddress();
-            mesh.indexBufferView.Format = DXGI_FORMAT_R32_UINT;
-            mesh.indexBufferView.SizeInBytes = indexBufferSize;
         }
     }
 }
@@ -489,7 +497,6 @@ void Model::BuildNodeHierarchy()
             gltfNode.name = node->name;
         if (node->mesh)
         {
-            // Assume meshes are in order, find index
             size_t meshIndex = node->mesh - m_GltfModel.data->meshes;
             if (meshIndex < m_GltfModel.meshes.size())
                 gltfNode.mesh = &m_GltfModel.meshes[meshIndex];
@@ -555,37 +562,53 @@ void Model::ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform)
 {
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
 
-    if (node->mesh)
-    {
-        // Transform the mesh AABB
-        DirectX::BoundingBox transformedAabb;
-        node->mesh->aabb.Transform(transformedAabb, world);
-        node->worldAabb = transformedAabb;
-    }
-    else
-    {
-        // Union of children's AABBs
-        DirectX::BoundingBox combinedAabb;
-        bool first = true;
-        for (auto* child : node->children)
-        {
-            if (first)
-            {
-                combinedAabb = child->worldAabb;
-                first = false;
-            }
-            else
-            {
-                DirectX::BoundingBox::CreateMerged(combinedAabb, combinedAabb, child->worldAabb);
-            }
-        }
-        node->worldAabb = combinedAabb;
-    }
-
-    // Recurse
+    // Recurse FIRST (Post-order) so children's worldAabbs are calculated
     for (auto* child : node->children)
     {
         ComputeWorldAABBs(child, world);
+    }
+
+    // Now compute this node's world AABB including its meshes and all children
+    bool initialized = false;
+    if (node->mesh)
+    {
+        for (auto& prim : node->mesh->primitives)
+        {
+            DirectX::BoundingBox transformedAabb;
+            prim.aabb.Transform(transformedAabb, world);
+            if (!initialized)
+            {
+                node->worldAabb = transformedAabb;
+                initialized = true;
+            }
+            else
+            {
+                DirectX::BoundingBox::CreateMerged(node->worldAabb, node->worldAabb, transformedAabb);
+            }
+        }
+    }
+
+    for (auto* child : node->children)
+    {
+        if (!initialized)
+        {
+            node->worldAabb = child->worldAabb;
+            initialized = true;
+        }
+        else
+        {
+            DirectX::BoundingBox::CreateMerged(node->worldAabb, node->worldAabb, child->worldAabb);
+        }
+    }
+
+    if (!initialized)
+    {
+        // If no mesh and no children, set a default AABB at the node's position
+        DirectX::XMVECTOR scale, rot, trans;
+        DirectX::XMMatrixDecompose(&scale, &rot, &trans, world);
+        DirectX::XMFLOAT3 pos;
+        DirectX::XMStoreFloat3(&pos, trans);
+        node->worldAabb = DirectX::BoundingBox(pos, DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f));
     }
 }
 
@@ -737,6 +760,12 @@ void Model::UpdateAnimation(float deltaTime)
         DirectX::XMMATRIX m = s * r * t;
         DirectX::XMStoreFloat4x4(&channel.targetNode->transform, m);
     }
+
+    // Recompute world AABBs after all local transforms are updated
+    for (auto* rootNode : m_GltfModel.rootNodes)
+    {
+        ComputeWorldAABBs(rootNode, DirectX::XMMatrixIdentity());
+    }
 }
 
 void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, ID3D12DescriptorHeap* srvHeap)
@@ -866,29 +895,32 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     for (auto& mesh : m_GltfModel.meshes)
     {
-        if (mesh.vertexBuffer)
+        for (auto& prim : mesh.primitives)
         {
-            // Copy vertex buffer
-            cmdList->CopyBufferRegion(mesh.vertexBuffer.Get(), 0, mesh.vertexStaging.Get(), 0, mesh.vertices.size() * sizeof(GLTFVertex));
-            // Barrier to GENERIC_READ
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = mesh.vertexBuffer.Get();
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-            barriers.push_back(barrier);
-        }
-        if (mesh.indexBuffer)
-        {
-            // Copy index buffer
-            cmdList->CopyBufferRegion(mesh.indexBuffer.Get(), 0, mesh.indexStaging.Get(), 0, mesh.indices.size() * sizeof(uint32_t));
-            // Barrier to GENERIC_READ
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = mesh.indexBuffer.Get();
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-            barriers.push_back(barrier);
+            if (prim.vertexBuffer)
+            {
+                // Copy vertex buffer
+                cmdList->CopyBufferRegion(prim.vertexBuffer.Get(), 0, prim.vertexStaging.Get(), 0, prim.vertices.size() * sizeof(GLTFVertex));
+                // Barrier to GENERIC_READ
+                D3D12_RESOURCE_BARRIER barrier = {};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = prim.vertexBuffer.Get();
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+                barriers.push_back(barrier);
+            }
+            if (prim.indexBuffer)
+            {
+                // Copy index buffer
+                cmdList->CopyBufferRegion(prim.indexBuffer.Get(), 0, prim.indexStaging.Get(), 0, prim.indices.size() * sizeof(uint32_t));
+                // Barrier to GENERIC_READ
+                D3D12_RESOURCE_BARRIER barrier = {};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = prim.indexBuffer.Get();
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+                barriers.push_back(barrier);
+            }
         }
     }
     if (!barriers.empty())
@@ -943,33 +975,36 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
 
     if (node->mesh)
     {
-        // Set material constants as root constants
-        float materialFloats[8];
-        materialFloats[0] = node->mesh->material.baseColorFactor[0]; // baseColorFactor.x
-        materialFloats[1] = node->mesh->material.baseColorFactor[1]; // baseColorFactor.y
-        materialFloats[2] = node->mesh->material.baseColorFactor[2]; // baseColorFactor.z
-        materialFloats[3] = node->mesh->material.baseColorFactor[3]; // baseColorFactor.w
-        materialFloats[4] = node->mesh->material.metallicFactor;     // metallicFactor
-        materialFloats[5] = node->mesh->material.roughnessFactor;    // roughnessFactor
-        materialFloats[6] = node->mesh->material.baseColorTexture ? 1.0f : 0.0f; // hasBaseColorTexture
-        materialFloats[7] = 0.0f; // padding
-        commandList->SetGraphicsRoot32BitConstants(1, 8, materialFloats, 0);
-
-        // Set world matrix as root constants
-        float worldFloats[16];
-        DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
-        commandList->SetGraphicsRoot32BitConstants(2, 16, worldFloats, 0);
-
-        // Set texture descriptor table if has texture
-        if (node->mesh->material.baseColorTexture)
+        for (auto& prim : node->mesh->primitives)
         {
-            commandList->SetGraphicsRootDescriptorTable(3, node->mesh->material.baseColorTexture->srvHandle);
-        }
+            // Set material constants as root constants
+            float materialFloats[8];
+            materialFloats[0] = prim.material.baseColorFactor[0]; // baseColorFactor.x
+            materialFloats[1] = prim.material.baseColorFactor[1]; // baseColorFactor.y
+            materialFloats[2] = prim.material.baseColorFactor[2]; // baseColorFactor.z
+            materialFloats[3] = prim.material.baseColorFactor[3]; // baseColorFactor.w
+            materialFloats[4] = prim.material.metallicFactor;     // metallicFactor
+            materialFloats[5] = prim.material.roughnessFactor;    // roughnessFactor
+            materialFloats[6] = prim.material.baseColorTexture ? 1.0f : 0.0f; // hasBaseColorTexture
+            materialFloats[7] = 0.0f; // padding
+            commandList->SetGraphicsRoot32BitConstants(1, 8, materialFloats, 0);
 
-        // Render the mesh
-        commandList->IASetVertexBuffers(0, 1, &node->mesh->vertexBufferView);
-        commandList->IASetIndexBuffer(&node->mesh->indexBufferView);
-        commandList->DrawIndexedInstanced(static_cast<UINT>(node->mesh->indices.size()), 1, 0, 0, 0);
+            // Set world matrix as root constants
+            float worldFloats[16];
+            DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
+            commandList->SetGraphicsRoot32BitConstants(2, 16, worldFloats, 0);
+
+            // Set texture descriptor table if has texture
+            if (prim.material.baseColorTexture)
+            {
+                commandList->SetGraphicsRootDescriptorTable(3, prim.material.baseColorTexture->srvHandle);
+            }
+
+            // Render the mesh
+            commandList->IASetVertexBuffers(0, 1, &prim.vertexBufferView);
+            commandList->IASetIndexBuffer(&prim.indexBufferView);
+            commandList->DrawIndexedInstanced(static_cast<UINT>(prim.indices.size()), 1, 0, 0, 0);
+        }
     }
 
     for (auto* child : node->children)

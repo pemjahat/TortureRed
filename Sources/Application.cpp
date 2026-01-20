@@ -76,8 +76,9 @@ void Application::Initialize()
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
 
     // Load GLTF model
-    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/FlyingWorld/FlyingWorld-BattleOfTheTrashGod.gltf"))
-    if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
+    if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/FlyingWorld/FlyingWorld-BattleOfTheTrashGod.gltf"))
+    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
+    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CylinderEngine/2CylinderEngine.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
