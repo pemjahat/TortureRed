@@ -76,15 +76,13 @@ void Application::Initialize()
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
 
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/FlyingWorld/FlyingWorld-BattleOfTheTrashGod.gltf"))
-    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
-    //if (!m_Model.LoadGLTFModel(m_Renderer.GetDevice(), "Content/CylinderEngine/2CylinderEngine.gltf"))
+    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
 
     // Upload textures to GPU
-    m_Model.UploadTextures(m_Renderer.GetDevice(), m_Renderer.GetCommandList(), m_Renderer.GetCommandQueue(), m_Renderer.GetCommandAllocator(), m_Renderer.GetSRVHeap());
+    m_Model.UploadTextures(m_Renderer.GetDevice(), m_Renderer.GetCommandList(), m_Renderer.GetCommandQueue(), m_Renderer.GetCommandAllocator(), &m_Renderer);
 
     // Initialize ImGui
     InitializeImGui();
@@ -233,9 +231,10 @@ void Application::Render()
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
+    auto cmdList = m_Renderer.GetCommandList();
+    const auto& gbuffer = m_Renderer.GetGBuffer();
+
     // Compute frustum for culling
-    //DirectX::BoundingFrustum frustum;
-    //DirectX::BoundingFrustum::CreateFromMatrix(frustum, m_ViewProj, false);
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
     DirectX::BoundingFrustum frustum(proj, false);
 
@@ -243,8 +242,95 @@ void Application::Render()
     DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
     frustum.Transform(frustum, invView);
 
-    // Render GLTF model
-    m_Model.Render(m_Renderer.GetCommandList(), &m_Renderer, frustum);
+    // 1. Depth Pre-Pass
+    if (m_EnableDepthPrePass)
+    {
+        cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
+        
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
+        cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+    }
+
+    // 2. G-Buffer Pass
+    {
+        // Transition G-Buffer targets to RTV state
+        const_cast<GPUTexture&>(gbuffer.albedo).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const_cast<GPUTexture&>(gbuffer.normal).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const_cast<GPUTexture&>(gbuffer.material).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
+        cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearColor, 0, nullptr);
+        cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearColor, 0, nullptr);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[] = { gbuffer.albedo.rtvHandle, gbuffer.normal.rtvHandle, gbuffer.material.rtvHandle };
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+
+        // If pre-pass was skipped, we MUST clear the depth buffer here
+        if (!m_EnableDepthPrePass)
+        {
+            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        }
+
+        cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
+
+        if (m_EnableDepthPrePass)
+            cmdList->SetPipelineState(m_Renderer.GetGBufferPSO());
+        else
+            cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
+
+        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
+    }
+
+    // 3. Lighting Pass
+    {
+        // Transition G-Buffer targets to SRV state
+        const_cast<GPUTexture&>(gbuffer.albedo).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        const_cast<GPUTexture&>(gbuffer.normal).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        const_cast<GPUTexture&>(gbuffer.material).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        const_cast<GPUTexture&>(gbuffer.depth).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        // Transition backbuffer to RTV
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+            m_Renderer.GetCurrentBackBuffer(),
+            D3D12_RESOURCE_STATE_PRESENT,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmdList->ResourceBarrier(1, &barrier);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        
+        const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
+        cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+        cmdList->SetPipelineState(m_Renderer.GetLightingPSO());
+
+        cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
+    }
+
+    // 4. Transparency Pass (Forward)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+        
+        // Ensure depth is in read state for forward pass
+        const_cast<GPUTexture&>(gbuffer.depth).Transition(cmdList, D3D12_RESOURCE_STATE_DEPTH_READ);
+        
+        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+        // Use the original pipeline state for forward rendering (updated for transparency if needed)
+        // For now, we'll use the G-Buffer PSO but modified or just the original one
+        if (m_Renderer.GetPipelineState())
+        {
+            cmdList->SetPipelineState(m_Renderer.GetPipelineState());
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
+        }
+    }
 
     // Start the Dear ImGui frame
     ImGui_ImplDX12_NewFrame();
@@ -271,6 +357,8 @@ void Application::RenderImGui()
 
     // RGB Color Picker for background
     ImGui::ColorEdit3("Background Color", m_Renderer.m_BackgroundColor);
+
+    ImGui::Checkbox("Enable Depth Pre-Pass", &m_EnableDepthPrePass);
 
     // Display current FPS (basic implementation)
     static float lastTime = 0.0f;

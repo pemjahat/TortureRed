@@ -8,6 +8,7 @@
 #include <DirectXMath.h>
 #include <DirectXCollision.h>
 #include <DirectXTex.h>
+#include "GraphicsTypes.h"
 
 // Forward declarations
 struct cgltf_data;
@@ -35,12 +36,15 @@ struct GLTFVertex
     float texCoord[2];
 };
 
+struct GLTFImage
+{
+    GPUTexture texture;
+    DirectX::ScratchImage* image = nullptr;
+};
+
 struct GLTFTexture
 {
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    UINT srvIndex = UINT(-1); // Descriptor index
-    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle;
-    DirectX::ScratchImage* image = nullptr;
+    GLTFImage* source = nullptr;
 };
 
 struct GLTFMaterial
@@ -53,17 +57,25 @@ struct GLTFMaterial
     // Add more as needed
 };
 
+enum class AlphaMode
+{
+    Opaque,
+    Mask,
+    Blend
+};
+
 struct GLTFPrimitive
 {
     std::vector<GLTFVertex> vertices;
     std::vector<uint32_t> indices;
     GLTFMaterial material;
-    Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
+    AlphaMode alphaMode = AlphaMode::Opaque;
+    GPUBuffer vertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView;
-    Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+    GPUBuffer indexBuffer;
     D3D12_INDEX_BUFFER_VIEW indexBufferView;
-    Microsoft::WRL::ComPtr<ID3D12Resource> vertexStaging;
-    Microsoft::WRL::ComPtr<ID3D12Resource> indexStaging;
+    GPUBuffer vertexStaging;
+    GPUBuffer indexStaging;
     DirectX::BoundingBox aabb;
 };
 
@@ -109,6 +121,7 @@ struct GLTFModel
     std::vector<GLTFMesh> meshes;
     std::vector<GLTFNode> nodes;
     std::vector<GLTFAnimation> animations;
+    std::vector<GLTFImage> images;
     std::vector<GLTFTexture> textures;
     std::vector<GLTFNode*> rootNodes;
     cgltf_data* data = nullptr; // Raw cgltf data
@@ -120,10 +133,10 @@ public:
     Model();
     ~Model();
 
-    bool LoadGLTFModel(ID3D12Device* device, const std::string& filepath);
+    bool LoadGLTFModel(Renderer* renderer, const std::string& filepath);
     void UpdateAnimation(float deltaTime);
-    void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum);
-    void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, ID3D12DescriptorHeap* srvHeap);
+    void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode = AlphaMode::Opaque);
+    void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer);
 
     // Getters for debug counters
     size_t GetTotalNodes() const { return m_TotalNodes; }
@@ -135,16 +148,15 @@ public:
     Model& operator=(const Model&) = delete;
 
 private:
-    void CreateGLTFResources(ID3D12Device* device);
-    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum);
+    void CreateGLTFResources(Renderer* renderer);
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
     void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
-    void LoadTextures(ID3D12Device* device);
+    void LoadTextures(Renderer* renderer);
     void BuildNodeHierarchy();
     void LoadAnimations();
 
     GLTFModel m_GltfModel;
     std::wstring fileDirectory;
-    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHeapStart;
     UINT srvDescriptorSize;
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;

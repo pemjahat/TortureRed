@@ -30,8 +30,8 @@ void Camera::Update(float deltaTime)
 
     if (m_Keys[0]) movement += forward; // W - forward
     if (m_Keys[1]) movement -= forward; // S - backward
-    if (m_Keys[2]) movement -= right;   // A - left
-    if (m_Keys[3]) movement += right;   // D - right
+    if (m_Keys[2]) movement += right;   // A - left
+    if (m_Keys[3]) movement -= right;   // D - right
 
     if (XMVector3LengthSq(movement).m128_f32[0] > 0.0f)
     {

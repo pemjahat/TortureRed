@@ -7,8 +7,10 @@
 #include <DirectXMath.h>
 #include <vector>
 #include <string>
+#include "GraphicsTypes.h"
 
-#include "Model.h"
+// Forward declarations to avoid circular dependencies
+struct GLTFVertex;
 
 const int WINDOW_WIDTH = 1280;
 const int WINDOW_HEIGHT = 720;
@@ -32,6 +34,16 @@ public:
     void CreateRootSignature();
     void CreatePipelineState();
 
+    // GBuffer management
+    void CreateGBuffer();
+
+    // Descriptor management
+    UINT AllocateDescriptor();
+
+    // Resource helpers
+    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
+    bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor = nullptr, UINT mipLevels = 1);
+
     // Shader compilation
     std::vector<char> LoadShader(const std::string& filename);
     std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
@@ -46,12 +58,29 @@ public:
     ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return m_PipelineState.Get(); }
+    ID3D12PipelineState* GetDepthPrePassPSO() const { return m_DepthPrePassPSO.Get(); }
+    ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
+    ID3D12PipelineState* GetGBufferWritePSO() const { return m_GBufferWritePSO.Get(); }
+    ID3D12PipelineState* GetLightingPSO() const { return m_LightingPSO.Get(); }
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(UINT index) const {
+        D3D12_GPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetGPUDescriptorHandleForHeapStart();
+        handle.ptr += (UINT64)index * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return handle;
+    }
 
     void ExecuteCommandList();
 
+    // Pass management
+    D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentBackBufferRTV() const;
+    ID3D12Resource* GetCurrentBackBuffer() const;
+
     // Background color
     float m_BackgroundColor[3] = { 0.098f, 0.098f, 0.439f }; // Default: Dark blue
+
+    // GBuffer access
+    const GBuffer& GetGBuffer() const { return m_GBuffer; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -66,19 +95,28 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_CommandList;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
+
+    // Pipeline States
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthPrePassPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingPSO;
+
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
 
-    // Depth Buffer
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_DepthStencilBuffer;
+    // Descriptor Heaps
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;
 
-    // SRV Heap for textures
+    // SRV Heap for textures (Global Unified Heap)
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_SRVHeap;
+    UINT m_SrvHeapIndex = 0;
+
+    // GBuffer resources
+    GBuffer m_GBuffer;
 
     // Constant Buffers
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_FrameCB;
-    void* m_FrameCBData = nullptr;
+    GPUBuffer m_FrameCB;
 
     // Synchronization
     UINT m_FrameIndex;

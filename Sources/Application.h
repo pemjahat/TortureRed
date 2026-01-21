@@ -35,6 +35,7 @@ private:
     void RenderImGui();
 
     bool m_IsRunning;
+    bool m_EnableDepthPrePass = false;
     SDL_Window* m_Window;
 
     // Core systems
