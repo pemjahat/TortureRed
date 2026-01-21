@@ -87,6 +87,11 @@ void Application::Initialize()
     // Initialize ImGui
     InitializeImGui();
 
+    // Initialize directional light
+    m_MainLight.color = { 1.0f, 0.9f, 0.8f, 1.0f };
+    m_MainLight.direction = { -1.0f, -1.0f, 1.0f, 0.0f };
+    m_MainLight.position = { 0.0f, 10.0f, 0.0f, 1.0f }; // Not used for dir light but good to have
+
     std::cout << "TortureRed application initialized successfully!" << std::endl;
 }
 
@@ -224,6 +229,15 @@ void Application::Update(float deltaTime)
 
     // Update Frame CB
     m_Renderer.UpdateFrameCB(m_ViewProj);
+
+    // Update Light CB
+    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+    DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f); // Position light back along direction
+    DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
+    DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
+    DirectX::XMMATRIX lightViewProj = lightView * lightProj;
+    DirectX::XMStoreFloat4x4(&m_MainLight.viewProj, lightViewProj);
+    m_Renderer.UpdateLightCB(m_MainLight);
 }
 
 void Application::Render()
@@ -233,6 +247,47 @@ void Application::Render()
 
     auto cmdList = m_Renderer.GetCommandList();
     const auto& gbuffer = m_Renderer.GetGBuffer();
+    const auto& shadowMap = m_Renderer.GetShadowMap();
+
+    // 0. Shadow Pass
+    {
+        const_cast<GPUTexture&>(shadowMap).Transition(cmdList, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        cmdList->ClearDepthStencilView(shadowMap.dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &shadowMap.dsvHandle);
+
+        D3D12_VIEWPORT shadowViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, 2048.0f, 2048.0f);
+        D3D12_RECT shadowScissor = CD3DX12_RECT(0, 0, 2048, 2048);
+        cmdList->RSSetViewports(1, &shadowViewport);
+        cmdList->RSSetScissorRects(1, &shadowScissor);
+
+        cmdList->SetPipelineState(m_Renderer.GetShadowPSO());
+
+        // Temporarily bind light viewProj to root param 0 for shadow pass
+        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetLightGPUAddress());
+
+        // Calculate shadow frustum in world space
+        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+        DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f);
+        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
+        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
+        
+        DirectX::BoundingFrustum shadowFrustum(lightProj, false);
+        DirectX::XMMATRIX invLightView = DirectX::XMMatrixInverse(nullptr, lightView);
+        shadowFrustum.Transform(shadowFrustum, invLightView);
+
+        m_Model.Render(cmdList, &m_Renderer, shadowFrustum, AlphaMode::Opaque);
+
+        const_cast<GPUTexture&>(shadowMap).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+
+    // Reset viewport and scissor for main pass
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
+    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissorRect);
+    
+    // Restore camera viewProj to root param 0
+    cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress()); // Need to add getter
 
     // Compute frustum for culling
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
@@ -307,7 +362,7 @@ void Application::Render()
         const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
         cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
-        cmdList->SetPipelineState(m_Renderer.GetLightingPSO());
+        cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
 
         cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
@@ -359,6 +414,20 @@ void Application::RenderImGui()
     ImGui::ColorEdit3("Background Color", m_Renderer.m_BackgroundColor);
 
     ImGui::Checkbox("Enable Depth Pre-Pass", &m_EnableDepthPrePass);
+
+    ImGui::Checkbox("Debug Shadow Map", &m_DebugShadowMap);
+
+    ImGui::Separator();
+    ImGui::Text("Direct Light");
+    ImGui::DragFloat3("Direction", &m_MainLight.direction.x, 0.01f, -1.0f, 1.0f);
+    ImGui::ColorEdit3("Light Color", &m_MainLight.color.x);
+    
+    // Normalize light direction
+    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+    lightDir = DirectX::XMVector3Normalize(lightDir);
+    DirectX::XMStoreFloat4(&m_MainLight.direction, lightDir);
+
+    ImGui::Separator();
 
     // Display current FPS (basic implementation)
     static float lastTime = 0.0f;

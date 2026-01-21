@@ -36,6 +36,7 @@ private:
 
     bool m_IsRunning;
     bool m_EnableDepthPrePass = false;
+    bool m_DebugShadowMap = false;
     SDL_Window* m_Window;
 
     // Core systems
@@ -43,6 +44,7 @@ private:
     Model m_Model;
     Camera m_Camera;
     DirectX::XMMATRIX m_ViewProj;
+    LightConstants m_MainLight;
 
     // ImGui
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_ImGuiDescriptorHeap;

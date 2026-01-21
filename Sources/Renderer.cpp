@@ -146,9 +146,15 @@ bool Renderer::Initialize(HWND hwnd)
     }
 
     // Create constant buffers
-    if (!CreateBuffer(m_FrameCB, (sizeof(float) * 16 + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+    if (!CreateBuffer(m_FrameCB, (sizeof(DirectX::XMFLOAT4X4) * 2 + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
     {
         std::cerr << "Failed to create frame constant buffer" << std::endl;
+        return false;
+    }
+
+    if (!CreateBuffer(m_LightCB, (sizeof(LightConstants) + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+    {
+        std::cerr << "Failed to create light constant buffer" << std::endl;
         return false;
     }
 
@@ -169,6 +175,14 @@ bool Renderer::Initialize(HWND hwnd)
 
     // Create GBuffer
     CreateGBuffer();
+
+    // Create Shadow Map
+    const UINT shadowMapSize = 2048;
+    if (!CreateTexture(m_ShadowMap, shadowMapSize, shadowMapSize, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr))
+    {
+        std::cerr << "Failed to create shadow map texture" << std::endl;
+        return false;
+    }
 
     // Create command allocator
     hr = m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator));
@@ -228,6 +242,12 @@ void Renderer::Shutdown()
         m_FrameCB.cpuPtr = nullptr;
     }
 
+    if (m_LightCB.resource && m_LightCB.cpuPtr)
+    {
+        m_LightCB.resource->Unmap(0, nullptr);
+        m_LightCB.cpuPtr = nullptr;
+    }
+
     if (m_FenceEvent)
     {
         CloseHandle(m_FenceEvent);
@@ -270,6 +290,9 @@ void Renderer::BeginFrame()
 
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+
+    // Set Light constant buffer
+    m_CommandList->SetGraphicsRootConstantBufferView(4, m_LightCB.gpuAddress);
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -345,7 +368,7 @@ void Renderer::CreateRootSignature()
     textureRange.RegisterSpace = 0;
     textureRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER rootParameters[4] = {};
+    D3D12_ROOT_PARAMETER rootParameters[5] = {};
 
     // Frame CB: viewProj
     rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -373,27 +396,50 @@ void Renderer::CreateRootSignature()
     rootParameters[3].DescriptorTable.pDescriptorRanges = &textureRange;
     rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // Static sampler
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.MipLODBias = 0.0f;
-    sampler.MaxAnisotropy = 1;
-    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-    sampler.MinLOD = 0.0f;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister = 0;  // s0
-    sampler.RegisterSpace = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    // Light constants: viewProj, position, color, direction
+    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameters[4].Descriptor.ShaderRegister = 2;  // b2
+    rootParameters[4].Descriptor.RegisterSpace = 0;
+    rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Static samplers
+    D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+    
+    // Default sampler
+    samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].MipLODBias = 0.0f;
+    samplers[0].MaxAnisotropy = 1;
+    samplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    samplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    samplers[0].MinLOD = 0.0f;
+    samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    samplers[0].ShaderRegister = 0;  // s0
+    samplers[0].RegisterSpace = 0;
+    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Shadow sampler
+    samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
+    samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].MipLODBias = 0.0f;
+    samplers[1].MaxAnisotropy = 1;
+    samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    samplers[1].MinLOD = 0.0f;
+    samplers[1].MaxLOD = D3D12_FLOAT32_MAX;
+    samplers[1].ShaderRegister = 1;  // s1
+    samplers[1].RegisterSpace = 0;
+    samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc;
     rootSignatureDesc.NumParameters = _countof(rootParameters);
     rootSignatureDesc.pParameters = rootParameters;
-    rootSignatureDesc.NumStaticSamplers = 1;
-    rootSignatureDesc.pStaticSamplers = &sampler;
+    rootSignatureDesc.NumStaticSamplers = _countof(samplers);
+    rootSignatureDesc.pStaticSamplers = samplers;
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     Microsoft::WRL::ComPtr<ID3DBlob> signature;
@@ -490,6 +536,54 @@ void Renderer::CreatePipelineState()
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingPSO));
     }
 
+    // 3.5 Debug PSO
+    {
+        std::vector<char> vs = CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_0");
+        std::vector<char> ps = CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_0");
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.SampleMask = UINT_MAX;
+        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        psoDesc.SampleDesc.Count = 1;
+        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DebugPSO));
+    }
+
+    // 4. Shadow PSO
+    {
+        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_0");
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+        psoDesc.RasterizerState.DepthBias = 1000;
+        psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+        psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        psoDesc.SampleMask = UINT_MAX;
+        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        psoDesc.NumRenderTargets = 0;
+        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        psoDesc.SampleDesc.Count = 1;
+
+        HRESULT hr = m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_ShadowPSO));
+        if (FAILED(hr))
+        {
+            std::cerr << "CreateGraphicsPipelineState for Shadow PSO failed" << std::endl;
+        }
+    }
+
     std::cout << "Pipeline states created successfully" << std::endl;
 }
 
@@ -544,6 +638,10 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
 
     D3D12_CLEAR_VALUE clearVal = {};
     clearVal.Format = format;
+    if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL && format == DXGI_FORMAT_R32_TYPELESS)
+    {
+        clearVal.Format = DXGI_FORMAT_D32_FLOAT;
+    }
     if (flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
     {
         if (clearColor) memcpy(clearVal.Color, clearColor, sizeof(float) * 4);
@@ -571,11 +669,14 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
     {
         texture.srvIndex = AllocateDescriptor();
         D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += texture.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        srvHandle.ptr += (UINT64)texture.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Format = (format == DXGI_FORMAT_D32_FLOAT) ? DXGI_FORMAT_R32_FLOAT : format;
+        if (format == DXGI_FORMAT_D32_FLOAT || format == DXGI_FORMAT_R32_TYPELESS)
+            srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        else
+            srvDesc.Format = format;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = mipLevels;
 
@@ -587,15 +688,20 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
     {
         static UINT rtvCount = 2; // Start after swap chain RTVs
         texture.rtvHandle = m_RTVHeap->GetCPUDescriptorHandleForHeapStart();
-        texture.rtvHandle.ptr += rtvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        texture.rtvHandle.ptr += (UINT64)rtvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         m_Device->CreateRenderTargetView(texture.resource.Get(), nullptr, texture.rtvHandle);
     }
     else if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
     {
         static UINT dsvCount = 0; // Unified allocation starting from 0
         texture.dsvHandle = m_DSVHeap->GetCPUDescriptorHandleForHeapStart();
-        texture.dsvHandle.ptr += dsvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        m_Device->CreateDepthStencilView(texture.resource.Get(), nullptr, texture.dsvHandle);
+        texture.dsvHandle.ptr += (UINT64)dsvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+        dsvDesc.Format = (format == DXGI_FORMAT_R32_TYPELESS) ? DXGI_FORMAT_D32_FLOAT : format;
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        
+        m_Device->CreateDepthStencilView(texture.resource.Get(), &dsvDesc, texture.dsvHandle);
     }
 
     return true;
@@ -607,7 +713,7 @@ void Renderer::CreateGBuffer()
     CreateTexture(m_GBuffer.albedo, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
     CreateTexture(m_GBuffer.normal, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
     CreateTexture(m_GBuffer.material, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.depth, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    CreateTexture(m_GBuffer.depth, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 }
 
 std::vector<char> Renderer::LoadShader(const std::string& filename)
@@ -734,9 +840,19 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
 
 void Renderer::UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix)
 {
-    float viewProj[16];
-    DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(viewProj), viewProjMatrix);
-    memcpy(m_FrameCB.cpuPtr, viewProj, sizeof(viewProj));
+    struct FrameConstants {
+        DirectX::XMFLOAT4X4 viewProj;
+        DirectX::XMFLOAT4X4 invViewProj;
+    } cb;
+    DirectX::XMStoreFloat4x4(&cb.viewProj, viewProjMatrix);
+    DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(nullptr, viewProjMatrix);
+    DirectX::XMStoreFloat4x4(&cb.invViewProj, invViewProj);
+    memcpy(m_FrameCB.cpuPtr, &cb, sizeof(cb));
+}
+
+void Renderer::UpdateLightCB(const LightConstants& lightConstants)
+{
+    memcpy(m_LightCB.cpuPtr, &lightConstants, sizeof(LightConstants));
 }
 
 void Renderer::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)

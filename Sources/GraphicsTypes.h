@@ -43,3 +43,11 @@ struct GBuffer
     GPUTexture material;
     GPUTexture depth;
 };
+
+struct LightConstants
+{
+    DirectX::XMFLOAT4X4 viewProj;
+    DirectX::XMFLOAT4 position;
+    DirectX::XMFLOAT4 color;
+    DirectX::XMFLOAT4 direction;
+};

@@ -50,6 +50,7 @@ public:
 
     // Constant buffer management
     void UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix);
+    void UpdateLightCB(const LightConstants& lightConstants);
 
     // Getters
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -62,10 +63,21 @@ public:
     ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
     ID3D12PipelineState* GetGBufferWritePSO() const { return m_GBufferWritePSO.Get(); }
     ID3D12PipelineState* GetLightingPSO() const { return m_LightingPSO.Get(); }
+    ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
+    ID3D12PipelineState* GetShadowPSO() const { return m_ShadowPSO.Get(); }
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
+
+    D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetLightGPUAddress() const { return m_LightCB.gpuAddress; }
 
     D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(UINT index) const {
         D3D12_GPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetGPUDescriptorHandleForHeapStart();
+        handle.ptr += (UINT64)index * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return handle;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE GetCPUDescriptorHandle(UINT index) const {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += (UINT64)index * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         return handle;
     }
@@ -81,6 +93,7 @@ public:
 
     // GBuffer access
     const GBuffer& GetGBuffer() const { return m_GBuffer; }
+    const GPUTexture& GetShadowMap() const { return m_ShadowMap; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -102,6 +115,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
 
@@ -114,9 +129,11 @@ private:
 
     // GBuffer resources
     GBuffer m_GBuffer;
+    GPUTexture m_ShadowMap;
 
     // Constant Buffers
     GPUBuffer m_FrameCB;
+    GPUBuffer m_LightCB;
 
     // Synchronization
     UINT m_FrameIndex;
