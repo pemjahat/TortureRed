@@ -1,3 +1,5 @@
+#include "Common.hlsl"
+
 struct VSInput {
     float3 position : POSITION;
     float3 normal : NORMAL;
@@ -11,17 +13,8 @@ struct PSInput {
     float2 texCoord : TEXCOORD;
 };
 
-cbuffer FrameCB : register(b0) {
-    row_major float4x4 viewProj;
-};
-
-cbuffer MaterialCB : register(b1) {
-    float4 baseColorFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    int baseColorIndex;
-    int padding;
-};
+ConstantBuffer<FrameConstants> FrameCB : register(b0);
+ConstantBuffer<MaterialConstants> MaterialCB : register(b1);
 
 cbuffer MeshCB : register(b3) {
     row_major float4x4 world;
@@ -33,7 +26,7 @@ SamplerState pointSampler : register(s0);
 PSInput VSMain(VSInput input) {
     PSInput output;
     float4 worldPos = mul(float4(input.position, 1.0f), world);
-    output.position = mul(worldPos, viewProj);
+    output.position = mul(worldPos, FrameCB.viewProj);
     output.worldPos = worldPos.xyz;
     output.normal = mul(input.normal, (float3x3)world);
     output.texCoord = input.texCoord;
@@ -49,9 +42,9 @@ struct GBufferOutput {
 GBufferOutput PSMain(PSInput input) {
     GBufferOutput output;
     
-    float4 albedo = baseColorFactor;
-    if (baseColorIndex >= 0) {
-        float4 sampled = textures[baseColorIndex].Sample(pointSampler, input.texCoord);
+    float4 albedo = MaterialCB.baseColorFactor;
+    if (MaterialCB.baseColorTextureIndex >= 0) {
+        float4 sampled = textures[MaterialCB.baseColorTextureIndex].Sample(pointSampler, input.texCoord);
         albedo *= sampled;
         
         // Simple alpha test for Masked geometry
@@ -61,7 +54,7 @@ GBufferOutput PSMain(PSInput input) {
     
     output.albedo = albedo;
     output.normal = float4(normalize(input.normal) * 0.5f + 0.5f, 1.0f);
-    output.material = float4(roughnessFactor, metallicFactor, 0.0f, 1.0f);
+    output.material = float4(MaterialCB.roughnessFactor, MaterialCB.metallicFactor, 0.0f, 1.0f);
     
     return output;
 }

@@ -69,6 +69,7 @@ struct GLTFPrimitive
     std::vector<GLTFVertex> vertices;
     std::vector<uint32_t> indices;
     GLTFMaterial material;
+    UINT materialIndex = 0;
     AlphaMode alphaMode = AlphaMode::Opaque;
     GPUBuffer vertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView;
@@ -143,14 +144,16 @@ public:
     size_t GetTotalRootNodes() const { return m_TotalRootNodes; }
     size_t GetNodesSurviveFrustum() const { return m_NodesSurviveFrustum; }
 
+    // Get all primitives for AS building
+    void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
+
     // Prevent copying
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
 
 private:
     void CreateGLTFResources(Renderer* renderer);
-    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
-    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);    void GetPrimitivesRecursive(const struct GLTFNode* node, std::vector<const struct GLTFPrimitive*>& primitives) const;    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
     void BuildNodeHierarchy();
     void LoadAnimations();

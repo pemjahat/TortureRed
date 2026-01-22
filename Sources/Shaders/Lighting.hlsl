@@ -1,3 +1,5 @@
+#include "Common.hlsl"
+
 struct VSInput {
     uint vertexID : SV_VertexID;
 };
@@ -16,29 +18,12 @@ PSInput VSMain(VSInput input) {
     return output;
 }
 
-Texture2D albedoTexture : register(t0);
-Texture2D normalTexture : register(t1);
-Texture2D materialTexture : register(t2);
-Texture2D depthTexture : register(t3);
-Texture2D shadowMap : register(t4); // Shadow map is index 4 in SRV heap if allocated that way
+Texture2D textures[] : register(t0, space0);
 
 SamplerState pointSampler : register(s0);
 SamplerComparisonState shadowSampler : register(s1);
 
-struct FrameConstants {
-    row_major float4x4 viewProj;
-    row_major float4x4 invViewProj;
-};
-
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-
-struct LightConstants {
-    row_major float4x4 viewProj;
-    float4 position;
-    float4 color;
-    float4 direction;
-};
-
 ConstantBuffer<LightConstants> LightCB : register(b2);
 
 float CalcShadow(float4 shadowPos) {
@@ -59,7 +44,7 @@ float CalcShadow(float4 shadowPos) {
     
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
-            shadow += shadowMap.SampleCmpLevelZero(shadowSampler, shadowTexCoord + float2(x, y) * texelSize, shadowDepth);
+            shadow += textures[FrameCB.shadowMapIndex].SampleCmpLevelZero(shadowSampler, shadowTexCoord + float2(x, y) * texelSize, shadowDepth);
         }
     }
     
@@ -67,15 +52,16 @@ float CalcShadow(float4 shadowPos) {
 }
 
 float4 PSMain(PSInput input) : SV_Target {
-    float4 albedo = albedoTexture.Sample(pointSampler, input.texCoord);
-    float3 normal = normalTexture.Sample(pointSampler, input.texCoord).rgb * 2.0f - 1.0f;
-    float4 material = materialTexture.Sample(pointSampler, input.texCoord);
-    float depth = depthTexture.Sample(pointSampler, input.texCoord).r;
+    float4 albedo = textures[FrameCB.albedoIndex].Sample(pointSampler, input.texCoord);
+    float3 normal = textures[FrameCB.normalIndex].Sample(pointSampler, input.texCoord).rgb * 2.0f - 1.0f;
+    float4 material = textures[FrameCB.materialIndex].Sample(pointSampler, input.texCoord);
+    float depth = textures[FrameCB.depthIndex].Sample(pointSampler, input.texCoord).r;
 
     // Reconstruction of world position from depth
     float4 ndc = float4(input.texCoord.x * 2.0f - 1.0f, (1.0f - input.texCoord.y) * 2.0f - 1.0f, depth, 1.0f);
-    float4 worldPos = mul(ndc, FrameCB.invViewProj);
-    worldPos /= worldPos.w;
+    float4 viewPos = mul(ndc, FrameCB.projectionInverse);
+    viewPos /= viewPos.w;
+    float4 worldPos = mul(viewPos, FrameCB.viewInverse);
 
     // Shadow calculation
     float4 shadowPos = mul(worldPos, LightCB.viewProj);

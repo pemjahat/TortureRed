@@ -76,13 +76,17 @@ void Application::Initialize()
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
 
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
+    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
 
     // Upload textures to GPU
     m_Model.UploadTextures(m_Renderer.GetDevice(), m_Renderer.GetCommandList(), m_Renderer.GetCommandQueue(), m_Renderer.GetCommandAllocator(), &m_Renderer);
+
+    // Build ray tracing acceleration structures
+    std::vector<Model*> models = { &m_Model };
+    m_Renderer.BuildAccelerationStructures(models);
 
     // Initialize ImGui
     InitializeImGui();
@@ -227,8 +231,21 @@ void Application::Update(float deltaTime)
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
     m_ViewProj = view * proj;
 
-    // Update Frame CB
-    m_Renderer.UpdateFrameCB(m_ViewProj);
+    // Update Frame Constants
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProj, m_ViewProj);
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.viewInverse, m_Camera.GetInvViewMatrix());
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverse, DirectX::XMMatrixInverse(nullptr, proj));
+    m_FrameConstants.cameraPosition = { m_Camera.GetPosition().x, m_Camera.GetPosition().y, m_Camera.GetPosition().z, 1.0f };
+    m_FrameConstants.frameIndex++;
+
+    const auto& gbuffer = m_Renderer.GetGBuffer();
+    m_FrameConstants.albedoIndex = gbuffer.albedo.srvIndex;
+    m_FrameConstants.normalIndex = gbuffer.normal.srvIndex;
+    m_FrameConstants.materialIndex = gbuffer.material.srvIndex;
+    m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
+    m_FrameConstants.shadowMapIndex = m_Renderer.GetShadowMap().srvIndex;
+
+    m_Renderer.UpdateFrameCB(m_FrameConstants);
 
     // Update Light CB
     DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
@@ -245,145 +262,150 @@ void Application::Render()
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
-    auto cmdList = m_Renderer.GetCommandList();
-    const auto& gbuffer = m_Renderer.GetGBuffer();
-    const auto& shadowMap = m_Renderer.GetShadowMap();
-
-    // 0. Shadow Pass
+    if (m_UsePathTracer && m_Renderer.IsRayTracingSupported())
     {
-        const_cast<GPUTexture&>(shadowMap).Transition(cmdList, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cmdList->ClearDepthStencilView(shadowMap.dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &shadowMap.dsvHandle);
-
-        D3D12_VIEWPORT shadowViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, 2048.0f, 2048.0f);
-        D3D12_RECT shadowScissor = CD3DX12_RECT(0, 0, 2048, 2048);
-        cmdList->RSSetViewports(1, &shadowViewport);
-        cmdList->RSSetScissorRects(1, &shadowScissor);
-
-        cmdList->SetPipelineState(m_Renderer.GetShadowPSO());
-
-        // Temporarily bind light viewProj to root param 0 for shadow pass
-        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetLightGPUAddress());
-
-        // Calculate shadow frustum in world space
-        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
-        DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f);
-        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
-        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
-        
-        DirectX::BoundingFrustum shadowFrustum(lightProj, false);
-        DirectX::XMMATRIX invLightView = DirectX::XMMatrixInverse(nullptr, lightView);
-        shadowFrustum.Transform(shadowFrustum, invLightView);
-
-        m_Model.Render(cmdList, &m_Renderer, shadowFrustum, AlphaMode::Opaque);
-
-        const_cast<GPUTexture&>(shadowMap).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_Renderer.DispatchRays(m_FrameConstants, m_MainLight);
+        m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
     }
-
-    // Reset viewport and scissor for main pass
-    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
-    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
-    cmdList->RSSetViewports(1, &viewport);
-    cmdList->RSSetScissorRects(1, &scissorRect);
-    
-    // Restore camera viewProj to root param 0
-    cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress()); // Need to add getter
-
-    // Compute frustum for culling
-    DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
-    DirectX::BoundingFrustum frustum(proj, false);
-
-    // Transform frustum to world space (inverse view matrix)
-    DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
-    frustum.Transform(frustum, invView);
-
-    // 1. Depth Pre-Pass
-    if (m_EnableDepthPrePass)
+    else
     {
-        cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
-        
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
-        cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        auto cmdList = m_Renderer.GetCommandList();
+        auto& gbuffer = m_Renderer.GetGBuffer();
+        auto& shadowMap = m_Renderer.GetShadowMap();
 
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
-    }
-
-    // 2. G-Buffer Pass
-    {
-        // Transition G-Buffer targets to RTV state
-        const_cast<GPUTexture&>(gbuffer.albedo).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        const_cast<GPUTexture&>(gbuffer.normal).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        const_cast<GPUTexture&>(gbuffer.material).Transition(cmdList, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-        float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
-        cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearColor, 0, nullptr);
-        cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearColor, 0, nullptr);
-
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[] = { gbuffer.albedo.rtvHandle, gbuffer.normal.rtvHandle, gbuffer.material.rtvHandle };
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-
-        // If pre-pass was skipped, we MUST clear the depth buffer here
-        if (!m_EnableDepthPrePass)
+        // 0. Shadow Pass
         {
-            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            m_Renderer.TransitionResource(shadowMap, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cmdList->ClearDepthStencilView(shadowMap.dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cmdList->OMSetRenderTargets(0, nullptr, FALSE, &shadowMap.dsvHandle);
+
+            D3D12_VIEWPORT shadowViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, 2048.0f, 2048.0f);
+            D3D12_RECT shadowScissor = CD3DX12_RECT(0, 0, 2048, 2048);
+            cmdList->RSSetViewports(1, &shadowViewport);
+            cmdList->RSSetScissorRects(1, &shadowScissor);
+
+            cmdList->SetPipelineState(m_Renderer.GetShadowPSO());
+
+            // Temporarily bind light viewProj to root param 0 for shadow pass
+            cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetLightGPUAddress());
+
+            // Calculate shadow frustum in world space
+            DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+            DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f);
+            DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
+            DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
+            
+            DirectX::BoundingFrustum shadowFrustum(lightProj, false);
+            DirectX::XMMATRIX invLightView = DirectX::XMMatrixInverse(nullptr, lightView);
+            shadowFrustum.Transform(shadowFrustum, invLightView);
+
+            m_Model.Render(cmdList, &m_Renderer, shadowFrustum, AlphaMode::Opaque);
+
+            m_Renderer.TransitionResource(shadowMap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
 
-        cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
+        // Reset viewport and scissor for main pass
+        D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
+        D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+        cmdList->RSSetViewports(1, &viewport);
+        cmdList->RSSetScissorRects(1, &scissorRect);
+    
+        // Restore camera viewProj to root param 0
+        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
 
+        // Compute frustum for culling
+        DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
+        DirectX::BoundingFrustum frustum(proj, false);
+
+        // Transform frustum to world space (inverse view matrix)
+        DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
+        frustum.Transform(frustum, invView);
+
+        // 1. Depth Pre-Pass
         if (m_EnableDepthPrePass)
-            cmdList->SetPipelineState(m_Renderer.GetGBufferPSO());
-        else
-            cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
-
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
-    }
-
-    // 3. Lighting Pass
-    {
-        // Transition G-Buffer targets to SRV state
-        const_cast<GPUTexture&>(gbuffer.albedo).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        const_cast<GPUTexture&>(gbuffer.normal).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        const_cast<GPUTexture&>(gbuffer.material).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        const_cast<GPUTexture&>(gbuffer.depth).Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
-        // Transition backbuffer to RTV
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-            m_Renderer.GetCurrentBackBuffer(),
-            D3D12_RESOURCE_STATE_PRESENT,
-            D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmdList->ResourceBarrier(1, &barrier);
-
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-        
-        const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
-        cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-
-        cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
-
-        cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
-    }
-
-    // 4. Transparency Pass (Forward)
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-        
-        // Ensure depth is in read state for forward pass
-        const_cast<GPUTexture&>(gbuffer.depth).Transition(cmdList, D3D12_RESOURCE_STATE_DEPTH_READ);
-        
-        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-
-        // Use the original pipeline state for forward rendering (updated for transparency if needed)
-        // For now, we'll use the G-Buffer PSO but modified or just the original one
-        if (m_Renderer.GetPipelineState())
         {
-            cmdList->SetPipelineState(m_Renderer.GetPipelineState());
-            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
+            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
+            
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+            cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
+            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+        }
+
+        // 2. G-Buffer Pass
+        {
+            // Transition G-Buffer targets to RTV state
+            m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearColor, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearColor, 0, nullptr);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[] = { gbuffer.albedo.rtvHandle, gbuffer.normal.rtvHandle, gbuffer.material.rtvHandle };
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+
+            // If pre-pass was skipped, we MUST clear the depth buffer here
+            if (!m_EnableDepthPrePass)
+            {
+                m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            }
+
+            cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
+
+            if (m_EnableDepthPrePass)
+                cmdList->SetPipelineState(m_Renderer.GetGBufferPSO());
+            else
+                cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
+
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
+        }
+
+        // 3. Lighting Pass
+        {
+            // Transition G-Buffer targets to SRV state
+            m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+            // Transition backbuffer to RTV
+            m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+            cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+            
+            const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
+            cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+            cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
+
+            cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
+        }
+
+        // 4. Transparency Pass (Forward)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+            
+            // Ensure depth is in read state for forward pass
+            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+            
+            cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+            // Use the original pipeline state for forward rendering (updated for transparency if needed)
+            // For now, we'll use the G-Buffer PSO but modified or just the original one
+            if (m_Renderer.GetPipelineState())
+            {
+                cmdList->SetPipelineState(m_Renderer.GetPipelineState());
+                m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
+            }
         }
     }
 
@@ -416,6 +438,15 @@ void Application::RenderImGui()
     ImGui::Checkbox("Enable Depth Pre-Pass", &m_EnableDepthPrePass);
 
     ImGui::Checkbox("Debug Shadow Map", &m_DebugShadowMap);
+
+    if (m_Renderer.IsRayTracingSupported())
+    {
+        ImGui::Checkbox("Use Path Tracer", &m_UsePathTracer);
+    }
+    else
+    {
+        ImGui::TextDisabled("Path Tracer (DXR not supported)");
+    }
 
     ImGui::Separator();
     ImGui::Text("Direct Light");

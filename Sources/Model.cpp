@@ -87,6 +87,7 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
             if (primitive->material)
             {
                 cgltf_material* material = primitive->material;
+                gltfPrim.materialIndex = static_cast<UINT>(material - m_GltfModel.data->materials);
 
                 // Set alpha mode
                 if (material->alpha_mode == cgltf_alpha_mode_opaque)
@@ -288,7 +289,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
             {
                 const UINT vertexBufferSize = static_cast<UINT>(prim.vertices.size() * sizeof(GLTFVertex));
 
-                if (!renderer->CreateBuffer(prim.vertexBuffer, vertexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+                if (!renderer->CreateBuffer(prim.vertexBuffer, vertexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
                 {
                     std::cerr << "Failed to create vertex buffer" << std::endl;
                     return;
@@ -315,7 +316,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
             {
                 const UINT indexBufferSize = static_cast<UINT>(prim.indices.size() * sizeof(uint32_t));
 
-                if (!renderer->CreateBuffer(prim.indexBuffer, indexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+                if (!renderer->CreateBuffer(prim.indexBuffer, indexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
                 {
                     std::cerr << "Failed to create index buffer" << std::endl;
                     return;
@@ -897,7 +898,7 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
             // Set world matrix as root constants
             float worldFloats[16];
             DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
-            commandList->SetGraphicsRoot32BitConstants(2, 16, worldFloats, 0);
+            commandList->SetGraphicsRoot32BitConstants(3, 16, worldFloats, 0);
 
             // Render the mesh
             commandList->IASetVertexBuffers(0, 1, &prim.vertexBufferView);
@@ -909,5 +910,29 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
     for (auto* child : node->children)
     {
         RenderNode(commandList, child, world, renderer, frustum, mode);
+    }
+}
+
+void Model::GetAllPrimitives(std::vector<const GLTFPrimitive*>& primitives) const
+{
+    for (const auto* rootNode : m_GltfModel.rootNodes)
+    {
+        GetPrimitivesRecursive(rootNode, primitives);
+    }
+}
+
+void Model::GetPrimitivesRecursive(const GLTFNode* node, std::vector<const GLTFPrimitive*>& primitives) const
+{
+    if (node->mesh)
+    {
+        for (const auto& primitive : node->mesh->primitives)
+        {
+            primitives.push_back(&primitive);
+        }
+    }
+
+    for (const auto* child : node->children)
+    {
+        GetPrimitivesRecursive(child, primitives);
     }
 }

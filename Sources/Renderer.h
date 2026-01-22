@@ -30,9 +30,15 @@ public:
     void EndFrame();
     void Present();
 
+    void BuildAccelerationStructures(const std::vector<class Model*>& models);
+    void DispatchRays(const FrameConstants& frame, const LightConstants& light);
+    void CopyTextureToBackBuffer(const GPUTexture& texture);
+
     // Resource creation
     void CreateRootSignature();
     void CreatePipelineState();
+    void CreateRayTracingPipeline();
+    void CreateShaderBindingTable();
 
     // GBuffer management
     void CreateGBuffer();
@@ -41,15 +47,20 @@ public:
     UINT AllocateDescriptor();
 
     // Resource helpers
-    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
+    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false);
     bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor = nullptr, UINT mipLevels = 1);
+
+    void TransitionResource(GPUTexture& texture, D3D12_RESOURCE_STATES newState);
+    void TransitionResource(GPUBuffer& buffer, D3D12_RESOURCE_STATES newState);
+    void TransitionResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES& currentState, D3D12_RESOURCE_STATES newState);
+    void TransitionBackBuffer(D3D12_RESOURCE_STATES newState);
 
     // Shader compilation
     std::vector<char> LoadShader(const std::string& filename);
     std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
 
     // Constant buffer management
-    void UpdateFrameCB(const DirectX::XMMATRIX& viewProjMatrix);
+    void UpdateFrameCB(const FrameConstants& frameConstants);
     void UpdateLightCB(const LightConstants& lightConstants);
 
     // Getters
@@ -65,6 +76,10 @@ public:
     ID3D12PipelineState* GetLightingPSO() const { return m_LightingPSO.Get(); }
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
     ID3D12PipelineState* GetShadowPSO() const { return m_ShadowPSO.Get(); }
+    
+    // Ray Tracing Getters
+    bool IsRayTracingSupported() const { return m_RayTracingSupported; }
+
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
 
     D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
@@ -92,8 +107,9 @@ public:
     float m_BackgroundColor[3] = { 0.098f, 0.098f, 0.439f }; // Default: Dark blue
 
     // GBuffer access
-    const GBuffer& GetGBuffer() const { return m_GBuffer; }
-    const GPUTexture& GetShadowMap() const { return m_ShadowMap; }
+    GBuffer& GetGBuffer() { return m_GBuffer; }
+    GPUTexture& GetShadowMap() { return m_ShadowMap; }
+    GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -105,6 +121,7 @@ private:
     Microsoft::WRL::ComPtr<IDXGISwapChain4> m_SwapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_RTVHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_RenderTargets[2];
+    D3D12_RESOURCE_STATES m_BackBufferStates[2] = { D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_PRESENT };
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_CommandList;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
@@ -119,6 +136,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
+
+    // Ray Tracing
+    bool m_RayTracingSupported = false;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPSO;
+    GPUBuffer m_BLAS;
+    GPUBuffer m_TLAS;
+    GPUBuffer m_PrimitiveDataBuffer;
+    GPUTexture m_PathTracerOutput;
 
     // Descriptor Heaps
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;

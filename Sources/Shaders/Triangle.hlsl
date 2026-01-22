@@ -1,3 +1,5 @@
+#include "Common.hlsl"
+
 // Triangle.hlsl - Vertex and pixel shaders for GLTF model rendering
 
 struct VSInput
@@ -19,20 +21,8 @@ struct PSOutput
     float4 color : SV_TARGET;
 };
 
-// Frame constant buffer - shared per frame
-cbuffer FrameCB : register(b0)
-{
-    row_major float4x4 viewProj;
-};
-
-// Material constants - passed as root constants
-cbuffer MaterialCB : register(b1)
-{
-    float4 baseColorFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    uint hasBaseColorTexture;
-};
+ConstantBuffer<FrameConstants> FrameCB : register(b0);
+ConstantBuffer<MaterialConstants> MaterialCB : register(b1);
 
 // Mesh constant buffer - per mesh
 cbuffer MeshCB : register(b3)
@@ -41,7 +31,7 @@ cbuffer MeshCB : register(b3)
 };
 
 // Textures
-Texture2D baseColorTexture : register(t0);
+Texture2D textures[] : register(t0);
 SamplerState samplerState : register(s0);
 
 // Vertex shader
@@ -50,7 +40,7 @@ PSInput VSMain(VSInput input)
     PSInput output;
 
     // Transform position to clip space: world * viewProj
-    output.position = mul(float4(input.position, 1.0f), mul(world, viewProj));
+    output.position = mul(float4(input.position, 1.0f), mul(world, FrameCB.viewProj));
 
     // Transform normal (simplified - assumes no non-uniform scaling)
     output.normal = input.normal;
@@ -64,11 +54,11 @@ PSOutput PSMain(PSInput input)
 {
     PSOutput output;
 
-    float4 color = baseColorFactor;
+    float4 color = MaterialCB.baseColorFactor;
 
-    if (hasBaseColorTexture)
+    if (MaterialCB.baseColorTextureIndex >= 0)
     {
-        color *= baseColorTexture.Sample(samplerState, input.texCoord);
+        color *= textures[MaterialCB.baseColorTextureIndex].Sample(samplerState, input.texCoord);
     }
 
     // Apply lighting to baseColorFactor

@@ -26,11 +26,13 @@ struct GPUBuffer : public GPUResource
     UINT64 size = 0;
     void* cpuPtr = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
+    int srvIndex = -1;
 };
 
 struct GPUTexture : public GPUResource
 {
     UINT srvIndex = UINT(-1);
+    UINT uavIndex = UINT(-1);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = { 0 };
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = { 0 };
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -44,10 +46,33 @@ struct GBuffer
     GPUTexture depth;
 };
 
+struct FrameConstants
+{
+    DirectX::XMFLOAT4X4 viewProj;
+    DirectX::XMFLOAT4X4 viewInverse;
+    DirectX::XMFLOAT4X4 projectionInverse;
+    DirectX::XMFLOAT4 cameraPosition;
+    uint32_t frameIndex;
+    int32_t albedoIndex;
+    int32_t normalIndex;
+    int32_t materialIndex;
+    int32_t depthIndex;
+    int32_t shadowMapIndex;
+    uint32_t padding[2];
+};
+
 struct LightConstants
 {
     DirectX::XMFLOAT4X4 viewProj;
     DirectX::XMFLOAT4 position;
     DirectX::XMFLOAT4 color;
     DirectX::XMFLOAT4 direction;
+};
+
+struct PrimitiveData
+{
+    int vertexBufferIndex;
+    int indexBufferIndex;
+    uint32_t materialIndex;
+    uint32_t padding;
 };
