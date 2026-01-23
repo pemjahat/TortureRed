@@ -24,9 +24,12 @@ struct MaterialConstants
     int normalTextureIndex;
 };
 
-struct MeshData
+struct DrawNodeData
 {
     DirectX::XMFLOAT4X4 world;
+    uint32_t vertexOffset;
+    uint32_t materialID;
+    uint32_t padding[2];
 };
 
 struct GLTFVertex
@@ -71,12 +74,10 @@ struct GLTFPrimitive
     GLTFMaterial material;
     UINT materialIndex = 0;
     AlphaMode alphaMode = AlphaMode::Opaque;
-    GPUBuffer vertexBuffer;
-    D3D12_VERTEX_BUFFER_VIEW vertexBufferView;
-    GPUBuffer indexBuffer;
-    D3D12_INDEX_BUFFER_VIEW indexBufferView;
-    GPUBuffer vertexStaging;
-    GPUBuffer indexStaging;
+    uint32_t globalVertexOffset = 0;
+    uint32_t globalIndexOffset = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS vertexBufferAddress = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS indexBufferAddress = 0;    
     DirectX::BoundingBox aabb;
 };
 
@@ -98,6 +99,7 @@ struct GLTFNode
     DirectX::XMFLOAT3 translation = {0.0f, 0.0f, 0.0f};
     DirectX::XMFLOAT4 rotation = {0.0f, 0.0f, 0.0f, 1.0f};
     DirectX::XMFLOAT3 scale = {1.0f, 1.0f, 1.0f};
+    uint32_t nodeDataOffset = 0;
 };
 
 struct GLTFAnimationChannel
@@ -147,8 +149,8 @@ public:
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
 
-    // Update mesh buffer with current node transforms
-    void UpdateMeshBuffer();
+    // Update node buffer with current node transforms
+    void UpdateNodeBuffer();
 
     // Prevent copying
     Model(const Model&) = delete;
@@ -157,7 +159,7 @@ public:
 private:
     void CreateGLTFResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);    void GetPrimitivesRecursive(const struct GLTFNode* node, std::vector<const struct GLTFPrimitive*>& primitives) const;    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
-    void UpdateMeshBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
     void LoadMaterials();
     void BuildNodeHierarchy();
@@ -172,10 +174,18 @@ private:
     GPUBuffer m_MaterialBuffer;
     GPUBuffer m_MaterialStagingBuffer;
 
-    // Mesh Data
-    std::vector<MeshData> m_MeshData;
-    GPUBuffer m_MeshBuffer;
-    GPUBuffer m_MeshStagingBuffer;
+    // Draw Node Data (Combined Transform and Draw Metadata)
+    std::vector<DrawNodeData> m_DrawNodeData;
+    GPUBuffer m_DrawNodeBuffer;
+    GPUBuffer m_DrawNodeStagingBuffer;
+
+    // Global Vertex/Index Buffers
+    std::vector<GLTFVertex> m_GlobalVertices;
+    std::vector<uint32_t> m_GlobalIndices;
+    GPUBuffer m_GlobalVertexBuffer;
+    GPUBuffer m_GlobalVertexStaging;
+    GPUBuffer m_GlobalIndexBuffer;
+    GPUBuffer m_GlobalIndexStaging;
 
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;

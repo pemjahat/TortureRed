@@ -9,10 +9,10 @@ struct FrameConstants {
     row_major float4x4 projectionInverse;
     float4 cameraPosition;
     uint frameIndex;
-    int albedoIndex;
-    int normalIndex;
-    int materialIndex;
-    int depthIndex;
+    int albedoIndex;    // RT GBuffer albedo indices
+    int normalIndex;    // RT GBuffer normal indices
+    int materialIndex;  // RT GBuffer material indices
+    int depthIndex;     // RT GBuffer depth indices
     int shadowMapIndex;
     uint32_t padding[2];
 };
@@ -49,13 +49,11 @@ struct MaterialConstants {
     int normalTextureIndex;
 };
 
-struct MeshData {
+struct DrawNodeData {
     row_major float4x4 world;
-};
-
-struct NodeData {
-    uint meshID;
+    uint vertexOffset;
     uint materialID;
+    uint padding[2];
 };
 
 #endif // COMMON_HLSL

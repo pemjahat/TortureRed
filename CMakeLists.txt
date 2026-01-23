@@ -44,10 +44,18 @@ FetchContent_MakeAvailable(directx_headers)
 # Download and configure DXC (DirectX Shader Compiler)
 FetchContent_Declare(
     dxc
-    URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.7.2308/dxc_2023_08_14.zip
+    URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip    
     SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/DXC
 )
 FetchContent_MakeAvailable(dxc)
+
+# Download DirectX Agility SDK
+FetchContent_Declare(
+    agility_sdk
+    URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.618.5
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/AgilitySDK
+)
+FetchContent_MakeAvailable(agility_sdk)
 
 # Download ImGui
 FetchContent_Declare(
@@ -160,6 +168,13 @@ if(WIN32)
 
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND powershell -Command "New-Item -ItemType HardLink -Path '$<TARGET_FILE_DIR:${PROJECT_NAME}>/dxil.dll' -Target '${dxc_SOURCE_DIR}/bin/x64/dxil.dll' -Force"
+    )
+
+    # Copy Agility SDK DLLs
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12
+        COMMAND ${CMAKE_COMMAND} -E copy ${agility_sdk_SOURCE_DIR}/build/native/bin/x64/D3D12Core.dll $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12/D3D12Core.dll
+        COMMAND ${CMAKE_COMMAND} -E copy ${agility_sdk_SOURCE_DIR}/build/native/bin/x64/d3d12sdklayers.dll $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12/d3d12sdklayers.dll
     )
 endif()
 

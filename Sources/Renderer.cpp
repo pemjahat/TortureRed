@@ -244,6 +244,23 @@ bool Renderer::Initialize(HWND hwnd)
     CreateRootSignature();
     CreatePipelineState();
 
+    // Check for SM 6.8 support
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_8 };
+    if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
+    {
+        shaderModel.HighestShaderModel = (D3D_SHADER_MODEL)0; // Unknown
+    }
+    printf("Max supported shader model: %u.%u\n", (shaderModel.HighestShaderModel >> 4) & 0xF, shaderModel.HighestShaderModel & 0xF);
+
+    if (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_8)
+    {
+        printf("Shader Model 6.8 is NOT supported. Please ensure Agility SDK is loaded correctly.\n");
+    }
+    else
+    {
+        printf("Shader Model 6.8 is confirmed supported!\n");
+    }
+
     std::cout << "Renderer initialized successfully!" << std::endl;
     return true;
 }
@@ -304,7 +321,7 @@ void Renderer::BeginFrame()
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
     // Bind the global descriptor table (bindless)
-    m_CommandList->SetGraphicsRootDescriptorTable(5, m_SRVHeap->GetGPUDescriptorHandleForHeapStart());
+    m_CommandList->SetGraphicsRootDescriptorTable(4, m_SRVHeap->GetGPUDescriptorHandleForHeapStart());
 
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
@@ -374,20 +391,28 @@ ID3D12Resource* Renderer::GetCurrentBackBuffer() const
 
 void Renderer::CreateRootSignature()
 {
-    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    D3D12_DESCRIPTOR_RANGE srvRanges[2] = {};
     // t0 space0: Bindless textures
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4096;
-    ranges[0].BaseShaderRegister = 0;
-    ranges[0].RegisterSpace = 0;
-    ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    srvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRanges[0].NumDescriptors = 4096;
+    srvRanges[0].BaseShaderRegister = 0;
+    srvRanges[0].RegisterSpace = 0;
+    srvRanges[0].OffsetInDescriptorsFromTableStart = 0;
 
+    // t0 space2: Bindless buffers
+    srvRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRanges[1].NumDescriptors = 4096;
+    srvRanges[1].BaseShaderRegister = 0;
+    srvRanges[1].RegisterSpace = 2;
+    srvRanges[1].OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_DESCRIPTOR_RANGE uavRange = {};
     // u0 space0: UAV Output
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].RegisterSpace = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange.NumDescriptors = 1;
+    uavRange.BaseShaderRegister = 0;
+    uavRange.RegisterSpace = 0;
+    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     D3D12_ROOT_PARAMETER rootParameters[9] = {};
 
@@ -407,38 +432,39 @@ void Renderer::CreateRootSignature()
     rootParameters[2].Descriptor.RegisterSpace = 1;
     rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 3: b2 Indices (meshID, materialID) (Root Constants)
-    rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[3].Constants.ShaderRegister = 2;
-    rootParameters[3].Constants.Num32BitValues = 2;
+    // 3: t1 (space1) Draw Node Data SRV
+    rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParameters[3].Descriptor.ShaderRegister = 1;
+    rootParameters[3].Descriptor.RegisterSpace = 1;
     rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 4: t1 (space1) Mesh Data SRV
-    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[4].Descriptor.ShaderRegister = 1;
-    rootParameters[4].Descriptor.RegisterSpace = 1;
+    // 4: t0 (space0/space2) Bindless descriptor table
+    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[4].DescriptorTable.NumDescriptorRanges = 2;
+    rootParameters[4].DescriptorTable.pDescriptorRanges = srvRanges;
     rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 5: t0 (space0) Bindless texture descriptor table
-    rootParameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[5].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[5].DescriptorTable.pDescriptorRanges = &ranges[0];
-    rootParameters[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    // 5: t2 (space1) TLAS
+    rootParameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParameters[5].Descriptor.ShaderRegister = 2;
+    rootParameters[5].Descriptor.RegisterSpace = 1;
 
-    // 6: t2 (space1) TLAS
+    // 6: t3 (space1) Primitive Data SRV
     rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[6].Descriptor.ShaderRegister = 2;
+    rootParameters[6].Descriptor.ShaderRegister = 3;
     rootParameters[6].Descriptor.RegisterSpace = 1;
+    rootParameters[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 7: t3 (space1) Primitive Data SRV
+    // 7: t4 (space1) Global Vertex Buffer SRV
     rootParameters[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[7].Descriptor.ShaderRegister = 3;
+    rootParameters[7].Descriptor.ShaderRegister = 4;
     rootParameters[7].Descriptor.RegisterSpace = 1;
+    rootParameters[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     // 8: u0 (space0) UAV Output table
     rootParameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     rootParameters[8].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[8].DescriptorTable.pDescriptorRanges = &ranges[1];
+    rootParameters[8].DescriptorTable.pDescriptorRanges = &uavRange;
 
     // Static samplers
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
@@ -498,19 +524,11 @@ void Renderer::CreateRootSignature()
 
 void Renderer::CreatePipelineState()
 {
-    // Define input layout for GLTF models
-    D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
-    {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GLTFVertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GLTFVertex, normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GLTFVertex, texCoord), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
-    };
-
     // 1. Depth Pre-Pass PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_0");
+        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+        psoDesc.InputLayout = { nullptr, 0 };
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
@@ -526,10 +544,10 @@ void Renderer::CreatePipelineState()
 
     // 2. G-Buffer PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_0");
-        std::vector<char> ps = CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_0");
+        std::vector<char> vs = CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+        psoDesc.InputLayout = { nullptr, 0 };
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -556,8 +574,8 @@ void Renderer::CreatePipelineState()
 
     // 3. Lighting PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_0");
-        std::vector<char> ps = CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_0");
+        std::vector<char> vs = CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
@@ -576,8 +594,8 @@ void Renderer::CreatePipelineState()
 
     // 3.5 Debug PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_0");
-        std::vector<char> ps = CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_0");
+        std::vector<char> vs = CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_8");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
@@ -596,10 +614,10 @@ void Renderer::CreatePipelineState()
 
     // 4. Shadow PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_0");
+        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+        psoDesc.InputLayout = { nullptr, 0 };
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
@@ -669,12 +687,10 @@ void Renderer::DispatchRays(const FrameConstants& frame, const LightConstants& l
 
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
     m_CommandList->SetComputeRootConstantBufferView(1, m_LightCB.gpuAddress);
-    // 2: Material SRV (optional for now)
-    // 3: Mesh/Material Indices (optional for now)
-    // 4: Mesh SRV (optional for now)
-    m_CommandList->SetComputeRootDescriptorTable(5, GetGPUDescriptorHandle(0)); // Bindless
-    m_CommandList->SetComputeRootShaderResourceView(6, m_TLAS.resource->GetGPUVirtualAddress());
-    m_CommandList->SetComputeRootShaderResourceView(7, m_PrimitiveDataBuffer.resource->GetGPUVirtualAddress());
+    
+    m_CommandList->SetComputeRootDescriptorTable(4, GetGPUDescriptorHandle(0)); // Bindless
+    m_CommandList->SetComputeRootShaderResourceView(5, m_TLAS.resource->GetGPUVirtualAddress());
+    m_CommandList->SetComputeRootShaderResourceView(6, m_PrimitiveDataBuffer.resource->GetGPUVirtualAddress());
     m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
 
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
@@ -732,11 +748,11 @@ void Renderer::BuildAccelerationStructures(const std::vector<Model*>& models)
     {
         D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
         geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        geomDesc.Triangles.VertexBuffer.StartAddress = prim->vertexBuffer.resource->GetGPUVirtualAddress();
+        geomDesc.Triangles.VertexBuffer.StartAddress = prim->vertexBufferAddress + (prim->globalVertexOffset * sizeof(GLTFVertex));
         geomDesc.Triangles.VertexBuffer.StrideInBytes = sizeof(GLTFVertex);
         geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT; // Position
         geomDesc.Triangles.VertexCount = static_cast<UINT>(prim->vertices.size());
-        geomDesc.Triangles.IndexBuffer = prim->indexBuffer.resource->GetGPUVirtualAddress();
+        geomDesc.Triangles.IndexBuffer = prim->indexBufferAddress + (prim->globalIndexOffset * sizeof(uint32_t));
         geomDesc.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         geomDesc.Triangles.IndexCount = static_cast<UINT>(prim->indices.size());
         geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
@@ -786,8 +802,8 @@ void Renderer::BuildAccelerationStructures(const std::vector<Model*>& models)
     PrimitiveData* pPrimitiveData = (PrimitiveData*)m_PrimitiveDataBuffer.cpuPtr;
     for (size_t i = 0; i < allPrimitives.size(); ++i)
     {
-        pPrimitiveData[i].vertexBufferIndex = allPrimitives[i]->vertexBuffer.srvIndex;
-        pPrimitiveData[i].indexBufferIndex = allPrimitives[i]->indexBuffer.srvIndex;
+        pPrimitiveData[i].vertexBufferIndex = -1; // TODO: Update ray tracing hit shaders to use global buffer
+        pPrimitiveData[i].indexBufferIndex = -1;
         pPrimitiveData[i].materialIndex = allPrimitives[i]->materialIndex;
         pPrimitiveData[i].padding = 0;
     }
@@ -917,6 +933,27 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
         m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
     }
 
+    return true;
+}
+
+bool Renderer::CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState)
+{
+    UINT64 size = elementSize * elementCount;
+    if (!CreateBuffer(buffer, size, heapType, initialState, false)) return false;
+
+    buffer.srvIndex = AllocateDescriptor();
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GetCPUDescriptorHandle(buffer.srvIndex);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = (UINT)elementCount;
+    srvDesc.Buffer.StructureByteStride = (UINT)elementSize;
+    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
     return true;
 }
 
@@ -1138,6 +1175,8 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
     arguments.push_back(entryPointW.c_str());
     arguments.push_back(L"-T");
     arguments.push_back(targetW.c_str());
+    arguments.push_back(L"-HV");
+    arguments.push_back(L"2021");
     arguments.push_back(L"-I");
     arguments.push_back(L"Shaders");
 

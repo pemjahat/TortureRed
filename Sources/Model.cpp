@@ -271,8 +271,6 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
     if (!m_GltfModel.animations.empty())
         m_CurrentAnimation = &m_GltfModel.animations[0];
 
-    UpdateMeshBuffer();
-
     // Create DirectX 12 resources for the loaded model
     CreateGLTFResources(renderer);
 
@@ -281,73 +279,115 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
 
 void Model::CreateGLTFResources(Renderer* renderer)
 {
+    // Gather all vertices and indices into global buffers
+    m_GlobalVertices.clear();
+    m_GlobalIndices.clear();
+
     for (auto& mesh : m_GltfModel.meshes)
     {
         for (auto& prim : mesh.primitives)
         {
-            if (prim.vertices.empty())
-                continue;
+            prim.globalVertexOffset = static_cast<uint32_t>(m_GlobalVertices.size());
+            prim.globalIndexOffset = static_cast<uint32_t>(m_GlobalIndices.size());
 
-            // Create vertex buffer in default heap
+            // These will be updated after buffers are created
+            prim.vertexBufferAddress = 0;
+            prim.indexBufferAddress = 0;
+
+            m_GlobalVertices.insert(m_GlobalVertices.end(), prim.vertices.begin(), prim.vertices.end());
+            m_GlobalIndices.insert(m_GlobalIndices.end(), prim.indices.begin(), prim.indices.end());
+        }
+    }
+
+    // Create global vertex buffer
+    if (!m_GlobalVertices.empty())
+    {
+        const UINT64 size = m_GlobalVertices.size() * sizeof(GLTFVertex);
+        if (!renderer->CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        {
+            std::cerr << "Failed to create global vertex buffer" << std::endl;
+            return;
+        }
+        if (!renderer->CreateBuffer(m_GlobalVertexStaging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        {
+            std::cerr << "Failed to create global vertex staging buffer" << std::endl;
+            return;
+        }
+        memcpy(m_GlobalVertexStaging.cpuPtr, m_GlobalVertices.data(), size);
+    }
+
+    // Create global index buffer
+    if (!m_GlobalIndices.empty())
+    {
+        const UINT64 size = m_GlobalIndices.size() * sizeof(uint32_t);
+        if (!renderer->CreateBuffer(m_GlobalIndexBuffer, size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        {
+            std::cerr << "Failed to create global index buffer" << std::endl;
+            return;
+        }
+        if (!renderer->CreateBuffer(m_GlobalIndexStaging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        {
+            std::cerr << "Failed to create global index staging buffer" << std::endl;
+            return;
+        }
+        memcpy(m_GlobalIndexStaging.cpuPtr, m_GlobalIndices.data(), size);
+    }
+
+    // Update primitive buffer addresses
+    for (auto& mesh : m_GltfModel.meshes)
+    {
+        for (auto& prim : mesh.primitives)
+        {
+            if (m_GlobalVertexBuffer.resource)
+                prim.vertexBufferAddress = m_GlobalVertexBuffer.gpuAddress;
+            if (m_GlobalIndexBuffer.resource)
+                prim.indexBufferAddress = m_GlobalIndexBuffer.gpuAddress;
+        }
+    }
+
+    // Pre-calculate node data for all node-primitive pairs
+    m_DrawNodeData.clear();
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_GltfModel.nodes.size()); ++i)
+    {
+        GLTFNode& node = m_GltfModel.nodes[i];
+        node.nodeDataOffset = static_cast<uint32_t>(m_DrawNodeData.size());
+        if (node.mesh)
+        {
+            for (auto& prim : node.mesh->primitives)
             {
-                const UINT vertexBufferSize = static_cast<UINT>(prim.vertices.size() * sizeof(GLTFVertex));
-
-                if (!renderer->CreateBuffer(prim.vertexBuffer, vertexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
-                {
-                    std::cerr << "Failed to create vertex buffer" << std::endl;
-                    return;
-                }
-
-                // Create staging buffer
-                if (!renderer->CreateBuffer(prim.vertexStaging, vertexBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-                {
-                    std::cerr << "Failed to create vertex staging buffer" << std::endl;
-                    return;
-                }
-
-                // Copy vertex data to staging
-                memcpy(prim.vertexStaging.cpuPtr, prim.vertices.data(), vertexBufferSize);
-
-                // Initialize vertex buffer view
-                prim.vertexBufferView.BufferLocation = prim.vertexBuffer.gpuAddress;
-                prim.vertexBufferView.StrideInBytes = sizeof(GLTFVertex);
-                prim.vertexBufferView.SizeInBytes = vertexBufferSize;
-            }
-
-            // Create index buffer (if indices exist)
-            if (!prim.indices.empty())
-            {
-                const UINT indexBufferSize = static_cast<UINT>(prim.indices.size() * sizeof(uint32_t));
-
-                if (!renderer->CreateBuffer(prim.indexBuffer, indexBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
-                {
-                    std::cerr << "Failed to create index buffer" << std::endl;
-                    return;
-                }
-
-                // Create staging buffer
-                if (!renderer->CreateBuffer(prim.indexStaging, indexBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-                {
-                    std::cerr << "Failed to create index staging buffer" << std::endl;
-                    return;
-                }
-
-                // Copy index data to staging
-                memcpy(prim.indexStaging.cpuPtr, prim.indices.data(), indexBufferSize);
-
-                // Initialize index buffer view
-                prim.indexBufferView.BufferLocation = prim.indexBuffer.gpuAddress;
-                prim.indexBufferView.Format = DXGI_FORMAT_R32_UINT;
-                prim.indexBufferView.SizeInBytes = indexBufferSize;
+                DrawNodeData data;
+                DirectX::XMStoreFloat4x4(&data.world, DirectX::XMMatrixIdentity());
+                data.vertexOffset = prim.globalVertexOffset;
+                data.materialID = prim.materialIndex;
+                m_DrawNodeData.push_back(data);
             }
         }
+    }
+
+    // Create draw node buffer
+    if (!m_DrawNodeData.empty())
+    {
+        const UINT64 size = m_DrawNodeData.size() * sizeof(DrawNodeData);
+        if (!renderer->CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        {
+            std::cerr << "Failed to create draw node buffer" << std::endl;
+            return;
+        }
+        if (!renderer->CreateBuffer(m_DrawNodeStagingBuffer, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        {
+            std::cerr << "Failed to create draw node staging buffer" << std::endl;
+            return;
+        }
+
+        // Populate staging buffer immediately with initial transforms
+        UpdateNodeBuffer();
     }
 
     // Create material buffer
     if (!m_Materials.empty())
     {
         const UINT materialBufferSize = static_cast<UINT>(m_Materials.size() * sizeof(MaterialConstants));
-        if (!renderer->CreateBuffer(m_MaterialBuffer, materialBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
+        if (!renderer->CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_Materials.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
         {
             std::cerr << "Failed to create material buffer" << std::endl;
             return;
@@ -360,26 +400,6 @@ void Model::CreateGLTFResources(Renderer* renderer)
         }
 
         memcpy(m_MaterialStagingBuffer.cpuPtr, m_Materials.data(), materialBufferSize);
-    }
-
-    // Create mesh buffer
-    if (!m_GltfModel.nodes.empty())
-    {
-        const UINT meshBufferSize = static_cast<UINT>(m_GltfModel.nodes.size() * sizeof(MeshData));
-        if (!renderer->CreateBuffer(m_MeshBuffer, meshBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
-        {
-            std::cerr << "Failed to create mesh buffer" << std::endl;
-            return;
-        }
-
-        if (!renderer->CreateBuffer(m_MeshStagingBuffer, meshBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-        {
-            std::cerr << "Failed to create mesh staging buffer" << std::endl;
-            return;
-        }
-
-        // Populate staging buffer immediately with initial transforms
-        UpdateMeshBuffer();
     }
 }
 
@@ -586,34 +606,35 @@ void Model::BuildNodeHierarchy()
     }
 }
 
-void Model::UpdateMeshBuffer()
+void Model::UpdateNodeBuffer()
 {
-    if (m_MeshData.size() != m_GltfModel.nodes.size())
-    {
-        m_MeshData.resize(m_GltfModel.nodes.size());
-    }
-
     for (auto* rootNode : m_GltfModel.rootNodes)
     {
-        UpdateMeshBufferRecursive(rootNode, DirectX::XMMatrixIdentity());
+        UpdateNodeBufferRecursive(rootNode, DirectX::XMMatrixIdentity());
     }
 
-    if (m_MeshStagingBuffer.cpuPtr)
+    if (m_DrawNodeStagingBuffer.cpuPtr)
     {
-        memcpy(m_MeshStagingBuffer.cpuPtr, m_MeshData.data(), m_MeshData.size() * sizeof(MeshData));
+        memcpy(m_DrawNodeStagingBuffer.cpuPtr, m_DrawNodeData.data(), m_DrawNodeData.size() * sizeof(DrawNodeData));
     }
 }
 
-void Model::UpdateMeshBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform)
+void Model::UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform)
 {
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
 
-    UINT nodeIndex = static_cast<UINT>(node - m_GltfModel.nodes.data());
-    DirectX::XMStoreFloat4x4(&m_MeshData[nodeIndex].world, world);
+    if (node->mesh)
+    {
+        for (uint32_t i = 0; i < static_cast<uint32_t>(node->mesh->primitives.size()); ++i)
+        {
+            uint32_t nodeDataIndex = node->nodeDataOffset + i;
+            DirectX::XMStoreFloat4x4(&m_DrawNodeData[nodeDataIndex].world, world);
+        }
+    }
 
     for (auto* child : node->children)
     {
-        UpdateMeshBufferRecursive(child, world);
+        UpdateNodeBufferRecursive(child, world);
     }
 }
 
@@ -822,14 +843,16 @@ void Model::UpdateAnimation(float deltaTime)
         DirectX::XMStoreFloat4x4(&channel.targetNode->transform, m);
     }
 
-    // Recompute world AABBs after all local transforms are updated
+    // Recompute world AABBs and update GPU node buffer after all local transforms are updated
     for (auto* rootNode : m_GltfModel.rootNodes)
     {
         ComputeWorldAABBs(rootNode, DirectX::XMMatrixIdentity());
     }
+    
+    UpdateNodeBuffer();
 }
 
-void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer)
+void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* /*renderer*/)
 {
     // Reset the command list
     CHECK_HR(cmdList->Reset(cmdAllocator, nullptr), "Reset command list failed");
@@ -940,49 +963,28 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         cmdList->ResourceBarrier(1, &barrier);
     }
 
-    // Copy mesh buffer
-    if (m_MeshBuffer.resource)
+    // Copy draw node buffer
+    if (m_DrawNodeBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_MeshBuffer.resource.Get(), 0, m_MeshStagingBuffer.resource.Get(), 0, m_MeshData.size() * sizeof(MeshData));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_MeshBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        cmdList->CopyBufferRegion(m_DrawNodeBuffer.resource.Get(), 0, m_DrawNodeStagingBuffer.resource.Get(), 0, m_DrawNodeData.size() * sizeof(DrawNodeData));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_DrawNodeBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
         cmdList->ResourceBarrier(1, &barrier);
     }
 
-    // Upload buffers
-    std::vector<D3D12_RESOURCE_BARRIER> barriers;
-    for (auto& mesh : m_GltfModel.meshes)
+    // Copy global vertex buffer
+    if (m_GlobalVertexBuffer.resource)
     {
-        for (auto& prim : mesh.primitives)
-        {
-            if (prim.vertexBuffer.resource)
-            {
-                // Copy vertex buffer
-                cmdList->CopyBufferRegion(prim.vertexBuffer.resource.Get(), 0, prim.vertexStaging.resource.Get(), 0, prim.vertices.size() * sizeof(GLTFVertex));
-                // Barrier to GENERIC_READ
-                D3D12_RESOURCE_BARRIER barrier = {};
-                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrier.Transition.pResource = prim.vertexBuffer.resource.Get();
-                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-                barriers.push_back(barrier);
-            }
-            if (prim.indexBuffer.resource)
-            {
-                // Copy index buffer
-                cmdList->CopyBufferRegion(prim.indexBuffer.resource.Get(), 0, prim.indexStaging.resource.Get(), 0, prim.indices.size() * sizeof(uint32_t));
-                // Barrier to GENERIC_READ
-                D3D12_RESOURCE_BARRIER barrier = {};
-                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrier.Transition.pResource = prim.indexBuffer.resource.Get();
-                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-                barriers.push_back(barrier);
-            }
-        }
+        cmdList->CopyBufferRegion(m_GlobalVertexBuffer.resource.Get(), 0, m_GlobalVertexStaging.resource.Get(), 0, m_GlobalVertices.size() * sizeof(GLTFVertex));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_GlobalVertexBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        cmdList->ResourceBarrier(1, &barrier);
     }
-    if (!barriers.empty())
+
+    // Copy global index buffer
+    if (m_GlobalIndexBuffer.resource)
     {
-        cmdList->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        cmdList->CopyBufferRegion(m_GlobalIndexBuffer.resource.Get(), 0, m_GlobalIndexStaging.resource.Get(), 0, m_GlobalIndices.size() * sizeof(uint32_t));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_GlobalIndexBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        cmdList->ResourceBarrier(1, &barrier);
     }
 
     // Execute the upload commands
@@ -1013,11 +1015,30 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
         commandList->SetGraphicsRootShaderResourceView(2, m_MaterialBuffer.gpuAddress);
     }
 
-    // Bind mesh buffer to root parameter 4
-    if (m_MeshBuffer.resource)
+    // Bind draw node buffer to root parameter 3
+    if (m_DrawNodeBuffer.resource)
     {
-        commandList->SetGraphicsRootShaderResourceView(4, m_MeshBuffer.gpuAddress);
+        commandList->SetGraphicsRootShaderResourceView(3, m_DrawNodeBuffer.gpuAddress);
     }
+
+    // Bind global vertex buffer to root parameter 7
+    if (m_GlobalVertexBuffer.resource)
+    {
+        commandList->SetGraphicsRootShaderResourceView(7, m_GlobalVertexBuffer.gpuAddress);
+    }
+
+    // Bind global index buffer
+    if (m_GlobalIndexBuffer.resource)
+    {
+        D3D12_INDEX_BUFFER_VIEW ibv;
+        ibv.BufferLocation = m_GlobalIndexBuffer.gpuAddress;
+        ibv.Format = DXGI_FORMAT_R32_UINT;
+        ibv.SizeInBytes = static_cast<UINT>(m_GlobalIndices.size() * sizeof(uint32_t));
+        commandList->IASetIndexBuffer(&ibv);
+    }
+
+    // Unbind IA vertex buffers (using vertex pulling)
+    commandList->IASetVertexBuffers(0, 0, nullptr);
 
     for (auto* rootNode : m_GltfModel.rootNodes)
     {
@@ -1037,23 +1058,19 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
     ++m_NodesSurviveFrustum;
 
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
-    UINT meshID = static_cast<UINT>(node - m_GltfModel.nodes.data());
 
     if (node->mesh)
     {
-        for (auto& prim : node->mesh->primitives)
+        for (uint32_t i = 0; i < static_cast<uint32_t>(node->mesh->primitives.size()); ++i)
         {
+            auto& prim = node->mesh->primitives[i];
             if (prim.alphaMode != mode)
                 continue;
 
-            // Set mesh ID and material ID as root constants (slot 3)
-            UINT indices[2] = { meshID, prim.materialIndex };
-            commandList->SetGraphicsRoot32BitConstants(3, 2, indices, 0);
-
-            // Render the mesh
-            commandList->IASetVertexBuffers(0, 1, &prim.vertexBufferView);
-            commandList->IASetIndexBuffer(&prim.indexBufferView);
-            commandList->DrawIndexedInstanced(static_cast<UINT>(prim.indices.size()), 1, 0, 0, 0);
+            // Render the mesh using programmable vertex pulling
+            // StartInstanceLocation serves as our index into m_DrawNodeBuffer
+            uint32_t nodeDataIndex = node->nodeDataOffset + i;
+            commandList->DrawIndexedInstanced(static_cast<UINT>(prim.indices.size()), 1, prim.globalIndexOffset, 0, nodeDataIndex);
         }
     }
 

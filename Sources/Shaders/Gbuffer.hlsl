@@ -1,35 +1,34 @@
 #include "Common.hlsl"
 
-struct VSInput {
-    float3 position : POSITION;
-    float3 normal : NORMAL;
-    float2 texCoord : TEXCOORD;
-};
-
 struct PSInput {
     float4 position : SV_POSITION;
     float3 worldPos : WORLD_POS;
     float3 normal : NORMAL;
     float2 texCoord : TEXCOORD;
+    nointerpolation uint materialID : MATERIAL_ID;
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<NodeData> NodeCB : register(b2);
 
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
-StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
+StructuredBuffer<DrawNodeData> DrawNodeBuffer : register(t1, space1);
+StructuredBuffer<GLTFVertex> GlobalVertexBuffer : register(t4, space1);
 
 Texture2D textures[] : register(t0);
 SamplerState pointSampler : register(s0);
 
-PSInput VSMain(VSInput input) {
+PSInput VSMain(uint instanceID : SV_StartInstanceLocation, uint vertexID: SV_VertexID)
+{
+    DrawNodeData drawData = DrawNodeBuffer[instanceID];
+    GLTFVertex v = GlobalVertexBuffer[drawData.vertexOffset + vertexID];
+
     PSInput output;
-    float4x4 world = MeshBuffer[NodeCB.meshID].world;
-    float4 worldPos = mul(float4(input.position, 1.0f), world);
+    float4 worldPos = mul(float4(v.position, 1.0f), drawData.world);
     output.position = mul(worldPos, FrameCB.viewProj);
     output.worldPos = worldPos.xyz;
-    output.normal = mul(input.normal, (float3x3)world);
-    output.texCoord = input.texCoord;
+    output.normal = mul(v.normal, (float3x3)drawData.world);
+    output.texCoord = v.texCoord;
+    output.materialID = drawData.materialID;
     return output;
 }
 
@@ -42,7 +41,7 @@ struct GBufferOutput {
 GBufferOutput PSMain(PSInput input) {
     GBufferOutput output;
     
-    MaterialConstants material = MaterialBuffer[NodeCB.materialID];
+    MaterialConstants material = MaterialBuffer[input.materialID];
     
     float4 albedo = material.baseColorFactor;
     if (material.baseColorTextureIndex >= 0) {

@@ -76,7 +76,7 @@ void Application::Initialize()
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
 
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
+    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
