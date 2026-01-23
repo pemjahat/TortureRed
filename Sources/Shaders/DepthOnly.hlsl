@@ -11,13 +11,12 @@ struct PSInput {
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
+ConstantBuffer<NodeData> NodeCB : register(b2);
 
-cbuffer MeshCB : register(b3) {
-    row_major float4x4 world;
-};
-
+StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
 PSInput VSMain(VSInput input) {
     PSInput output;
+    float4x4 world = MeshBuffer[NodeCB.meshID].world;
     float4 worldPos = mul(float4(input.position, 1.0f), world);
     output.position = mul(worldPos, FrameCB.viewProj);
     return output;

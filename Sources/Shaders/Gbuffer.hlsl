@@ -14,22 +14,17 @@ struct PSInput {
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-
-cbuffer MaterialIDCB : register(b2) {
-    uint materialID;
-};
+ConstantBuffer<NodeData> NodeCB : register(b2);
 
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
-
-cbuffer MeshCB : register(b3) {
-    row_major float4x4 world;
-};
+StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
 
 Texture2D textures[] : register(t0);
 SamplerState pointSampler : register(s0);
 
 PSInput VSMain(VSInput input) {
     PSInput output;
+    float4x4 world = MeshBuffer[NodeCB.meshID].world;
     float4 worldPos = mul(float4(input.position, 1.0f), world);
     output.position = mul(worldPos, FrameCB.viewProj);
     output.worldPos = worldPos.xyz;
@@ -47,7 +42,7 @@ struct GBufferOutput {
 GBufferOutput PSMain(PSInput input) {
     GBufferOutput output;
     
-    MaterialConstants material = MaterialBuffer[materialID];
+    MaterialConstants material = MaterialBuffer[NodeCB.materialID];
     
     float4 albedo = material.baseColorFactor;
     if (material.baseColorTextureIndex >= 0) {

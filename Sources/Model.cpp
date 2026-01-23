@@ -271,6 +271,8 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
     if (!m_GltfModel.animations.empty())
         m_CurrentAnimation = &m_GltfModel.animations[0];
 
+    UpdateMeshBuffer();
+
     // Create DirectX 12 resources for the loaded model
     CreateGLTFResources(renderer);
 
@@ -358,6 +360,26 @@ void Model::CreateGLTFResources(Renderer* renderer)
         }
 
         memcpy(m_MaterialStagingBuffer.cpuPtr, m_Materials.data(), materialBufferSize);
+    }
+
+    // Create mesh buffer
+    if (!m_GltfModel.nodes.empty())
+    {
+        const UINT meshBufferSize = static_cast<UINT>(m_GltfModel.nodes.size() * sizeof(MeshData));
+        if (!renderer->CreateBuffer(m_MeshBuffer, meshBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
+        {
+            std::cerr << "Failed to create mesh buffer" << std::endl;
+            return;
+        }
+
+        if (!renderer->CreateBuffer(m_MeshStagingBuffer, meshBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        {
+            std::cerr << "Failed to create mesh staging buffer" << std::endl;
+            return;
+        }
+
+        // Populate staging buffer immediately with initial transforms
+        UpdateMeshBuffer();
     }
 }
 
@@ -564,6 +586,37 @@ void Model::BuildNodeHierarchy()
     }
 }
 
+void Model::UpdateMeshBuffer()
+{
+    if (m_MeshData.size() != m_GltfModel.nodes.size())
+    {
+        m_MeshData.resize(m_GltfModel.nodes.size());
+    }
+
+    for (auto* rootNode : m_GltfModel.rootNodes)
+    {
+        UpdateMeshBufferRecursive(rootNode, DirectX::XMMatrixIdentity());
+    }
+
+    if (m_MeshStagingBuffer.cpuPtr)
+    {
+        memcpy(m_MeshStagingBuffer.cpuPtr, m_MeshData.data(), m_MeshData.size() * sizeof(MeshData));
+    }
+}
+
+void Model::UpdateMeshBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform)
+{
+    DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
+
+    UINT nodeIndex = static_cast<UINT>(node - m_GltfModel.nodes.data());
+    DirectX::XMStoreFloat4x4(&m_MeshData[nodeIndex].world, world);
+
+    for (auto* child : node->children)
+    {
+        UpdateMeshBufferRecursive(child, world);
+    }
+}
+
 void Model::ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform)
 {
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
@@ -694,6 +747,8 @@ void Model::LoadAnimations()
 
 void Model::UpdateAnimation(float deltaTime)
 {
+    return; // Temporarily disabled
+
     if (!m_CurrentAnimation)
         return;
 
@@ -885,6 +940,14 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         cmdList->ResourceBarrier(1, &barrier);
     }
 
+    // Copy mesh buffer
+    if (m_MeshBuffer.resource)
+    {
+        cmdList->CopyBufferRegion(m_MeshBuffer.resource.Get(), 0, m_MeshStagingBuffer.resource.Get(), 0, m_MeshData.size() * sizeof(MeshData));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_MeshBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        cmdList->ResourceBarrier(1, &barrier);
+    }
+
     // Upload buffers
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     for (auto& mesh : m_GltfModel.meshes)
@@ -950,6 +1013,12 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
         commandList->SetGraphicsRootShaderResourceView(2, m_MaterialBuffer.gpuAddress);
     }
 
+    // Bind mesh buffer to root parameter 4
+    if (m_MeshBuffer.resource)
+    {
+        commandList->SetGraphicsRootShaderResourceView(4, m_MeshBuffer.gpuAddress);
+    }
+
     for (auto* rootNode : m_GltfModel.rootNodes)
     {
         RenderNode(commandList, rootNode, DirectX::XMMatrixIdentity(), renderer, frustum, mode);
@@ -968,6 +1037,7 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
     ++m_NodesSurviveFrustum;
 
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
+    UINT meshID = static_cast<UINT>(node - m_GltfModel.nodes.data());
 
     if (node->mesh)
     {
@@ -976,13 +1046,9 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
             if (prim.alphaMode != mode)
                 continue;
 
-            // Set material ID as root constant
-            commandList->SetGraphicsRoot32BitConstants(3, 1, &prim.materialIndex, 0);
-
-            // Set world matrix as root constants
-            float worldFloats[16];
-            DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
-            commandList->SetGraphicsRoot32BitConstants(4, 16, worldFloats, 0);
+            // Set mesh ID and material ID as root constants (slot 3)
+            UINT indices[2] = { meshID, prim.materialIndex };
+            commandList->SetGraphicsRoot32BitConstants(3, 2, indices, 0);
 
             // Render the mesh
             commandList->IASetVertexBuffers(0, 1, &prim.vertexBufferView);

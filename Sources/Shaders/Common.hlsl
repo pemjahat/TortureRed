@@ -49,4 +49,13 @@ struct MaterialConstants {
     int normalTextureIndex;
 };
 
+struct MeshData {
+    row_major float4x4 world;
+};
+
+struct NodeData {
+    uint meshID;
+    uint materialID;
+};
+
 #endif // COMMON_HLSL

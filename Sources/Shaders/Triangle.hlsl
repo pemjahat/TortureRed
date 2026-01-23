@@ -22,13 +22,10 @@ struct PSOutput
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<MaterialConstants> MaterialCB : register(b2);
+ConstantBuffer<NodeData> NodeCB : register(b2);
+StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
+StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
 
-// Mesh constant buffer - per mesh
-cbuffer MeshCB : register(b3)
-{
-    row_major float4x4 world;
-};
 
 // Textures
 Texture2D textures[] : register(t0);
@@ -39,32 +36,33 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
 
+    float4x4 world = MeshBuffer[NodeCB.meshID].world;
+
     // Transform position to clip space: world * viewProj
     output.position = mul(float4(input.position, 1.0f), mul(world, FrameCB.viewProj));
 
     // Transform normal (simplified - assumes no non-uniform scaling)
-    output.normal = input.normal;
+    output.normal = mul(input.normal, (float3x3)world);
 
     output.texCoord = input.texCoord;
     return output;
 }
 
-// Pixel shader - texture sampling with baseColorFactor lighting
+// Pixel shader
 PSOutput PSMain(PSInput input)
 {
     PSOutput output;
-
-    float4 color = MaterialCB.baseColorFactor;
-
-    if (MaterialCB.baseColorTextureIndex >= 0)
+    
+    MaterialConstants material = MaterialBuffer[NodeCB.materialID];
+    
+    float4 albedo = material.baseColorFactor;
+    if (material.baseColorTextureIndex >= 0)
     {
-        color *= textures[MaterialCB.baseColorTextureIndex].Sample(samplerState, input.texCoord);
-    }
+        albedo *= textures[material.baseColorTextureIndex].Sample(samplerState, input.texCoord);
+    }    
 
     // Apply lighting to baseColorFactor
     float lighting = dot(input.normal, normalize(float3(1.0f, 1.0f, 1.0f))) * 0.5f + 0.5f;
-    color *= lighting;
-
-    output.color = color;
+    output.color = albedo * lighting;
     return output;
 }

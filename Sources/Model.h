@@ -24,9 +24,9 @@ struct MaterialConstants
     int normalTextureIndex;
 };
 
-struct InstanceData
+struct MeshData
 {
-    DirectX::XMFLOAT4X4 transform;
+    DirectX::XMFLOAT4X4 world;
 };
 
 struct GLTFVertex
@@ -147,6 +147,9 @@ public:
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
 
+    // Update mesh buffer with current node transforms
+    void UpdateMeshBuffer();
+
     // Prevent copying
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
@@ -154,6 +157,7 @@ public:
 private:
     void CreateGLTFResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);    void GetPrimitivesRecursive(const struct GLTFNode* node, std::vector<const struct GLTFPrimitive*>& primitives) const;    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void UpdateMeshBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
     void LoadMaterials();
     void BuildNodeHierarchy();
@@ -167,6 +171,11 @@ private:
     std::vector<MaterialConstants> m_Materials;
     GPUBuffer m_MaterialBuffer;
     GPUBuffer m_MaterialStagingBuffer;
+
+    // Mesh Data
+    std::vector<MeshData> m_MeshData;
+    GPUBuffer m_MeshBuffer;
+    GPUBuffer m_MeshStagingBuffer;
 
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;

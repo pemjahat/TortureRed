@@ -407,16 +407,16 @@ void Renderer::CreateRootSignature()
     rootParameters[2].Descriptor.RegisterSpace = 1;
     rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 3: b2 materialID (Root Constants)
+    // 3: b2 Indices (meshID, materialID) (Root Constants)
     rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     rootParameters[3].Constants.ShaderRegister = 2;
-    rootParameters[3].Constants.Num32BitValues = 1;
+    rootParameters[3].Constants.Num32BitValues = 2;
     rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 4: b3 Mesh constants (Root Constants)
-    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[4].Constants.ShaderRegister = 3;
-    rootParameters[4].Constants.Num32BitValues = 16;
+    // 4: t1 (space1) Mesh Data SRV
+    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParameters[4].Descriptor.ShaderRegister = 1;
+    rootParameters[4].Descriptor.RegisterSpace = 1;
     rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     // 5: t0 (space0) Bindless texture descriptor table
@@ -425,14 +425,14 @@ void Renderer::CreateRootSignature()
     rootParameters[5].DescriptorTable.pDescriptorRanges = &ranges[0];
     rootParameters[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 6: t1 (space1) TLAS
+    // 6: t2 (space1) TLAS
     rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[6].Descriptor.ShaderRegister = 1;
+    rootParameters[6].Descriptor.ShaderRegister = 2;
     rootParameters[6].Descriptor.RegisterSpace = 1;
 
-    // 7: t2 (space1) Primitive Data SRV
+    // 7: t3 (space1) Primitive Data SRV
     rootParameters[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[7].Descriptor.ShaderRegister = 2;
+    rootParameters[7].Descriptor.ShaderRegister = 3;
     rootParameters[7].Descriptor.RegisterSpace = 1;
 
     // 8: u0 (space0) UAV Output table
@@ -668,13 +668,14 @@ void Renderer::DispatchRays(const FrameConstants& frame, const LightConstants& l
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
 
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
-    // 1: Material Root Constants (skipping for now)
-    m_CommandList->SetComputeRootConstantBufferView(2, m_LightCB.gpuAddress);
-    // 3: Mesh Root Constants (skipping for now)
-    m_CommandList->SetComputeRootDescriptorTable(4, GetGPUDescriptorHandle(0)); // Bindless
-    m_CommandList->SetComputeRootShaderResourceView(5, m_TLAS.resource->GetGPUVirtualAddress());
-    m_CommandList->SetComputeRootDescriptorTable(6, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
+    m_CommandList->SetComputeRootConstantBufferView(1, m_LightCB.gpuAddress);
+    // 2: Material SRV (optional for now)
+    // 3: Mesh/Material Indices (optional for now)
+    // 4: Mesh SRV (optional for now)
+    m_CommandList->SetComputeRootDescriptorTable(5, GetGPUDescriptorHandle(0)); // Bindless
+    m_CommandList->SetComputeRootShaderResourceView(6, m_TLAS.resource->GetGPUVirtualAddress());
     m_CommandList->SetComputeRootShaderResourceView(7, m_PrimitiveDataBuffer.resource->GetGPUVirtualAddress());
+    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
 
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
