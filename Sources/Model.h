@@ -20,8 +20,8 @@ struct MaterialConstants
     DirectX::XMFLOAT4 baseColorFactor;
     float metallicFactor;
     float roughnessFactor;
-    UINT hasBaseColorTexture;
-    UINT padding[1]; // Pad to 16 bytes
+    int baseColorTextureIndex;
+    int normalTextureIndex;
 };
 
 struct InstanceData
@@ -155,12 +155,19 @@ private:
     void CreateGLTFResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);    void GetPrimitivesRecursive(const struct GLTFNode* node, std::vector<const struct GLTFPrimitive*>& primitives) const;    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
+    void LoadMaterials();
     void BuildNodeHierarchy();
     void LoadAnimations();
 
     GLTFModel m_GltfModel;
     std::wstring fileDirectory;
     UINT srvDescriptorSize;
+
+    // Materials
+    std::vector<MaterialConstants> m_Materials;
+    GPUBuffer m_MaterialBuffer;
+    GPUBuffer m_MaterialStagingBuffer;
+
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;
     float m_AnimationTime = 0.0f;

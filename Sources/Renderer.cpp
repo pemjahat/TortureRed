@@ -304,13 +304,13 @@ void Renderer::BeginFrame()
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
     // Bind the global descriptor table (bindless)
-    m_CommandList->SetGraphicsRootDescriptorTable(4, m_SRVHeap->GetGPUDescriptorHandleForHeapStart());
+    m_CommandList->SetGraphicsRootDescriptorTable(5, m_SRVHeap->GetGPUDescriptorHandleForHeapStart());
 
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
 
     // Set Light constant buffer
-    m_CommandList->SetGraphicsRootConstantBufferView(2, m_LightCB.gpuAddress);
+    m_CommandList->SetGraphicsRootConstantBufferView(1, m_LightCB.gpuAddress);
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -389,50 +389,56 @@ void Renderer::CreateRootSignature()
     ranges[1].RegisterSpace = 0;
     ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER rootParameters[8] = {};
+    D3D12_ROOT_PARAMETER rootParameters[9] = {};
 
     // 0: b0 FrameConstants
     rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     rootParameters[0].Descriptor.ShaderRegister = 0;
     rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 1: b1 Material constants (Root Constants)
-    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[1].Constants.ShaderRegister = 1;
-    rootParameters[1].Constants.Num32BitValues = 8;
+    // 1: b1 Light constants
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameters[1].Descriptor.ShaderRegister = 1;
     rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 2: b2 Light constants
-    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameters[2].Descriptor.ShaderRegister = 2;
+    // 2: t0 (space1) Material Data SRV
+    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParameters[2].Descriptor.ShaderRegister = 0;
+    rootParameters[2].Descriptor.RegisterSpace = 1;
     rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 3: b3 Mesh constants (Root Constants)
+    // 3: b2 materialID (Root Constants)
     rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[3].Constants.ShaderRegister = 3;
-    rootParameters[3].Constants.Num32BitValues = 16;
+    rootParameters[3].Constants.ShaderRegister = 2;
+    rootParameters[3].Constants.Num32BitValues = 1;
     rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 4: t0 (space0) Bindless texture descriptor table
-    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[4].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[4].DescriptorTable.pDescriptorRanges = &ranges[0];
+    // 4: b3 Mesh constants (Root Constants)
+    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParameters[4].Constants.ShaderRegister = 3;
+    rootParameters[4].Constants.Num32BitValues = 16;
     rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 5: t0 (space1) TLAS
-    rootParameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[5].Descriptor.ShaderRegister = 0;
-    rootParameters[5].Descriptor.RegisterSpace = 1;
+    // 5: t0 (space0) Bindless texture descriptor table
+    rootParameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[5].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[5].DescriptorTable.pDescriptorRanges = &ranges[0];
+    rootParameters[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 6: u0 (space0) UAV Output table
-    rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[6].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[6].DescriptorTable.pDescriptorRanges = &ranges[1];
+    // 6: t1 (space1) TLAS
+    rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParameters[6].Descriptor.ShaderRegister = 1;
+    rootParameters[6].Descriptor.RegisterSpace = 1;
 
-    // 7: t1 (space1) Primitive Data SRV
+    // 7: t2 (space1) Primitive Data SRV
     rootParameters[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[7].Descriptor.ShaderRegister = 1;
+    rootParameters[7].Descriptor.ShaderRegister = 2;
     rootParameters[7].Descriptor.RegisterSpace = 1;
+
+    // 8: u0 (space0) UAV Output table
+    rootParameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[8].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[8].DescriptorTable.pDescriptorRanges = &ranges[1];
 
     // Static samplers
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};

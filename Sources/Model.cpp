@@ -67,6 +67,7 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
     }
 
     LoadTextures(renderer);
+    LoadMaterials();
 
     m_GltfModel.meshes.reserve(m_GltfModel.data->meshes_count);
 
@@ -339,6 +340,25 @@ void Model::CreateGLTFResources(Renderer* renderer)
             }
         }
     }
+
+    // Create material buffer
+    if (!m_Materials.empty())
+    {
+        const UINT materialBufferSize = static_cast<UINT>(m_Materials.size() * sizeof(MaterialConstants));
+        if (!renderer->CreateBuffer(m_MaterialBuffer, materialBufferSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true))
+        {
+            std::cerr << "Failed to create material buffer" << std::endl;
+            return;
+        }
+
+        if (!renderer->CreateBuffer(m_MaterialStagingBuffer, materialBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        {
+            std::cerr << "Failed to create material staging buffer" << std::endl;
+            return;
+        }
+
+        memcpy(m_MaterialStagingBuffer.cpuPtr, m_Materials.data(), materialBufferSize);
+    }
 }
 
 void Model::LoadTextures(Renderer* renderer)
@@ -402,6 +422,72 @@ void Model::LoadTextures(Renderer* renderer)
             size_t imageIndex = tex->image - m_GltfModel.data->images;
             m_GltfModel.textures[i].source = &m_GltfModel.images[imageIndex];
         }
+    }
+}
+
+void Model::LoadMaterials()
+{
+    m_Materials.resize(m_GltfModel.data->materials_count);
+    for (size_t i = 0; i < m_GltfModel.data->materials_count; ++i)
+    {
+        cgltf_material* material = &m_GltfModel.data->materials[i];
+        MaterialConstants& mc = m_Materials[i];
+
+        // Default values
+        mc.baseColorFactor = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+        mc.metallicFactor = 1.0f;
+        mc.roughnessFactor = 1.0f;
+        mc.baseColorTextureIndex = -1;
+        mc.normalTextureIndex = -1;
+
+        if (material->has_pbr_metallic_roughness)
+        {
+            mc.baseColorFactor = DirectX::XMFLOAT4(
+                material->pbr_metallic_roughness.base_color_factor[0],
+                material->pbr_metallic_roughness.base_color_factor[1],
+                material->pbr_metallic_roughness.base_color_factor[2],
+                material->pbr_metallic_roughness.base_color_factor[3]
+            );
+            mc.metallicFactor = material->pbr_metallic_roughness.metallic_factor;
+            mc.roughnessFactor = material->pbr_metallic_roughness.roughness_factor;
+
+            if (material->pbr_metallic_roughness.base_color_texture.texture)
+            {
+                size_t texIndex = material->pbr_metallic_roughness.base_color_texture.texture - m_GltfModel.data->textures;
+                if (texIndex < m_GltfModel.textures.size())
+                {
+                    GLTFTexture& texture = m_GltfModel.textures[texIndex];
+                    if (texture.source)
+                    {
+                        mc.baseColorTextureIndex = texture.source->texture.srvIndex;
+                    }
+                }
+            }
+        }
+
+        if (material->normal_texture.texture)
+        {
+            size_t texIndex = material->normal_texture.texture - m_GltfModel.data->textures;
+            if (texIndex < m_GltfModel.textures.size())
+            {
+                GLTFTexture& texture = m_GltfModel.textures[texIndex];
+                if (texture.source)
+                {
+                    mc.normalTextureIndex = texture.source->texture.srvIndex;
+                }
+            }
+        }
+    }
+
+    if (m_Materials.empty())
+    {
+        MaterialConstants mc;
+        mc.baseColorFactor = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+        mc.metallicFactor = 1.0f;
+        mc.roughnessFactor = 1.0f;
+        mc.baseColorTextureIndex = -1;
+        mc.normalTextureIndex = -1;
+        m_Materials.push_back(mc);
     }
 }
 
@@ -791,6 +877,14 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         gltfImg.image = nullptr;
     }
 
+    // Copy material buffer
+    if (m_MaterialBuffer.resource)
+    {
+        cmdList->CopyBufferRegion(m_MaterialBuffer.resource.Get(), 0, m_MaterialStagingBuffer.resource.Get(), 0, m_Materials.size() * sizeof(MaterialConstants));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_MaterialBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        cmdList->ResourceBarrier(1, &barrier);
+    }
+
     // Upload buffers
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     for (auto& mesh : m_GltfModel.meshes)
@@ -850,6 +944,12 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
     // Reset debug counter
     m_NodesSurviveFrustum = 0;
 
+    // Bind material buffer to root parameter 2
+    if (m_MaterialBuffer.resource)
+    {
+        commandList->SetGraphicsRootShaderResourceView(2, m_MaterialBuffer.gpuAddress);
+    }
+
     for (auto* rootNode : m_GltfModel.rootNodes)
     {
         RenderNode(commandList, rootNode, DirectX::XMMatrixIdentity(), renderer, frustum, mode);
@@ -876,29 +976,13 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
             if (prim.alphaMode != mode)
                 continue;
 
-            // Set material constants as root constants
-            struct {
-                float baseColorFactor[4];
-                float metallicFactor;
-                float roughnessFactor;
-                int baseColorTextureIndex;
-                float padding;
-            } materialCB;
-
-            materialCB.baseColorFactor[0] = prim.material.baseColorFactor[0];
-            materialCB.baseColorFactor[1] = prim.material.baseColorFactor[1];
-            materialCB.baseColorFactor[2] = prim.material.baseColorFactor[2];
-            materialCB.baseColorFactor[3] = prim.material.baseColorFactor[3];
-            materialCB.metallicFactor = prim.material.metallicFactor;
-            materialCB.roughnessFactor = prim.material.roughnessFactor;
-            materialCB.baseColorTextureIndex = (prim.material.baseColorTexture && prim.material.baseColorTexture->source) ? (int)prim.material.baseColorTexture->source->texture.srvIndex : -1;
-            materialCB.padding = 0.0f;
-            commandList->SetGraphicsRoot32BitConstants(1, 8, &materialCB, 0);
+            // Set material ID as root constant
+            commandList->SetGraphicsRoot32BitConstants(3, 1, &prim.materialIndex, 0);
 
             // Set world matrix as root constants
             float worldFloats[16];
             DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(worldFloats), world);
-            commandList->SetGraphicsRoot32BitConstants(3, 16, worldFloats, 0);
+            commandList->SetGraphicsRoot32BitConstants(4, 16, worldFloats, 0);
 
             // Render the mesh
             commandList->IASetVertexBuffers(0, 1, &prim.vertexBufferView);

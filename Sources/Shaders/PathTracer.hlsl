@@ -2,8 +2,8 @@
 #include "Common.hlsl"
 
 RWTexture2D<float4> g_Output : register(u0);
-RaytracingAccelerationStructure g_Scene : register(t0, space1);
-StructuredBuffer<PrimitiveData> g_Primitives : register(t1, space1);
+RaytracingAccelerationStructure g_Scene : register(t1, space1);
+StructuredBuffer<PrimitiveData> g_Primitives : register(t2, space1);
 ByteAddressBuffer g_Buffers[] : register(t0, space0);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);

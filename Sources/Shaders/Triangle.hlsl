@@ -22,7 +22,7 @@ struct PSOutput
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<MaterialConstants> MaterialCB : register(b1);
+ConstantBuffer<MaterialConstants> MaterialCB : register(b2);
 
 // Mesh constant buffer - per mesh
 cbuffer MeshCB : register(b3)

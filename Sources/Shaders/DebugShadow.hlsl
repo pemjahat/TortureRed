@@ -35,7 +35,7 @@ SamplerState linearSampler : register(s0);
 SamplerComparisonState shadowSampler : register(s1);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<LightConstants> LightCB : register(b2);
+ConstantBuffer<LightConstants> LightCB : register(b1);
 
 float CalcShadow(float4 shadowPos) {
     shadowPos.xyz /= shadowPos.w;

@@ -14,7 +14,12 @@ struct PSInput {
 };
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<MaterialConstants> MaterialCB : register(b1);
+
+cbuffer MaterialIDCB : register(b2) {
+    uint materialID;
+};
+
+StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
 cbuffer MeshCB : register(b3) {
     row_major float4x4 world;
@@ -42,9 +47,11 @@ struct GBufferOutput {
 GBufferOutput PSMain(PSInput input) {
     GBufferOutput output;
     
-    float4 albedo = MaterialCB.baseColorFactor;
-    if (MaterialCB.baseColorTextureIndex >= 0) {
-        float4 sampled = textures[MaterialCB.baseColorTextureIndex].Sample(pointSampler, input.texCoord);
+    MaterialConstants material = MaterialBuffer[materialID];
+    
+    float4 albedo = material.baseColorFactor;
+    if (material.baseColorTextureIndex >= 0) {
+        float4 sampled = textures[material.baseColorTextureIndex].Sample(pointSampler, input.texCoord);
         albedo *= sampled;
         
         // Simple alpha test for Masked geometry
@@ -54,7 +61,7 @@ GBufferOutput PSMain(PSInput input) {
     
     output.albedo = albedo;
     output.normal = float4(normalize(input.normal) * 0.5f + 0.5f, 1.0f);
-    output.material = float4(MaterialCB.roughnessFactor, MaterialCB.metallicFactor, 0.0f, 1.0f);
+    output.material = float4(material.roughnessFactor, material.metallicFactor, 0.0f, 1.0f);
     
     return output;
 }

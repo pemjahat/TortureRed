@@ -46,7 +46,7 @@ struct MaterialConstants {
     float metallicFactor;
     float roughnessFactor;
     int baseColorTextureIndex;
-    uint padding;
+    int normalTextureIndex;
 };
 
 #endif // COMMON_HLSL
