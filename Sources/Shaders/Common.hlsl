@@ -52,8 +52,9 @@ struct MaterialConstants {
 struct DrawNodeData {
     row_major float4x4 world;
     uint vertexOffset;
+    uint indexOffset;
     uint materialID;
-    uint padding[2];
+    uint padding;
 };
 
 #endif // COMMON_HLSL

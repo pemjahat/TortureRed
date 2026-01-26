@@ -320,7 +320,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     if (!m_GlobalIndices.empty())
     {
         const UINT64 size = m_GlobalIndices.size() * sizeof(uint32_t);
-        if (!renderer->CreateBuffer(m_GlobalIndexBuffer, size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        if (!renderer->CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
         {
             std::cerr << "Failed to create global index buffer" << std::endl;
             return;
@@ -347,6 +347,9 @@ void Model::CreateGLTFResources(Renderer* renderer)
 
     // Pre-calculate node data for all node-primitive pairs
     m_DrawNodeData.clear();
+    m_OpaqueCommands.clear();
+    m_TransparentCommands.clear();
+
     for (uint32_t i = 0; i < static_cast<uint32_t>(m_GltfModel.nodes.size()); ++i)
     {
         GLTFNode& node = m_GltfModel.nodes[i];
@@ -358,8 +361,22 @@ void Model::CreateGLTFResources(Renderer* renderer)
                 DrawNodeData data;
                 DirectX::XMStoreFloat4x4(&data.world, DirectX::XMMatrixIdentity());
                 data.vertexOffset = prim.globalVertexOffset;
+                data.indexOffset = prim.globalIndexOffset;
                 data.materialID = prim.materialIndex;
                 m_DrawNodeData.push_back(data);
+
+                // Create indirect command for this primitive (Indexed)
+                IndirectDrawCommand cmd;
+                cmd.drawArgs.IndexCountPerInstance = static_cast<UINT>(prim.indices.size());
+                cmd.drawArgs.InstanceCount = 1;
+                cmd.drawArgs.StartIndexLocation = prim.globalIndexOffset;
+                cmd.drawArgs.BaseVertexLocation = 0;
+                cmd.drawArgs.StartInstanceLocation = static_cast<UINT>(m_DrawNodeData.size() - 1);
+                
+                if (prim.alphaMode == AlphaMode::Opaque || prim.alphaMode == AlphaMode::Mask)
+                    m_OpaqueCommands.push_back(cmd);
+                else
+                    m_TransparentCommands.push_back(cmd);
             }
         }
     }
@@ -367,16 +384,44 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create draw node buffer
     if (!m_DrawNodeData.empty())
     {
-        const UINT64 size = m_DrawNodeData.size() * sizeof(DrawNodeData);
-        if (!renderer->CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        if (!renderer->CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
         {
             std::cerr << "Failed to create draw node buffer" << std::endl;
             return;
         }
-        if (!renderer->CreateBuffer(m_DrawNodeStagingBuffer, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+
+        // Create opaque command buffer
+        if (!m_OpaqueCommands.empty())
         {
-            std::cerr << "Failed to create draw node staging buffer" << std::endl;
-            return;
+            const UINT64 cmdSize = m_OpaqueCommands.size() * sizeof(IndirectDrawCommand);
+            if (!renderer->CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false))
+            {
+                std::cerr << "Failed to create opaque indirect draw buffer" << std::endl;
+                return;
+            }
+            if (!renderer->CreateBuffer(m_OpaqueCommandStagingBuffer, cmdSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+            {
+                std::cerr << "Failed to create opaque indirect draw staging buffer" << std::endl;
+                return;
+            }
+            memcpy(m_OpaqueCommandStagingBuffer.cpuPtr, m_OpaqueCommands.data(), cmdSize);
+        }
+
+        // Create transparent command buffer
+        if (!m_TransparentCommands.empty())
+        {
+            const UINT64 cmdSize = m_TransparentCommands.size() * sizeof(IndirectDrawCommand);
+            if (!renderer->CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false))
+            {
+                std::cerr << "Failed to create transparent indirect draw buffer" << std::endl;
+                return;
+            }
+            if (!renderer->CreateBuffer(m_TransparentCommandStagingBuffer, cmdSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+            {
+                std::cerr << "Failed to create transparent indirect draw staging buffer" << std::endl;
+                return;
+            }
+            memcpy(m_TransparentCommandStagingBuffer.cpuPtr, m_TransparentCommands.data(), cmdSize);
         }
 
         // Populate staging buffer immediately with initial transforms
@@ -613,9 +658,9 @@ void Model::UpdateNodeBuffer()
         UpdateNodeBufferRecursive(rootNode, DirectX::XMMatrixIdentity());
     }
 
-    if (m_DrawNodeStagingBuffer.cpuPtr)
+    if (m_DrawNodeBuffer.cpuPtr)
     {
-        memcpy(m_DrawNodeStagingBuffer.cpuPtr, m_DrawNodeData.data(), m_DrawNodeData.size() * sizeof(DrawNodeData));
+        memcpy(m_DrawNodeBuffer.cpuPtr, m_DrawNodeData.data(), m_DrawNodeData.size() * sizeof(DrawNodeData));
     }
 }
 
@@ -768,8 +813,6 @@ void Model::LoadAnimations()
 
 void Model::UpdateAnimation(float deltaTime)
 {
-    return; // Temporarily disabled
-
     if (!m_CurrentAnimation)
         return;
 
@@ -955,7 +998,7 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         gltfImg.image = nullptr;
     }
 
-    // Copy material buffer
+    // Material buffer update is still needed if it's DEFAULT heap
     if (m_MaterialBuffer.resource)
     {
         cmdList->CopyBufferRegion(m_MaterialBuffer.resource.Get(), 0, m_MaterialStagingBuffer.resource.Get(), 0, m_Materials.size() * sizeof(MaterialConstants));
@@ -963,11 +1006,19 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         cmdList->ResourceBarrier(1, &barrier);
     }
 
-    // Copy draw node buffer
-    if (m_DrawNodeBuffer.resource)
+    // Copy opaque indirect draw buffer
+    if (m_OpaqueCommandBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_DrawNodeBuffer.resource.Get(), 0, m_DrawNodeStagingBuffer.resource.Get(), 0, m_DrawNodeData.size() * sizeof(DrawNodeData));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_DrawNodeBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        cmdList->CopyBufferRegion(m_OpaqueCommandBuffer.resource.Get(), 0, m_OpaqueCommandStagingBuffer.resource.Get(), 0, m_OpaqueCommands.size() * sizeof(IndirectDrawCommand));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_OpaqueCommandBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        cmdList->ResourceBarrier(1, &barrier);
+    }
+
+    // Copy transparent indirect draw buffer
+    if (m_TransparentCommandBuffer.resource)
+    {
+        cmdList->CopyBufferRegion(m_TransparentCommandBuffer.resource.Get(), 0, m_TransparentCommandStagingBuffer.resource.Get(), 0, m_TransparentCommands.size() * sizeof(IndirectDrawCommand));
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_TransparentCommandBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         cmdList->ResourceBarrier(1, &barrier);
     }
 
@@ -1027,25 +1078,47 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
         commandList->SetGraphicsRootShaderResourceView(7, m_GlobalVertexBuffer.gpuAddress);
     }
 
-    // Bind global index buffer
+    // Bind global index buffer to IA
     if (m_GlobalIndexBuffer.resource)
     {
-        D3D12_INDEX_BUFFER_VIEW ibv;
+        D3D12_INDEX_BUFFER_VIEW ibv = {};
         ibv.BufferLocation = m_GlobalIndexBuffer.gpuAddress;
+        ibv.SizeInBytes = static_cast<UINT>(m_GlobalIndexBuffer.size);
         ibv.Format = DXGI_FORMAT_R32_UINT;
-        ibv.SizeInBytes = static_cast<UINT>(m_GlobalIndices.size() * sizeof(uint32_t));
         commandList->IASetIndexBuffer(&ibv);
     }
 
     // Unbind IA vertex buffers (using vertex pulling)
     commandList->IASetVertexBuffers(0, 0, nullptr);
 
-    for (auto* rootNode : m_GltfModel.rootNodes)
+    // Execute indirect draw
+    ID3D12Resource* cmdBuffer = nullptr;
+    UINT cmdCount = 0;
+
+    if (mode == AlphaMode::Opaque || mode == AlphaMode::Mask)
     {
-        RenderNode(commandList, rootNode, DirectX::XMMatrixIdentity(), renderer, frustum, mode);
+        cmdBuffer = m_OpaqueCommandBuffer.resource.Get();
+        cmdCount = static_cast<UINT>(m_OpaqueCommands.size());
+    }
+    else
+    {
+        cmdBuffer = m_TransparentCommandBuffer.resource.Get();
+        cmdCount = static_cast<UINT>(m_TransparentCommands.size());
+    }
+
+    if (cmdBuffer && cmdCount > 0)
+    {
+        commandList->ExecuteIndirect(
+            renderer->GetCommandSignature(),
+            cmdCount,
+            cmdBuffer,
+            0,
+            nullptr,
+            0);
     }
 }
 
+// RenderNode recursively (Keep it for debugging or future culling, but not used by ExecuteIndirect right now)
 void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode)
 {
     // Frustum culling

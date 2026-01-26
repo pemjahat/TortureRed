@@ -70,6 +70,7 @@ public:
     ID3D12CommandQueue* GetCommandQueue() const { return m_CommandQueue.Get(); }
     ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
+    ID3D12CommandSignature* GetCommandSignature() const { return m_CommandSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return m_PipelineState.Get(); }
     ID3D12PipelineState* GetDepthPrePassPSO() const { return m_DepthPrePassPSO.Get(); }
     ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
@@ -137,6 +138,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_CommandSignature;
 
     // Ray Tracing
     bool m_RayTracingSupported = false;

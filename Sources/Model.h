@@ -28,8 +28,14 @@ struct DrawNodeData
 {
     DirectX::XMFLOAT4X4 world;
     uint32_t vertexOffset;
+    uint32_t indexOffset;
     uint32_t materialID;
-    uint32_t padding[2];
+    uint32_t padding;
+};
+
+struct IndirectDrawCommand
+{
+    D3D12_DRAW_INDEXED_ARGUMENTS drawArgs;
 };
 
 struct GLTFVertex
@@ -177,7 +183,15 @@ private:
     // Draw Node Data (Combined Transform and Draw Metadata)
     std::vector<DrawNodeData> m_DrawNodeData;
     GPUBuffer m_DrawNodeBuffer;
-    GPUBuffer m_DrawNodeStagingBuffer;
+
+    // Indirect Draw Commands
+    std::vector<IndirectDrawCommand> m_OpaqueCommands;
+    GPUBuffer m_OpaqueCommandBuffer;
+    GPUBuffer m_OpaqueCommandStagingBuffer;
+
+    std::vector<IndirectDrawCommand> m_TransparentCommands;
+    GPUBuffer m_TransparentCommandBuffer;
+    GPUBuffer m_TransparentCommandStagingBuffer;
 
     // Global Vertex/Index Buffers
     std::vector<GLTFVertex> m_GlobalVertices;

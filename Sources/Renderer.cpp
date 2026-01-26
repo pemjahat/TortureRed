@@ -519,6 +519,22 @@ void Renderer::CreateRootSignature()
     if (FAILED(hr))
     {
         std::cerr << "CreateRootSignature failed" << std::endl;
+        return;
+    }
+
+    // Create command signature for ExecuteIndirect
+    D3D12_INDIRECT_ARGUMENT_DESC drawArg = {};
+    drawArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+
+    D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+    commandSignatureDesc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+    commandSignatureDesc.NumArgumentDescs = 1;
+    commandSignatureDesc.pArgumentDescs = &drawArg;
+
+    hr = m_Device->CreateCommandSignature(&commandSignatureDesc, nullptr, IID_PPV_ARGS(&m_CommandSignature));
+    if (FAILED(hr))
+    {
+        std::cerr << "CreateCommandSignature failed" << std::endl;
     }
 }
 
