@@ -14,7 +14,7 @@ struct FrameConstants {
     int materialIndex;  // RT GBuffer material indices
     int depthIndex;     // RT GBuffer depth indices
     int shadowMapIndex;
-    uint32_t padding[2];
+    uint padding[2];
 };
 
 struct LightConstants {

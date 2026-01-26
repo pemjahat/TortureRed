@@ -148,6 +148,7 @@ private:
     std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;
+    GPUTexture m_AccumulationBuffer;
 
     // Descriptor Heaps
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;

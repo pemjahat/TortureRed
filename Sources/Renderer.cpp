@@ -195,6 +195,12 @@ bool Renderer::Initialize(HWND hwnd)
     // Create Path Tracer Output
     if (m_RayTracingSupported)
     {
+        if (!CreateTexture(m_AccumulationBuffer, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        {
+            std::cerr << "Failed to create accumulation buffer" << std::endl;
+            return false;
+        }
+
         if (!CreateTexture(m_PathTracerOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
         {
             std::cerr << "Failed to create path tracer output texture" << std::endl;
@@ -408,15 +414,21 @@ void Renderer::CreateRootSignature()
     srvRanges[1].RegisterSpace = 2;
     srvRanges[1].OffsetInDescriptorsFromTableStart = 0;
 
-    D3D12_DESCRIPTOR_RANGE uavRange = {};
-    // u0 space0: UAV Output
-    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange.NumDescriptors = 1;
-    uavRange.BaseShaderRegister = 0;
-    uavRange.RegisterSpace = 0;
-    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_DESCRIPTOR_RANGE uavRange0 = {};
+    uavRange0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange0.NumDescriptors = 1;
+    uavRange0.BaseShaderRegister = 0;
+    uavRange0.RegisterSpace = 0;
+    uavRange0.OffsetInDescriptorsFromTableStart = 0;
 
-    D3D12_ROOT_PARAMETER rootParameters[9] = {};
+    D3D12_DESCRIPTOR_RANGE uavRange1 = {};
+    uavRange1.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange1.NumDescriptors = 1;
+    uavRange1.BaseShaderRegister = 1;
+    uavRange1.RegisterSpace = 0;
+    uavRange1.OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_ROOT_PARAMETER rootParameters[10] = {};
 
     // 0: b0 FrameConstants
     rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -451,7 +463,7 @@ void Renderer::CreateRootSignature()
     rootParameters[5].Descriptor.ShaderRegister = 2;
     rootParameters[5].Descriptor.RegisterSpace = 1;
 
-    // 6: t3 (space1) Primitive Data SRV - unused now
+    // 6: t3 (space1) Primitive Data SRV - indices
     rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     rootParameters[6].Descriptor.ShaderRegister = 3;
     rootParameters[6].Descriptor.RegisterSpace = 1;
@@ -463,10 +475,15 @@ void Renderer::CreateRootSignature()
     rootParameters[7].Descriptor.RegisterSpace = 1;
     rootParameters[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // 8: u0 (space0) UAV Output table
+    // 8: u0 (space0) Accumulation Buffer UAV
     rootParameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     rootParameters[8].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[8].DescriptorTable.pDescriptorRanges = &uavRange;
+    rootParameters[8].DescriptorTable.pDescriptorRanges = &uavRange0;
+
+    // 9: u1 (space0) Output Buffer UAV
+    rootParameters[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[9].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[9].DescriptorTable.pDescriptorRanges = &uavRange1;
 
     // Static samplers
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
@@ -696,8 +713,14 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     memcpy(m_FrameCB.cpuPtr, &frame, sizeof(FrameConstants));
     memcpy(m_LightCB.cpuPtr, &light, sizeof(LightConstants));
 
-    // Transition UAV to UAV state
+    // Transition UAVs
+    TransitionResource(m_AccumulationBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    D3D12_RESOURCE_BARRIER uavBarriers[2];
+    uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
+    uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
+    m_CommandList->ResourceBarrier(2, uavBarriers);
 
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
     m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
@@ -709,12 +732,14 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootShaderResourceView(3, model->GetDrawNodeBufferAddress());
     m_CommandList->SetComputeRootDescriptorTable(4, GetGPUDescriptorHandle(0)); // Bindless
     m_CommandList->SetComputeRootShaderResourceView(5, m_TLAS.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalIndexBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(7, model->GetGlobalVertexBufferAddress());
-    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
+    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_AccumulationBuffer.uavIndex));
+    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
 
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-    // Transition UAV back to COPY_SOURCE for blitting to backbuffer
+    // Transition for blitting/Imgui
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
 }
 

@@ -14,6 +14,8 @@ Application::Application()
     , m_RightMouseButtonHeld(false)
     , m_LastMouseX(0)
     , m_LastMouseY(0)
+    , m_FrameConstants{}
+    , m_MainLight{}
 {
 }
 
@@ -76,7 +78,7 @@ void Application::Initialize()
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
 
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/CesiumMilkTruck/CesiumMilkTruck.gltf"))
+    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
@@ -219,6 +221,9 @@ void Application::ProcessEvents()
 
 void Application::Update(float deltaTime)
 {
+    // Store old view matrix to check for movement
+    DirectX::XMMATRIX oldView = m_Camera.GetViewMatrix();
+
     // Update camera
     m_Camera.Update(deltaTime);
 
@@ -230,11 +235,29 @@ void Application::Update(float deltaTime)
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
     m_ViewProj = view * proj;
 
+    // Reset frame index if camera moved or rotated
+    bool cameraMoved = false;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            float diff = oldView.r[i].m128_f32[j] - view.r[i].m128_f32[j];
+            if (diff > 1e-4f || diff < -1e-4f) {
+                cameraMoved = true;
+                break;
+            }
+        }
+    }
+
+    if (cameraMoved) {
+        m_FrameConstants.frameIndex = 0;
+    }
+
     // Update Frame Constants
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProj, m_ViewProj);
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewInverse, m_Camera.GetInvViewMatrix());
     DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverse, DirectX::XMMatrixInverse(nullptr, proj));
     m_FrameConstants.cameraPosition = { m_Camera.GetPosition().x, m_Camera.GetPosition().y, m_Camera.GetPosition().z, 1.0f };
+    
+    // Increment frame index only if not reset
     m_FrameConstants.frameIndex++;
 
     const auto& gbuffer = m_Renderer.GetGBuffer();
@@ -265,6 +288,16 @@ void Application::Render()
     {
         m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_MainLight);
         m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+
+        // Setup viewport and RTV for ImGui rendering on top of PT output
+        auto cmdList = m_Renderer.GetCommandList();
+        D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
+        D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+        cmdList->RSSetViewports(1, &viewport);
+        cmdList->RSSetScissorRects(1, &scissorRect);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
     }
     else
     {
