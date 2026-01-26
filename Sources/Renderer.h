@@ -7,10 +7,12 @@
 #include <DirectXMath.h>
 #include <vector>
 #include <string>
+#include <unordered_map>
 #include "GraphicsTypes.h"
 
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
+struct GLTFPrimitive;
 
 const int WINDOW_WIDTH = 1280;
 const int WINDOW_HEIGHT = 720;
@@ -30,8 +32,8 @@ public:
     void EndFrame();
     void Present();
 
-    void BuildAccelerationStructures(const std::vector<class Model*>& models);
-    void DispatchRays(const FrameConstants& frame, const LightConstants& light);
+    void BuildAccelerationStructures(class Model* model);
+    void DispatchRays(class Model* model, const FrameConstants& frame, const LightConstants& light);
     void CopyTextureToBackBuffer(const GPUTexture& texture);
 
     // Resource creation
@@ -143,9 +145,8 @@ private:
     // Ray Tracing
     bool m_RayTracingSupported = false;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPSO;
-    GPUBuffer m_BLAS;
+    std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
-    GPUBuffer m_PrimitiveDataBuffer;
     GPUTexture m_PathTracerOutput;
 
     // Descriptor Heaps

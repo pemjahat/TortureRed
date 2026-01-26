@@ -56,16 +56,6 @@ struct GLTFTexture
     GLTFImage* source = nullptr;
 };
 
-struct GLTFMaterial
-{
-    float baseColorFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float metallicFactor = 1.0f;
-    float roughnessFactor = 1.0f;
-    GLTFTexture* baseColorTexture = nullptr;
-    GLTFTexture* normalTexture = nullptr;
-    // Add more as needed
-};
-
 enum class AlphaMode
 {
     Opaque,
@@ -77,13 +67,10 @@ struct GLTFPrimitive
 {
     std::vector<GLTFVertex> vertices;
     std::vector<uint32_t> indices;
-    GLTFMaterial material;
     UINT materialIndex = 0;
     AlphaMode alphaMode = AlphaMode::Opaque;
     uint32_t globalVertexOffset = 0;
     uint32_t globalIndexOffset = 0;
-    D3D12_GPU_VIRTUAL_ADDRESS vertexBufferAddress = 0;
-    D3D12_GPU_VIRTUAL_ADDRESS indexBufferAddress = 0;    
     DirectX::BoundingBox aabb;
 };
 
@@ -154,6 +141,14 @@ public:
 
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
+    void GetDrawNodePrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
+    const std::vector<DrawNodeData>& GetDrawNodeData() const { return m_DrawNodeData; }
+    
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalVertexBufferAddress() const { return m_GlobalVertexBuffer.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalIndexBufferAddress() const { return m_GlobalIndexBuffer.gpuAddress; }
+
+    D3D12_GPU_VIRTUAL_ADDRESS GetMaterialBufferAddress() const { return m_MaterialBuffer.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetDrawNodeBufferAddress() const { return m_DrawNodeBuffer.gpuAddress; }
 
     // Update node buffer with current node transforms
     void UpdateNodeBuffer();
@@ -164,7 +159,8 @@ public:
 
 private:
     void CreateGLTFResources(Renderer* renderer);
-    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);    void GetPrimitivesRecursive(const struct GLTFNode* node, std::vector<const struct GLTFPrimitive*>& primitives) const;    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
+    void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
+    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
     void LoadMaterials();
@@ -175,8 +171,8 @@ private:
     std::wstring fileDirectory;
     UINT srvDescriptorSize;
 
-    // Materials
-    std::vector<MaterialConstants> m_Materials;
+    // GPU Materials
+    std::vector<MaterialConstants> m_MaterialConstants;
     GPUBuffer m_MaterialBuffer;
     GPUBuffer m_MaterialStagingBuffer;
 

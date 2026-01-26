@@ -68,11 +68,3 @@ struct LightConstants
     DirectX::XMFLOAT4 color;
     DirectX::XMFLOAT4 direction;
 };
-
-struct PrimitiveData
-{
-    int vertexBufferIndex;
-    int indexBufferIndex;
-    uint32_t materialIndex;
-    uint32_t padding;
-};

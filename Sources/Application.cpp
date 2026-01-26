@@ -85,8 +85,7 @@ void Application::Initialize()
     m_Model.UploadTextures(m_Renderer.GetDevice(), m_Renderer.GetCommandList(), m_Renderer.GetCommandQueue(), m_Renderer.GetCommandAllocator(), &m_Renderer);
 
     // Build ray tracing acceleration structures
-    std::vector<Model*> models = { &m_Model };
-    m_Renderer.BuildAccelerationStructures(models);
+    m_Renderer.BuildAccelerationStructures(&m_Model);
 
     // Initialize ImGui
     InitializeImGui();
@@ -264,7 +263,7 @@ void Application::Render()
 
     if (m_UsePathTracer && m_Renderer.IsRayTracingSupported())
     {
-        m_Renderer.DispatchRays(m_FrameConstants, m_MainLight);
+        m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_MainLight);
         m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
     }
     else

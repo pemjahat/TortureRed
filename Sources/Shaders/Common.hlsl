@@ -24,13 +24,6 @@ struct LightConstants {
     float4 direction;
 };
 
-struct PrimitiveData {
-    int vertexBufferIndex;
-    int indexBufferIndex;
-    uint32_t materialIndex;
-    uint32_t padding;
-};
-
 struct RayPayload {
     float4 color;
 };

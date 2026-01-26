@@ -97,34 +97,6 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
                     gltfPrim.alphaMode = AlphaMode::Mask;
                 else if (material->alpha_mode == cgltf_alpha_mode_blend)
                     gltfPrim.alphaMode = AlphaMode::Blend;
-
-                if (material->has_pbr_metallic_roughness)
-                {
-                    // Base color factor
-                    memcpy(gltfPrim.material.baseColorFactor,
-                           material->pbr_metallic_roughness.base_color_factor,
-                           sizeof(float) * 4);
-
-                    // Metallic and roughness factors
-                    gltfPrim.material.metallicFactor = material->pbr_metallic_roughness.metallic_factor;
-                    gltfPrim.material.roughnessFactor = material->pbr_metallic_roughness.roughness_factor;
-
-                    // Base color texture
-                    if (material->pbr_metallic_roughness.base_color_texture.texture)
-                    {
-                        size_t texIndex = material->pbr_metallic_roughness.base_color_texture.texture - m_GltfModel.data->textures;
-                        if (texIndex < m_GltfModel.textures.size())
-                            gltfPrim.material.baseColorTexture = &m_GltfModel.textures[texIndex];
-                    }
-                }
-
-                // Normal texture
-                if (material->normal_texture.texture)
-                {
-                    size_t texIndex = material->normal_texture.texture - m_GltfModel.data->textures;
-                    if (texIndex < m_GltfModel.textures.size())
-                        gltfPrim.material.normalTexture = &m_GltfModel.textures[texIndex];
-                }
             }
 
             // Process attributes
@@ -290,10 +262,6 @@ void Model::CreateGLTFResources(Renderer* renderer)
             prim.globalVertexOffset = static_cast<uint32_t>(m_GlobalVertices.size());
             prim.globalIndexOffset = static_cast<uint32_t>(m_GlobalIndices.size());
 
-            // These will be updated after buffers are created
-            prim.vertexBufferAddress = 0;
-            prim.indexBufferAddress = 0;
-
             m_GlobalVertices.insert(m_GlobalVertices.end(), prim.vertices.begin(), prim.vertices.end());
             m_GlobalIndices.insert(m_GlobalIndices.end(), prim.indices.begin(), prim.indices.end());
         }
@@ -303,7 +271,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     if (!m_GlobalVertices.empty())
     {
         const UINT64 size = m_GlobalVertices.size() * sizeof(GLTFVertex);
-        if (!renderer->CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        if (!renderer->CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global vertex buffer" << std::endl;
             return;
@@ -320,7 +288,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     if (!m_GlobalIndices.empty())
     {
         const UINT64 size = m_GlobalIndices.size() * sizeof(uint32_t);
-        if (!renderer->CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        if (!renderer->CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global index buffer" << std::endl;
             return;
@@ -331,18 +299,6 @@ void Model::CreateGLTFResources(Renderer* renderer)
             return;
         }
         memcpy(m_GlobalIndexStaging.cpuPtr, m_GlobalIndices.data(), size);
-    }
-
-    // Update primitive buffer addresses
-    for (auto& mesh : m_GltfModel.meshes)
-    {
-        for (auto& prim : mesh.primitives)
-        {
-            if (m_GlobalVertexBuffer.resource)
-                prim.vertexBufferAddress = m_GlobalVertexBuffer.gpuAddress;
-            if (m_GlobalIndexBuffer.resource)
-                prim.indexBufferAddress = m_GlobalIndexBuffer.gpuAddress;
-        }
     }
 
     // Pre-calculate node data for all node-primitive pairs
@@ -394,7 +350,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_OpaqueCommands.empty())
         {
             const UINT64 cmdSize = m_OpaqueCommands.size() * sizeof(IndirectDrawCommand);
-            if (!renderer->CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false))
+            if (!renderer->CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
             {
                 std::cerr << "Failed to create opaque indirect draw buffer" << std::endl;
                 return;
@@ -411,7 +367,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_TransparentCommands.empty())
         {
             const UINT64 cmdSize = m_TransparentCommands.size() * sizeof(IndirectDrawCommand);
-            if (!renderer->CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false))
+            if (!renderer->CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
             {
                 std::cerr << "Failed to create transparent indirect draw buffer" << std::endl;
                 return;
@@ -429,10 +385,10 @@ void Model::CreateGLTFResources(Renderer* renderer)
     }
 
     // Create material buffer
-    if (!m_Materials.empty())
+    if (!m_MaterialConstants.empty())
     {
-        const UINT materialBufferSize = static_cast<UINT>(m_Materials.size() * sizeof(MaterialConstants));
-        if (!renderer->CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_Materials.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST))
+        const UINT materialBufferSize = static_cast<UINT>(m_MaterialConstants.size() * sizeof(MaterialConstants));
+        if (!renderer->CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create material buffer" << std::endl;
             return;
@@ -444,7 +400,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
             return;
         }
 
-        memcpy(m_MaterialStagingBuffer.cpuPtr, m_Materials.data(), materialBufferSize);
+        memcpy(m_MaterialStagingBuffer.cpuPtr, m_MaterialConstants.data(), materialBufferSize);
     }
 }
 
@@ -514,11 +470,12 @@ void Model::LoadTextures(Renderer* renderer)
 
 void Model::LoadMaterials()
 {
-    m_Materials.resize(m_GltfModel.data->materials_count);
+    m_MaterialConstants.resize(m_GltfModel.data->materials_count);
+
     for (size_t i = 0; i < m_GltfModel.data->materials_count; ++i)
     {
         cgltf_material* material = &m_GltfModel.data->materials[i];
-        MaterialConstants& mc = m_Materials[i];
+        MaterialConstants& mc = m_MaterialConstants[i];
 
         // Default values
         mc.baseColorFactor = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -533,8 +490,7 @@ void Model::LoadMaterials()
                 material->pbr_metallic_roughness.base_color_factor[0],
                 material->pbr_metallic_roughness.base_color_factor[1],
                 material->pbr_metallic_roughness.base_color_factor[2],
-                material->pbr_metallic_roughness.base_color_factor[3]
-            );
+                material->pbr_metallic_roughness.base_color_factor[3]);
             mc.metallicFactor = material->pbr_metallic_roughness.metallic_factor;
             mc.roughnessFactor = material->pbr_metallic_roughness.roughness_factor;
 
@@ -543,10 +499,10 @@ void Model::LoadMaterials()
                 size_t texIndex = material->pbr_metallic_roughness.base_color_texture.texture - m_GltfModel.data->textures;
                 if (texIndex < m_GltfModel.textures.size())
                 {
-                    GLTFTexture& texture = m_GltfModel.textures[texIndex];
-                    if (texture.source)
+                    GLTFTexture* baseColorTexture = &m_GltfModel.textures[texIndex];
+                    if (baseColorTexture->source)
                     {
-                        mc.baseColorTextureIndex = texture.source->texture.srvIndex;
+                        mc.baseColorTextureIndex = baseColorTexture->source->texture.srvIndex;
                     }
                 }
             }
@@ -557,16 +513,16 @@ void Model::LoadMaterials()
             size_t texIndex = material->normal_texture.texture - m_GltfModel.data->textures;
             if (texIndex < m_GltfModel.textures.size())
             {
-                GLTFTexture& texture = m_GltfModel.textures[texIndex];
-                if (texture.source)
+                GLTFTexture* normalTexture = &m_GltfModel.textures[texIndex];
+                if (normalTexture->source)
                 {
-                    mc.normalTextureIndex = texture.source->texture.srvIndex;
+                    mc.normalTextureIndex = normalTexture->source->texture.srvIndex;
                 }
             }
         }
     }
 
-    if (m_Materials.empty())
+    if (m_MaterialConstants.empty())
     {
         MaterialConstants mc;
         mc.baseColorFactor = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -574,7 +530,7 @@ void Model::LoadMaterials()
         mc.roughnessFactor = 1.0f;
         mc.baseColorTextureIndex = -1;
         mc.normalTextureIndex = -1;
-        m_Materials.push_back(mc);
+        m_MaterialConstants.push_back(mc);
     }
 }
 
@@ -1001,7 +957,7 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     // Material buffer update is still needed if it's DEFAULT heap
     if (m_MaterialBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_MaterialBuffer.resource.Get(), 0, m_MaterialStagingBuffer.resource.Get(), 0, m_Materials.size() * sizeof(MaterialConstants));
+        cmdList->CopyBufferRegion(m_MaterialBuffer.resource.Get(), 0, m_MaterialStagingBuffer.resource.Get(), 0, m_MaterialConstants.size() * sizeof(MaterialConstants));
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_MaterialBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
         cmdList->ResourceBarrier(1, &barrier);
     }
@@ -1155,24 +1111,26 @@ void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, D
 
 void Model::GetAllPrimitives(std::vector<const GLTFPrimitive*>& primitives) const
 {
-    for (const auto* rootNode : m_GltfModel.rootNodes)
+    for (const auto& mesh : m_GltfModel.meshes)
     {
-        GetPrimitivesRecursive(rootNode, primitives);
-    }
-}
-
-void Model::GetPrimitivesRecursive(const GLTFNode* node, std::vector<const GLTFPrimitive*>& primitives) const
-{
-    if (node->mesh)
-    {
-        for (const auto& primitive : node->mesh->primitives)
+        for (const auto& primitive : mesh.primitives)
         {
             primitives.push_back(&primitive);
         }
     }
+}
 
-    for (const auto* child : node->children)
+void Model::GetDrawNodePrimitives(std::vector<const GLTFPrimitive*>& primitives) const
+{
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_GltfModel.nodes.size()); ++i)
     {
-        GetPrimitivesRecursive(child, primitives);
+        const GLTFNode& node = m_GltfModel.nodes[i];
+        if (node.mesh)
+        {
+            for (const auto& prim : node.mesh->primitives)
+            {
+                primitives.push_back(&prim);
+            }
+        }
     }
 }
