@@ -136,7 +136,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     sq.Proceed();
 
                     if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        accumulatedColor += throughput * baseColor.xyz * g_Light.color.xyz * ndotl * (1.0f / 3.14159f);
+                        accumulatedColor += throughput * baseColor.xyz * g_Light.color.xyz * g_Light.intensity * ndotl * (1.0f / 3.14159f);
                     }
                 }
             }
@@ -164,7 +164,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (g_Frame.frameIndex <= 1) {
         g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
-        g_Output[launchIndex] = float4(accumulatedColor, 1.0f);
+        
+        float3 exposedColor = accumulatedColor * g_Frame.exposure;
+        float3 ldrColor = exposedColor / (exposedColor + 1.0f);
+        g_Output[launchIndex] = float4(ldrColor, 1.0f);
     } else {
         float3 prevColor = g_AccumulationBuffer[launchIndex].rgb;
         
@@ -178,7 +181,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         
         g_AccumulationBuffer[launchIndex] = float4(finalColor, 1.0f);
         
-        // Final output (could add tonemapping here)
-        g_Output[launchIndex] = float4(finalColor, 1.0f);
+        // Basic Tone Mapping for output
+        float3 exposedColor = finalColor * g_Frame.exposure;
+        float3 ldrColor = exposedColor / (exposedColor + 1.0f);
+        
+        g_Output[launchIndex] = float4(ldrColor, 1.0f);
     }
 }

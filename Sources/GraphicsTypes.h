@@ -59,7 +59,8 @@ struct FrameConstants
     int32_t materialIndex;
     int32_t depthIndex;
     int32_t shadowMapIndex;
-    uint32_t padding[2];
+    float exposure;
+    uint32_t padding[1];
 };
 
 struct LightConstants
@@ -68,4 +69,6 @@ struct LightConstants
     DirectX::XMFLOAT4 position;
     DirectX::XMFLOAT4 color;
     DirectX::XMFLOAT4 direction;
+    float intensity;
+    uint32_t padding[3];
 };

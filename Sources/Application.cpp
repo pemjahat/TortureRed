@@ -17,6 +17,7 @@ Application::Application()
     , m_FrameConstants{}
     , m_MainLight{}
 {
+    m_LastViewMatrix = DirectX::XMMatrixIdentity();
 }
 
 Application::~Application()
@@ -94,8 +95,11 @@ void Application::Initialize()
 
     // Initialize directional light
     m_MainLight.color = { 1.0f, 0.9f, 0.8f, 1.0f };
+    m_MainLight.intensity = 1.0f;
     m_MainLight.direction = { -1.0f, -1.0f, 1.0f, 0.0f };
     m_MainLight.position = { 0.0f, 10.0f, 0.0f, 1.0f }; // Not used for dir light but good to have
+
+    m_LastViewMatrix = m_Camera.GetViewMatrix();
 
     std::cout << "TortureRed application initialized successfully!" << std::endl;
 }
@@ -221,10 +225,7 @@ void Application::ProcessEvents()
 
 void Application::Update(float deltaTime)
 {
-    // Store old view matrix to check for movement
-    DirectX::XMMATRIX oldView = m_Camera.GetViewMatrix();
-
-    // Update camera
+    // Update camera (handles W, S, A, D movement)
     m_Camera.Update(deltaTime);
 
     // Update model animation
@@ -235,11 +236,11 @@ void Application::Update(float deltaTime)
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
     m_ViewProj = view * proj;
 
-    // Reset frame index if camera moved or rotated
+    // Reset frame index if camera moved or rotated (checked against previous frame's view matrix)
     bool cameraMoved = false;
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            float diff = oldView.r[i].m128_f32[j] - view.r[i].m128_f32[j];
+            float diff = m_LastViewMatrix.r[i].m128_f32[j] - view.r[i].m128_f32[j];
             if (diff > 1e-4f || diff < -1e-4f) {
                 cameraMoved = true;
                 break;
@@ -250,6 +251,9 @@ void Application::Update(float deltaTime)
     if (cameraMoved) {
         m_FrameConstants.frameIndex = 0;
     }
+
+    // Save view matrix for next frame's comparison
+    m_LastViewMatrix = view;
 
     // Update Frame Constants
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProj, m_ViewProj);
@@ -266,10 +270,12 @@ void Application::Update(float deltaTime)
     m_FrameConstants.materialIndex = gbuffer.material.srvIndex;
     m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
     m_FrameConstants.shadowMapIndex = m_Renderer.GetShadowMap().srvIndex;
+    m_FrameConstants.exposure = m_Exposure;
 
     m_Renderer.UpdateFrameCB(m_FrameConstants);
 
     // Update Light CB
+    m_MainLight.intensity = m_SunIntensity;
     DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
     DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f); // Position light back along direction
     DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
@@ -482,8 +488,22 @@ void Application::RenderImGui()
 
     ImGui::Separator();
     ImGui::Text("Direct Light");
-    ImGui::DragFloat3("Direction", &m_MainLight.direction.x, 0.01f, -1.0f, 1.0f);
-    ImGui::ColorEdit3("Light Color", &m_MainLight.color.x);
+    if (ImGui::DragFloat("Sun Intensity", &m_SunIntensity, 0.1f, 0.0f, 100.0f))
+    {
+        m_FrameConstants.frameIndex = 0; // Reset path tracer if intensity changes
+    }
+    if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, 0.0f, 10.0f))
+    {
+        // exposure doesn't require reset as it's just post-process
+    }
+    if (ImGui::DragFloat3("Direction", &m_MainLight.direction.x, 0.01f, -1.0f, 1.0f))
+    {
+        m_FrameConstants.frameIndex = 0;
+    }
+    if (ImGui::ColorEdit3("Light Color", &m_MainLight.color.x))
+    {
+        m_FrameConstants.frameIndex = 0;
+    }
     
     // Normalize light direction
     DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);

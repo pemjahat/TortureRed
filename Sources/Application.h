@@ -38,6 +38,8 @@ private:
     bool m_EnableDepthPrePass = false;
     bool m_DebugShadowMap = false;
     bool m_UsePathTracer = false;
+    float m_SunIntensity = 1.0f;
+    float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 
     // Core systems
@@ -45,6 +47,7 @@ private:
     Model m_Model;
     Camera m_Camera;
     DirectX::XMMATRIX m_ViewProj;
+    DirectX::XMMATRIX m_LastViewMatrix;
     FrameConstants m_FrameConstants;
     LightConstants m_MainLight;
 

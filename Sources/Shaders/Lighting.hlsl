@@ -71,8 +71,14 @@ float4 PSMain(PSInput input) : SV_Target {
     float3 lightDir = normalize(-LightCB.direction.xyz);
     float diff = max(dot(normal, lightDir), 0.0f);
     
-    float3 diffuse = diff * albedo.rgb * LightCB.color.rgb * shadow;
-    float3 ambient = 0.1f * albedo.rgb;
+    float3 diffuse = diff * albedo.rgb * LightCB.color.rgb * LightCB.intensity * shadow;
+    float3 ambient = 0.05f * albedo.rgb;
     
-    return float4(ambient + diffuse, 1.0f);
+    float3 finalColor = ambient + diffuse;
+    
+    // Basic Tone Mapping
+    float3 exposedColor = finalColor * FrameCB.exposure;
+    float3 ldrColor = exposedColor / (exposedColor + 1.0f);
+    
+    return float4(ldrColor, 1.0f);
 }
