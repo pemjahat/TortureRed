@@ -33,27 +33,17 @@ bool Renderer::Initialize(HWND hwnd)
     }
 
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-    HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateDXGIFactory2 failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2 failed");
 
     // Create device
     Microsoft::WRL::ComPtr<IDXGIAdapter1> hardwareAdapter;
     GetHardwareAdapter(factory.Get(), &hardwareAdapter);
 
-    hr = D3D12CreateDevice(
+    CHECK_HR(D3D12CreateDevice(
         hardwareAdapter.Get(),
         D3D_FEATURE_LEVEL_11_0,
         IID_PPV_ARGS(&m_Device)
-    );
-    if (FAILED(hr))
-    {
-        std::cerr << "D3D12CreateDevice failed" << std::endl;
-        return false;
-    }
+    ), "D3D12CreateDevice failed");
 
     // Check for Ray Tracing support
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
@@ -68,12 +58,7 @@ bool Renderer::Initialize(HWND hwnd)
     queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-    hr = m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateCommandQueue failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "CreateCommandQueue failed");
 
     // Create swap chain
     DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -86,26 +71,16 @@ bool Renderer::Initialize(HWND hwnd)
     swapChainDesc.SampleDesc.Count = 1;
 
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain;
-    hr = factory->CreateSwapChainForHwnd(
+    CHECK_HR(factory->CreateSwapChainForHwnd(
         m_CommandQueue.Get(),
         hwnd,
         &swapChainDesc,
         nullptr,
         nullptr,
         &swapChain
-    );
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateSwapChainForHwnd failed" << std::endl;
-        return false;
-    }
+    ), "CreateSwapChainForHwnd failed");
 
-    hr = swapChain.As(&m_SwapChain);
-    if (FAILED(hr))
-    {
-        std::cerr << "SwapChain As failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(swapChain.As(&m_SwapChain), "SwapChain As failed");
 
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
 
@@ -115,12 +90,7 @@ bool Renderer::Initialize(HWND hwnd)
     rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
-    hr = m_Device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_RTVHeap));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateDescriptorHeap for RTV failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(m_Device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_RTVHeap)), "CreateDescriptorHeap for RTV failed");
 
     UINT rtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
@@ -128,12 +98,7 @@ bool Renderer::Initialize(HWND hwnd)
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RTVHeap->GetCPUDescriptorHandleForHeapStart());
     for (UINT n = 0; n < 2; n++)
     {
-        hr = m_SwapChain->GetBuffer(n, IID_PPV_ARGS(&m_RenderTargets[n]));
-        if (FAILED(hr))
-        {
-            std::cerr << "GetBuffer failed" << std::endl;
-            return false;
-        }
+        CHECK_HR(m_SwapChain->GetBuffer(n, IID_PPV_ARGS(&m_RenderTargets[n])), "GetBuffer failed");
         m_Device->CreateRenderTargetView(m_RenderTargets[n].Get(), nullptr, rtvHandle);
         rtvHandle.ptr += rtvDescriptorSize;
     }
@@ -145,12 +110,7 @@ bool Renderer::Initialize(HWND hwnd)
         dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
-        hr = m_Device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_DSVHeap));
-        if (FAILED(hr))
-        {
-            std::cerr << "CreateDescriptorHeap for DSV failed" << std::endl;
-            return false;
-        }
+        CHECK_HR(m_Device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_DSVHeap)), "CreateDescriptorHeap for DSV failed");
     }
 
     // Create constant buffers
@@ -173,12 +133,7 @@ bool Renderer::Initialize(HWND hwnd)
         srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
-        hr = m_Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_SRVHeap));
-        if (FAILED(hr))
-        {
-            std::cerr << "CreateDescriptorHeap for SRV failed" << std::endl;
-            return false;
-        }
+        CHECK_HR(m_Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_SRVHeap)), "CreateDescriptorHeap for SRV failed");
     }
 
     // Create GBuffer
@@ -209,34 +164,14 @@ bool Renderer::Initialize(HWND hwnd)
     }
 
     // Create command allocator
-    hr = m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateCommandAllocator failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator)), "CreateCommandAllocator failed");
 
     // Create command list
-    hr = m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_CommandList));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateCommandList failed" << std::endl;
-        return false;
-    }
-    hr = m_CommandList->Close();
-    if (FAILED(hr))
-    {
-        std::cerr << "CommandList Close failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_CommandList)), "CreateCommandList failed");
+    CHECK_HR(m_CommandList->Close(), "CommandList Close failed");
 
     // Create fence
-    hr = m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_Fence));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateFence failed" << std::endl;
-        return false;
-    }
+    CHECK_HR(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_Fence)), "CreateFence failed");
     m_FenceValue = 1;
 
     m_FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -307,19 +242,8 @@ void Renderer::Resize(uint32_t width, uint32_t height)
 void Renderer::BeginFrame()
 {
     // Record commands
-    HRESULT hr = m_CommandAllocator->Reset();
-    if (FAILED(hr))
-    {
-        std::cerr << "CommandAllocator Reset failed" << std::endl;
-        return;
-    }
-
-    hr = m_CommandList->Reset(m_CommandAllocator.Get(), nullptr);
-    if (FAILED(hr))
-    {
-        std::cerr << "CommandList Reset failed" << std::endl;
-        return;
-    }
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
 
     // Set necessary state
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
@@ -350,23 +274,14 @@ void Renderer::EndFrame()
     // Transition back buffer to present state
     TransitionResource(m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_PRESENT);
 
-    HRESULT hr = m_CommandList->Close();
-    if (FAILED(hr))
-    {
-        std::cerr << "CommandList Close failed" << std::endl;
-        return;
-    }
+    CHECK_HR(m_CommandList->Close(), "CommandList Close failed");
 
     // Execute the command list
     ID3D12CommandList* ppCommandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
     // Present the frame
-    hr = m_SwapChain->Present(1, 0);
-    if (FAILED(hr))
-    {
-        std::cerr << "Present failed" << std::endl;
-    }
+    CHECK_HR(m_SwapChain->Present(1, 0), "Present failed");
 
     // Wait for the GPU to finish
     WaitForPreviousFrame();
@@ -399,147 +314,51 @@ ID3D12Resource* Renderer::GetCurrentBackBuffer() const
 
 void Renderer::CreateRootSignature()
 {
-    D3D12_DESCRIPTOR_RANGE srvRanges[2] = {};
-    // t0 space0: Bindless textures
-    srvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRanges[0].NumDescriptors = 4096;
-    srvRanges[0].BaseShaderRegister = 0;
-    srvRanges[0].RegisterSpace = 0;
-    srvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+    CD3DX12_DESCRIPTOR_RANGE srvRanges[2];
+    srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 0); // t0 space0: Bindless textures
+    //srvRanges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 2); // t0 space2: Bindless buffers
 
-    // t0 space2: Bindless buffers (unused now)
-    srvRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRanges[1].NumDescriptors = 4096;
-    srvRanges[1].BaseShaderRegister = 0;
-    srvRanges[1].RegisterSpace = 2;
-    srvRanges[1].OffsetInDescriptorsFromTableStart = 0;
+    CD3DX12_DESCRIPTOR_RANGE uavRange0;
+    uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Accumulation Buffer
 
-    D3D12_DESCRIPTOR_RANGE uavRange0 = {};
-    uavRange0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange0.NumDescriptors = 1;
-    uavRange0.BaseShaderRegister = 0;
-    uavRange0.RegisterSpace = 0;
-    uavRange0.OffsetInDescriptorsFromTableStart = 0;
+    CD3DX12_DESCRIPTOR_RANGE uavRange1;
+    uavRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0); // u1 space0: Output Buffer
 
-    D3D12_DESCRIPTOR_RANGE uavRange1 = {};
-    uavRange1.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange1.NumDescriptors = 1;
-    uavRange1.BaseShaderRegister = 1;
-    uavRange1.RegisterSpace = 0;
-    uavRange1.OffsetInDescriptorsFromTableStart = 0;
+    CD3DX12_ROOT_PARAMETER rootParameters[10];
+    rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
+    rootParameters[1].InitAsConstantBufferView(1); // b1: Light constants
+    rootParameters[2].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
+    rootParameters[3].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
+    rootParameters[4].InitAsDescriptorTable(1, &srvRanges[0]); // t0 space0: Bindless textures
+    rootParameters[5].InitAsShaderResourceView(2, 1); // t2 space1: TLAS
+    rootParameters[6].InitAsShaderResourceView(3, 1); // t3 space1: Indices
+    rootParameters[7].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
+    rootParameters[8].InitAsDescriptorTable(1, &uavRange0); // u0
+    rootParameters[9].InitAsDescriptorTable(1, &uavRange1); // u1
 
-    D3D12_ROOT_PARAMETER rootParameters[10] = {};
-
-    // 0: b0 FrameConstants
-    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameters[0].Descriptor.ShaderRegister = 0;
-    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 1: b1 Light constants
-    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameters[1].Descriptor.ShaderRegister = 1;
-    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 2: t0 (space1) Material Data SRV
-    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[2].Descriptor.ShaderRegister = 0;
-    rootParameters[2].Descriptor.RegisterSpace = 1;
-    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 3: t1 (space1) Draw Node Data SRV
-    rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[3].Descriptor.ShaderRegister = 1;
-    rootParameters[3].Descriptor.RegisterSpace = 1;
-    rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 4: t0 (space0/space2) Bindless descriptor table
-    rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[4].DescriptorTable.NumDescriptorRanges = 2;
-    rootParameters[4].DescriptorTable.pDescriptorRanges = srvRanges;
-    rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 5: t2 (space1) TLAS
-    rootParameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[5].Descriptor.ShaderRegister = 2;
-    rootParameters[5].Descriptor.RegisterSpace = 1;
-
-    // 6: t3 (space1) Primitive Data SRV - indices
-    rootParameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[6].Descriptor.ShaderRegister = 3;
-    rootParameters[6].Descriptor.RegisterSpace = 1;
-    rootParameters[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 7: t4 (space1) Global Vertex Buffer SRV
-    rootParameters[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    rootParameters[7].Descriptor.ShaderRegister = 4;
-    rootParameters[7].Descriptor.RegisterSpace = 1;
-    rootParameters[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // 8: u0 (space0) Accumulation Buffer UAV
-    rootParameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[8].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[8].DescriptorTable.pDescriptorRanges = &uavRange0;
-
-    // 9: u1 (space0) Output Buffer UAV
-    rootParameters[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[9].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[9].DescriptorTable.pDescriptorRanges = &uavRange1;
-
-    // Static samplers
-    D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
-    
-    // Default sampler
-    samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samplers[0].MipLODBias = 0.0f;
-    samplers[0].MaxAnisotropy = 1;
-    samplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    samplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-    samplers[0].MinLOD = 0.0f;
-    samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
-    samplers[0].ShaderRegister = 0;  // s0
-    samplers[0].RegisterSpace = 0;
-    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // Shadow sampler
-    samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
-    samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samplers[1].MipLODBias = 0.0f;
-    samplers[1].MaxAnisotropy = 1;
+    CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+    samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+    samplers[1].Init(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, 
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER);
     samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
-    samplers[1].MinLOD = 0.0f;
-    samplers[1].MaxLOD = D3D12_FLOAT32_MAX;
-    samplers[1].ShaderRegister = 1;  // s1
-    samplers[1].RegisterSpace = 0;
-    samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-    rootSignatureDesc.NumParameters = _countof(rootParameters);
-    rootSignatureDesc.pParameters = rootParameters;
-    rootSignatureDesc.NumStaticSamplers = _countof(samplers);
-    rootSignatureDesc.pStaticSamplers = samplers;
-    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
+    rootSignatureDesc.Init(_countof(rootParameters), rootParameters, _countof(samplers), samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     Microsoft::WRL::ComPtr<ID3DBlob> signature;
     Microsoft::WRL::ComPtr<ID3DBlob> error;
     HRESULT hr = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
     if (FAILED(hr))
     {
-        std::cerr << "D3D12SerializeRootSignature failed" << std::endl;
-        return;
+        if (error)
+        {
+            std::cerr << "D3D12SerializeRootSignature failed: " << (char*)error->GetBufferPointer() << std::endl;
+        }
+        CHECK_HR(hr, "D3D12SerializeRootSignature failed");
     }
 
-    hr = m_Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_RootSignature));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateRootSignature failed" << std::endl;
-        return;
-    }
+    CHECK_HR(m_Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_RootSignature)), "CreateRootSignature failed");
 
     // Create command signature for ExecuteIndirect
     D3D12_INDIRECT_ARGUMENT_DESC drawArg = {};
@@ -550,30 +369,30 @@ void Renderer::CreateRootSignature()
     commandSignatureDesc.NumArgumentDescs = 1;
     commandSignatureDesc.pArgumentDescs = &drawArg;
 
-    hr = m_Device->CreateCommandSignature(&commandSignatureDesc, nullptr, IID_PPV_ARGS(&m_CommandSignature));
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateCommandSignature failed" << std::endl;
-    }
+    CHECK_HR(m_Device->CreateCommandSignature(&commandSignatureDesc, nullptr, IID_PPV_ARGS(&m_CommandSignature)), "CreateCommandSignature failed");
 }
 
 void Renderer::CreatePipelineState()
 {
+    auto GetDefaultPsoDesc = [&]() {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+        desc.pRootSignature = m_RootSignature.Get();
+        desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        desc.SampleMask = UINT_MAX;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.SampleDesc.Count = 1;
+        return desc;
+    };
+
     // 1. Depth Pre-Pass PSO
     {
         std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { nullptr, 0 };
-        psoDesc.pRootSignature = m_RootSignature.Get();
+        auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets = 0;
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.SampleDesc.Count = 1;
+        psoDesc.NumRenderTargets = 0;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DepthPrePassPSO));
     }
 
@@ -581,24 +400,18 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { nullptr, 0 };
-        psoDesc.pRootSignature = m_RootSignature.Get();
+        auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);        
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // No depth write, using pre-pass
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 3;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         psoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.SampleDesc.Count = 1;
+        
+        // No depth write, using pre-pass
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferPSO));
 
         // Create a version of G-Buffer PSO that writes to depth (for when pre-pass is disabled)
@@ -611,19 +424,13 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.pRootSignature = m_RootSignature.Get();
+        auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = FALSE;
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.SampleDesc.Count = 1;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingPSO));
     }
 
@@ -631,48 +438,27 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_8");
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.pRootSignature = m_RootSignature.Get();
+        auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = FALSE;
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.SampleDesc.Count = 1;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DebugPSO));
     }
 
     // 4. Shadow PSO
     {
         std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { nullptr, 0 };
-        psoDesc.pRootSignature = m_RootSignature.Get();
+        auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
         psoDesc.RasterizerState.DepthBias = 1000;
-        psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
         psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets = 0;
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.SampleDesc.Count = 1;
+        psoDesc.NumRenderTargets = 0;
 
-        HRESULT hr = m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_ShadowPSO));
-        if (FAILED(hr))
-        {
-            std::cerr << "CreateGraphicsPipelineState for Shadow PSO failed" << std::endl;
-        }
+        CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_ShadowPSO)), "CreateGraphicsPipelineState for Shadow PSO failed");
     }
 
     if (m_RayTracingSupported)
@@ -698,11 +484,7 @@ void Renderer::CreateRayTracingPipeline()
     psoDesc.CS = { shaderCode.data(), shaderCode.size() };
     psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
-    HRESULT hr = m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO));
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to create Path Tracer Compute PSO" << std::endl;
-    }
+    CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO)), "Failed to create Path Tracer Compute PSO");
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)
@@ -772,10 +554,10 @@ void Renderer::BuildAccelerationStructures(Model* model)
     m_CommandList->Reset(m_CommandAllocator.Get(), nullptr);
 
     Microsoft::WRL::ComPtr<ID3D12Device5> device5;
-    if (FAILED(m_Device.As(&device5))) return;
+    CHECK_HR(m_Device.As(&device5), "Failed to get ID3D12Device5");
 
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmdList4;
-    if (FAILED(m_CommandList.As(&cmdList4))) return;
+    CHECK_HR(m_CommandList.As(&cmdList4), "Failed to get ID3D12GraphicsCommandList4");
 
     // 1. Identify all unique primitives and build BLAS for each
     std::vector<const GLTFPrimitive*> modelPrims;
@@ -911,15 +693,13 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
         desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
 
-    HRESULT hr = m_Device->CreateCommittedResource(
+    CHECK_HR(m_Device->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
         &desc,
         initialState,
         nullptr,
-        IID_PPV_ARGS(&buffer.resource));
-
-    if (FAILED(hr)) return false;
+        IID_PPV_ARGS(&buffer.resource)), "CreateCommittedResource for Buffer failed");
 
     buffer.size = size;
     buffer.state = initialState;
@@ -1004,15 +784,13 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
         clearVal.DepthStencil.Depth = 1.0f;
     }
 
-    HRESULT hr = m_Device->CreateCommittedResource(
+    CHECK_HR(m_Device->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
         &desc,
         initialState,
         (flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) ? &clearVal : nullptr,
-        IID_PPV_ARGS(&texture.resource));
-
-    if (FAILED(hr)) return false;
+        IID_PPV_ARGS(&texture.resource)), "CreateCommittedResource for Texture failed");
 
     texture.state = initialState;
     texture.format = format;
@@ -1158,28 +936,12 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
     Microsoft::WRL::ComPtr<IDxcUtils> dxcUtils;
     Microsoft::WRL::ComPtr<IDxcCompiler3> dxcCompiler;
 
-    HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&dxcUtils));
-    if (FAILED(hr))
-    {
-        std::cerr << "DxcCreateInstance for DxcUtils failed" << std::endl;
-        return std::vector<char>();
-    }
-
-    hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxcCompiler));
-    if (FAILED(hr))
-    {
-        std::cerr << "DxcCreateInstance for DxcCompiler failed" << std::endl;
-        return std::vector<char>();
-    }
+    CHECK_HR(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&dxcUtils)), "DxcCreateInstance for DxcUtils failed");
+    CHECK_HR(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxcCompiler)), "DxcCreateInstance for DxcCompiler failed");
 
     // Create blob from source
     Microsoft::WRL::ComPtr<IDxcBlobEncoding> sourceBlob;
-    hr = dxcUtils->CreateBlob(source.c_str(), static_cast<UINT32>(source.size()), CP_UTF8, &sourceBlob);
-    if (FAILED(hr))
-    {
-        std::cerr << "CreateBlob failed" << std::endl;
-        return std::vector<char>();
-    }
+    CHECK_HR(dxcUtils->CreateBlob(source.c_str(), static_cast<UINT32>(source.size()), CP_UTF8, &sourceBlob), "CreateBlob failed");
 
     // Compile shader
     std::wstring entryPointW(entryPoint.begin(), entryPoint.end());
@@ -1204,21 +966,11 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
     dxcUtils->CreateDefaultIncludeHandler(&includeHandler);
 
     Microsoft::WRL::ComPtr<IDxcResult> result;
-    hr = dxcCompiler->Compile(&sourceBuffer, arguments.data(), (UINT32)arguments.size(), includeHandler.Get(), IID_PPV_ARGS(&result));
-    if (FAILED(hr))
-    {
-        std::cerr << "Compile failed" << std::endl;
-        return std::vector<char>();
-    }
+    CHECK_HR(dxcCompiler->Compile(&sourceBuffer, arguments.data(), (UINT32)arguments.size(), includeHandler.Get(), IID_PPV_ARGS(&result)), "Compile failed");
 
     // Check compilation result
     HRESULT statusHr;
-    hr = result->GetStatus(&statusHr);
-    if (FAILED(hr))
-    {
-        std::cerr << "GetStatus failed" << std::endl;
-        return std::vector<char>();
-    }
+    CHECK_HR(result->GetStatus(&statusHr), "GetStatus failed");
 
     if (!SUCCEEDED(statusHr))
     {
@@ -1238,12 +990,7 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
 
     // Get compiled shader
     Microsoft::WRL::ComPtr<IDxcBlob> shaderBlob;
-    hr = result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shaderBlob), nullptr);
-    if (FAILED(hr))
-    {
-        std::cerr << "GetOutput failed" << std::endl;
-        return std::vector<char>();
-    }
+    CHECK_HR(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shaderBlob), nullptr), "GetOutput failed");
 
     std::vector<char> compiledShader(shaderBlob->GetBufferSize());
     memcpy(compiledShader.data(), shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize());
@@ -1295,23 +1042,13 @@ void Renderer::WaitForPreviousFrame()
 {
     // Signal and increment the fence value
     const UINT64 fence = m_FenceValue;
-    HRESULT hr = m_CommandQueue->Signal(m_Fence.Get(), fence);
-    if (FAILED(hr))
-    {
-        std::cerr << "CommandQueue Signal failed" << std::endl;
-        return;
-    }
+    CHECK_HR(m_CommandQueue->Signal(m_Fence.Get(), fence), "CommandQueue Signal failed");
     m_FenceValue++;
 
     // Wait until the previous frame is finished
     if (m_Fence->GetCompletedValue() < fence)
     {
-        hr = m_Fence->SetEventOnCompletion(fence, m_FenceEvent);
-        if (FAILED(hr))
-        {
-            std::cerr << "SetEventOnCompletion failed" << std::endl;
-            return;
-        }
+        CHECK_HR(m_Fence->SetEventOnCompletion(fence, m_FenceEvent), "SetEventOnCompletion failed");
         WaitForSingleObject(m_FenceEvent, INFINITE);
     }
 
