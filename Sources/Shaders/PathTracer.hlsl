@@ -79,7 +79,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 accumulatedColor = 0;    // store total light energy (radiance) reaches camera along path
     float3 throughput = 1;  // represent percentage light "survives" after bounce surface along path
 
-    for (int bounce = 0; bounce < 3; bounce++) {
+    for (int bounce = 0; bounce < 4; bounce++) {
         RayDesc ray;
         ray.Origin = rayPos;
         ray.Direction = rayDir;
@@ -136,7 +136,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     sq.Proceed();
 
                     if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        accumulatedColor += throughput * baseColor.xyz * g_Light.color.xyz * 10.f * ndotl * (1.0f / 3.14159f);
+                        accumulatedColor += throughput * baseColor.xyz * g_Light.color.xyz * ndotl * (1.0f / 3.14159f);
                     }
                 }
             }

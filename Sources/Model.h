@@ -174,7 +174,6 @@ private:
     // GPU Materials
     std::vector<MaterialConstants> m_MaterialConstants;
     GPUBuffer m_MaterialBuffer;
-    GPUBuffer m_MaterialStagingBuffer;
 
     // Draw Node Data (Combined Transform and Draw Metadata)
     std::vector<DrawNodeData> m_DrawNodeData;
@@ -183,19 +182,15 @@ private:
     // Indirect Draw Commands
     std::vector<IndirectDrawCommand> m_OpaqueCommands;
     GPUBuffer m_OpaqueCommandBuffer;
-    GPUBuffer m_OpaqueCommandStagingBuffer;
 
     std::vector<IndirectDrawCommand> m_TransparentCommands;
     GPUBuffer m_TransparentCommandBuffer;
-    GPUBuffer m_TransparentCommandStagingBuffer;
 
     // Global Vertex/Index Buffers
     std::vector<GLTFVertex> m_GlobalVertices;
     std::vector<uint32_t> m_GlobalIndices;
     GPUBuffer m_GlobalVertexBuffer;
-    GPUBuffer m_GlobalVertexStaging;
     GPUBuffer m_GlobalIndexBuffer;
-    GPUBuffer m_GlobalIndexStaging;
 
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;

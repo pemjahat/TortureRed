@@ -2,6 +2,7 @@
 #include "Model.h"
 #include "Renderer.h"
 #include "Utility.h"
+#include "ResourceUploadBatch.h"
 #include <iostream>
 #include <cgltf.h>
 #define CGLTF_IMPLEMENTATION
@@ -270,35 +271,21 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create global vertex buffer
     if (!m_GlobalVertices.empty())
     {
-        const UINT64 size = m_GlobalVertices.size() * sizeof(GLTFVertex);
         if (!renderer->CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global vertex buffer" << std::endl;
             return;
         }
-        if (!renderer->CreateBuffer(m_GlobalVertexStaging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-        {
-            std::cerr << "Failed to create global vertex staging buffer" << std::endl;
-            return;
-        }
-        memcpy(m_GlobalVertexStaging.cpuPtr, m_GlobalVertices.data(), size);
     }
 
     // Create global index buffer
     if (!m_GlobalIndices.empty())
     {
-        const UINT64 size = m_GlobalIndices.size() * sizeof(uint32_t);
         if (!renderer->CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global index buffer" << std::endl;
             return;
         }
-        if (!renderer->CreateBuffer(m_GlobalIndexStaging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-        {
-            std::cerr << "Failed to create global index staging buffer" << std::endl;
-            return;
-        }
-        memcpy(m_GlobalIndexStaging.cpuPtr, m_GlobalIndices.data(), size);
     }
 
     // Pre-calculate node data for all node-primitive pairs
@@ -355,12 +342,6 @@ void Model::CreateGLTFResources(Renderer* renderer)
                 std::cerr << "Failed to create opaque indirect draw buffer" << std::endl;
                 return;
             }
-            if (!renderer->CreateBuffer(m_OpaqueCommandStagingBuffer, cmdSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-            {
-                std::cerr << "Failed to create opaque indirect draw staging buffer" << std::endl;
-                return;
-            }
-            memcpy(m_OpaqueCommandStagingBuffer.cpuPtr, m_OpaqueCommands.data(), cmdSize);
         }
 
         // Create transparent command buffer
@@ -372,12 +353,6 @@ void Model::CreateGLTFResources(Renderer* renderer)
                 std::cerr << "Failed to create transparent indirect draw buffer" << std::endl;
                 return;
             }
-            if (!renderer->CreateBuffer(m_TransparentCommandStagingBuffer, cmdSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-            {
-                std::cerr << "Failed to create transparent indirect draw staging buffer" << std::endl;
-                return;
-            }
-            memcpy(m_TransparentCommandStagingBuffer.cpuPtr, m_TransparentCommands.data(), cmdSize);
         }
 
         // Populate staging buffer immediately with initial transforms
@@ -387,20 +362,11 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create material buffer
     if (!m_MaterialConstants.empty())
     {
-        const UINT materialBufferSize = static_cast<UINT>(m_MaterialConstants.size() * sizeof(MaterialConstants));
         if (!renderer->CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create material buffer" << std::endl;
             return;
         }
-
-        if (!renderer->CreateBuffer(m_MaterialStagingBuffer, materialBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
-        {
-            std::cerr << "Failed to create material staging buffer" << std::endl;
-            return;
-        }
-
-        memcpy(m_MaterialStagingBuffer.cpuPtr, m_MaterialConstants.data(), materialBufferSize);
     }
 }
 
@@ -851,7 +817,7 @@ void Model::UpdateAnimation(float deltaTime)
     UpdateNodeBuffer();
 }
 
-void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* /*renderer*/)
+void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer)
 {
     // Reset the command list
     CHECK_HR(cmdList->Reset(cmdAllocator, nullptr), "Reset command list failed");
@@ -954,52 +920,48 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         gltfImg.image = nullptr;
     }
 
-    // Material buffer update is still needed if it's DEFAULT heap
+    // Use ResourceUploadBatch for buffers
+    ResourceUploadBatch batch(renderer);
+    batch.Begin();
+
     if (m_MaterialBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_MaterialBuffer.resource.Get(), 0, m_MaterialStagingBuffer.resource.Get(), 0, m_MaterialConstants.size() * sizeof(MaterialConstants));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_MaterialBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
-        cmdList->ResourceBarrier(1, &barrier);
+        batch.Upload(m_MaterialBuffer, m_MaterialConstants.data(), m_MaterialConstants.size() * sizeof(MaterialConstants));
+        batch.Transition(m_MaterialBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
     }
 
-    // Copy opaque indirect draw buffer
     if (m_OpaqueCommandBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_OpaqueCommandBuffer.resource.Get(), 0, m_OpaqueCommandStagingBuffer.resource.Get(), 0, m_OpaqueCommands.size() * sizeof(IndirectDrawCommand));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_OpaqueCommandBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        cmdList->ResourceBarrier(1, &barrier);
+        batch.Upload(m_OpaqueCommandBuffer, m_OpaqueCommands.data(), m_OpaqueCommands.size() * sizeof(IndirectDrawCommand));
+        batch.Transition(m_OpaqueCommandBuffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     }
 
-    // Copy transparent indirect draw buffer
     if (m_TransparentCommandBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_TransparentCommandBuffer.resource.Get(), 0, m_TransparentCommandStagingBuffer.resource.Get(), 0, m_TransparentCommands.size() * sizeof(IndirectDrawCommand));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_TransparentCommandBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        cmdList->ResourceBarrier(1, &barrier);
+        batch.Upload(m_TransparentCommandBuffer, m_TransparentCommands.data(), m_TransparentCommands.size() * sizeof(IndirectDrawCommand));
+        batch.Transition(m_TransparentCommandBuffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     }
 
-    // Copy global vertex buffer
     if (m_GlobalVertexBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_GlobalVertexBuffer.resource.Get(), 0, m_GlobalVertexStaging.resource.Get(), 0, m_GlobalVertices.size() * sizeof(GLTFVertex));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_GlobalVertexBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
-        cmdList->ResourceBarrier(1, &barrier);
+        batch.Upload(m_GlobalVertexBuffer, m_GlobalVertices.data(), m_GlobalVertices.size() * sizeof(GLTFVertex));
+        batch.Transition(m_GlobalVertexBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
     }
 
-    // Copy global index buffer
     if (m_GlobalIndexBuffer.resource)
     {
-        cmdList->CopyBufferRegion(m_GlobalIndexBuffer.resource.Get(), 0, m_GlobalIndexStaging.resource.Get(), 0, m_GlobalIndices.size() * sizeof(uint32_t));
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_GlobalIndexBuffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER);
-        cmdList->ResourceBarrier(1, &barrier);
+        batch.Upload(m_GlobalIndexBuffer, m_GlobalIndices.data(), m_GlobalIndices.size() * sizeof(uint32_t));
+        batch.Transition(m_GlobalIndexBuffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
     }
 
-    // Execute the upload commands
+    batch.End();
+
+    // Execute the texture upload commands (which were recorded into cmdList)
     CHECK_HR(cmdList->Close(), "Close command list failed");
     ID3D12CommandList* commandLists[] = { cmdList };
     cmdQueue->ExecuteCommandLists(1, commandLists);
 
-    // Wait for completion
+    // Wait for completion (for textures)
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     CHECK_HR(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Create fence failed");
     HANDLE eventHandle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
