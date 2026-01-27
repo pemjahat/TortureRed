@@ -48,6 +48,49 @@ float3 align_to_normal(float3 v, float3 n) {
     return v.x * tangent + v.y * bitangent + v.z * n;
 }
 
+float3 FresnelSchlick(float cosTheta, float3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+float DistributionGGX(float3 N, float3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = 3.14159265 * denom * denom;
+    return nom / denom;
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    float nom = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+    return nom / denom;
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * 3.14159265 * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    float3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    return align_to_normal(H, N);
+}
+
 void seed_rng(out RNG rng, uint2 screenPos, uint frameIndex) {
     rng.state = pcg_hash(screenPos.y * 65536 + screenPos.x + pcg_hash(frameIndex));
     rng.inc = 1;
@@ -120,10 +163,18 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 baseColor *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, uv, 0);
             }
 
+            float metallic = mat.metallicFactor;
+            float roughness = max(0.01f, mat.roughnessFactor);
+            float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
+            float3 V = -ray.Direction;
+
             // NEE for Directional Light
             {
                 float3 L = -normalize(g_Light.direction.xyz);
-                float ndotl = max(0.0f, dot(worldNormal, L));
+                float3 H = normalize(V + L);
+                float ndotl = max(0.0001f, dot(worldNormal, L));
+                float ndotv = max(0.0001f, dot(worldNormal, V));
+
                 if (ndotl > 0) {
                     RayDesc shadowRay;
                     shadowRay.Origin = hitPos + worldNormal * 0.001f;
@@ -136,17 +187,49 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     sq.Proceed();
 
                     if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        accumulatedColor += throughput * baseColor.xyz * g_Light.color.xyz * g_Light.intensity * ndotl * (1.0f / 3.14159f);
+                        float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+                        float D = DistributionGGX(worldNormal, H, roughness);
+                        float G = GeometrySmith(worldNormal, V, L, roughness);
+                        
+                        float3 numerator = D * G * F;
+                        float denominator = 4.0 * ndotv * ndotl + 0.0001;
+                        float3 specular = numerator / denominator;
+                        
+                        float3 kD = (1.0 - F) * (1.0 - metallic);
+                        float3 diffuse = kD * baseColor.rgb / 3.14159265;
+                        
+                        accumulatedColor += throughput * (diffuse + specular) * g_Light.color.rgb * g_Light.intensity * ndotl;
                     }
                 }
             }
 
-            // Path continuation (diffuse reflection)
-            throughput *= baseColor.xyz;
-            // Cosine weighted ensure rays more likely bounce towards normal direction
-            float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
-            // Convert sample direction from local "up" to surface normal
-            rayDir = align_to_normal(nextDirLocal, worldNormal);
+            // Path continuation (stochastic selection between diffuse and specular)
+            float3 F_prob = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
+            float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
+            float rnd = next_float(rng);
+
+            if (rnd < probSpecular) {
+                // Specular reflection (Importance sampling GGX)
+                float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), worldNormal, roughness);
+                rayDir = reflect(-V, H);
+                
+                float VdotH = max(dot(V, H), 0.0);
+                float NdotV = max(dot(worldNormal, V), 0.0001);
+                float NdotH = max(dot(worldNormal, H), 0.0001);
+                float G = GeometrySmith(worldNormal, V, rayDir, roughness);
+                float3 F_spec = FresnelSchlick(VdotH, F0);
+                
+                throughput *= (F_spec * G * VdotH) / (NdotV * NdotH * probSpecular);
+            } else {
+                // Diffuse reflection (Cosine weighted sampling)
+                float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
+                rayDir = align_to_normal(nextDirLocal, worldNormal);
+                
+                float3 F_at_surface = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
+                float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
+                throughput *= (kD * baseColor.rgb) / (1.0 - probSpecular);
+            }
+
             rayPos = hitPos + worldNormal * 0.001f;
 
             // Russian Roulette
