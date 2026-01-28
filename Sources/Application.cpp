@@ -77,6 +77,9 @@ void Application::Initialize()
     float nearZ = 0.1f;
     float farZ = 1000.0f;
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
+    
+    m_FrameConstants.enableTemporal = 1;
+    m_FrameConstants.enableSpatial = 1;
 
     // Load GLTF model
     if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
@@ -256,11 +259,19 @@ void Application::Update(float deltaTime)
     m_LastViewMatrix = view;
 
     // Update Frame Constants
+    m_FrameConstants.viewProjPrevious = m_LastViewProj;
+    m_FrameConstants.viewInversePrevious = m_LastViewInverse;
+    m_FrameConstants.prevCameraPosition = m_LastCameraPos;
+
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProj, m_ViewProj);
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewInverse, m_Camera.GetInvViewMatrix());
     DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverse, DirectX::XMMatrixInverse(nullptr, proj));
     m_FrameConstants.cameraPosition = { m_Camera.GetPosition().x, m_Camera.GetPosition().y, m_Camera.GetPosition().z, 1.0f };
     
+    m_LastViewProj = m_FrameConstants.viewProj;
+    m_LastViewInverse = m_FrameConstants.viewInverse;
+    m_LastCameraPos = m_FrameConstants.cameraPosition;
+
     // Increment frame index only if not reset
     m_FrameConstants.frameIndex++;
 
@@ -479,7 +490,29 @@ void Application::RenderImGui()
 
     if (m_Renderer.IsRayTracingSupported())
     {
-        ImGui::Checkbox("Use Path Tracer", &m_UsePathTracer);
+        if (ImGui::Checkbox("Use Path Tracer", &m_UsePathTracer))
+        {
+            m_FrameConstants.frameIndex = 0;
+        }
+
+        if (m_UsePathTracer)
+        {
+            ImGui::Indent();
+            bool enableTemporal = (m_FrameConstants.enableTemporal != 0);
+            if (ImGui::Checkbox("Enable Temporal", &enableTemporal))
+            {
+                m_FrameConstants.enableTemporal = enableTemporal ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
+
+            bool enableSpatial = (m_FrameConstants.enableSpatial != 0);
+            if (ImGui::Checkbox("Enable Spatial", &enableSpatial))
+            {
+                m_FrameConstants.enableSpatial = enableSpatial ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
+            ImGui::Unindent();
+        }
     }
     else
     {

@@ -48,6 +48,9 @@ private:
     Camera m_Camera;
     DirectX::XMMATRIX m_ViewProj;
     DirectX::XMMATRIX m_LastViewMatrix;
+    DirectX::XMFLOAT4X4 m_LastViewProj;
+    DirectX::XMFLOAT4X4 m_LastViewInverse;
+    DirectX::XMFLOAT4 m_LastCameraPos;
     FrameConstants m_FrameConstants;
     LightConstants m_MainLight;
 

@@ -149,6 +149,8 @@ private:
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;
     GPUTexture m_AccumulationBuffer;
+    GPUBuffer m_ReservoirBuffer[2]; // ReSTIR Reservoirs (Current and Previous)
+    int m_CurrentReservoirIndex = 0;
 
     // Descriptor Heaps
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;

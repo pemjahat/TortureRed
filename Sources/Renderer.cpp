@@ -161,6 +161,16 @@ bool Renderer::Initialize(HWND hwnd)
             std::cerr << "Failed to create path tracer output texture" << std::endl;
             return false;
         }
+
+        // Create ReSTIR Reservoirs
+        for (int i = 0; i < 2; ++i)
+        {
+            if (!CreateBuffer(m_ReservoirBuffer[i], WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(Reservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+            {
+                std::cerr << "Failed to create ReSTIR reservoir buffer" << std::endl;
+                return false;
+            }
+        }
     }
 
     // Create command allocator
@@ -324,7 +334,13 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE uavRange1;
     uavRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0); // u1 space0: Output Buffer
 
-    CD3DX12_ROOT_PARAMETER rootParameters[10];
+    CD3DX12_DESCRIPTOR_RANGE uavRange2;
+    uavRange2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 2, 0); // u2 space0: Reservoir Current
+
+    CD3DX12_DESCRIPTOR_RANGE uavRange3;
+    uavRange3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 3, 0); // u3 space0: Reservoir Previous
+
+    CD3DX12_ROOT_PARAMETER rootParameters[12];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsConstantBufferView(1); // b1: Light constants
     rootParameters[2].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
@@ -335,6 +351,8 @@ void Renderer::CreateRootSignature()
     rootParameters[7].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
     rootParameters[8].InitAsDescriptorTable(1, &uavRange0); // u0
     rootParameters[9].InitAsDescriptorTable(1, &uavRange1); // u1
+    rootParameters[10].InitAsDescriptorTable(1, &uavRange2); // u2
+    rootParameters[11].InitAsDescriptorTable(1, &uavRange3); // u3
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -498,11 +516,15 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     // Transition UAVs
     TransitionResource(m_AccumulationBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    D3D12_RESOURCE_BARRIER uavBarriers[2];
+    D3D12_RESOURCE_BARRIER uavBarriers[4];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
     uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
-    m_CommandList->ResourceBarrier(2, uavBarriers);
+    uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[0].resource.Get());
+    uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[1].resource.Get());
+    m_CommandList->ResourceBarrier(4, uavBarriers);
 
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
     m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
@@ -519,7 +541,14 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_AccumulationBuffer.uavIndex));
     m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
 
+    int currentReservoir = m_CurrentReservoirIndex;
+    int previousReservoir = 1 - currentReservoir;
+    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+    m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
+
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 
     // Transition for blitting/Imgui
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -726,6 +755,23 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
 
         m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
+    }
+
+    if (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        buffer.uavIndex = AllocateDescriptor();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
+        uavHandle.ptr += (UINT64)buffer.uavIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.FirstElement = 0;
+        uavDesc.Buffer.NumElements = (UINT)(size / sizeof(Reservoir)); // Assuming Reservoir buffers for now, could be more generic
+        uavDesc.Buffer.StructureByteStride = sizeof(Reservoir);
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        m_Device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
     }
 
     return true;

@@ -6,6 +6,18 @@
 #include <wrl.h>
 #include <DirectXMath.h>
 
+struct Reservoir
+{
+    DirectX::XMFLOAT3 hitPos;
+    DirectX::XMFLOAT3 hitNormal;
+    DirectX::XMFLOAT3 radiance;
+    float w_sum;
+    float M;
+    float W;
+    DirectX::XMFLOAT3 primaryNormal;
+    DirectX::XMFLOAT3 primaryPos;
+};
+
 struct GPUResource
 {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -28,6 +40,7 @@ struct GPUBuffer : public GPUResource
     void* cpuPtr = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
     int srvIndex = -1;
+    int uavIndex = -1;
 };
 
 struct GPUTexture : public GPUResource
@@ -52,7 +65,10 @@ struct FrameConstants
     DirectX::XMFLOAT4X4 viewProj;
     DirectX::XMFLOAT4X4 viewInverse;
     DirectX::XMFLOAT4X4 projectionInverse;
+    DirectX::XMFLOAT4X4 viewProjPrevious;
+    DirectX::XMFLOAT4X4 viewInversePrevious;
     DirectX::XMFLOAT4 cameraPosition;
+    DirectX::XMFLOAT4 prevCameraPosition;
     uint32_t frameIndex;
     int32_t albedoIndex;
     int32_t normalIndex;
@@ -60,7 +76,9 @@ struct FrameConstants
     int32_t depthIndex;
     int32_t shadowMapIndex;
     float exposure;
-    uint32_t padding[1];
+    uint32_t enableTemporal;
+    uint32_t enableSpatial;
+    uint32_t padding;
 };
 
 struct LightConstants
