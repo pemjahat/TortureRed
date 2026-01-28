@@ -449,6 +449,7 @@ void Model::LoadMaterials()
         mc.roughnessFactor = 1.0f;
         mc.baseColorTextureIndex = -1;
         mc.normalTextureIndex = -1;
+        mc.metallicRoughnessTextureIndex = -1;
 
         if (material->has_pbr_metallic_roughness)
         {
@@ -469,6 +470,19 @@ void Model::LoadMaterials()
                     if (baseColorTexture->source)
                     {
                         mc.baseColorTextureIndex = baseColorTexture->source->texture.srvIndex;
+                    }
+                }
+            }
+
+            if (material->pbr_metallic_roughness.metallic_roughness_texture.texture)
+            {
+                size_t texIndex = material->pbr_metallic_roughness.metallic_roughness_texture.texture - m_GltfModel.data->textures;
+                if (texIndex < m_GltfModel.textures.size())
+                {
+                    GLTFTexture* mrTexture = &m_GltfModel.textures[texIndex];
+                    if (mrTexture->source)
+                    {
+                        mc.metallicRoughnessTextureIndex = mrTexture->source->texture.srvIndex;
                     }
                 }
             }
@@ -496,6 +510,7 @@ void Model::LoadMaterials()
         mc.roughnessFactor = 1.0f;
         mc.baseColorTextureIndex = -1;
         mc.normalTextureIndex = -1;
+        mc.metallicRoughnessTextureIndex = -1;
         m_MaterialConstants.push_back(mc);
     }
 }

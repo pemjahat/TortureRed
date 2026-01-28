@@ -55,7 +55,17 @@ GBufferOutput PSMain(PSInput input) {
     
     output.albedo = albedo;
     output.normal = float4(normalize(input.normal) * 0.5f + 0.5f, 1.0f);
-    output.material = float4(material.roughnessFactor, material.metallicFactor, 0.0f, 1.0f);
+    
+    float roughness = material.roughnessFactor;
+    float metallic = material.metallicFactor;
+    
+    if (material.metallicRoughnessTextureIndex >= 0) {
+        float4 mrSample = textures[material.metallicRoughnessTextureIndex].Sample(pointSampler, input.texCoord);
+        roughness *= mrSample.g;
+        metallic *= mrSample.b;
+    }
+    
+    output.material = float4(roughness, metallic, 0.0f, 1.0f);
     
     return output;
 }

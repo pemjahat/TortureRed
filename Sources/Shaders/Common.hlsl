@@ -43,6 +43,8 @@ struct MaterialConstants {
     float roughnessFactor;
     int baseColorTextureIndex;
     int normalTextureIndex;
+    int metallicRoughnessTextureIndex;
+    uint padding[1];
 };
 
 struct DrawNodeData {
