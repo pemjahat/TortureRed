@@ -78,8 +78,9 @@ void Application::Initialize()
     float farZ = 1000.0f;
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
     
-    m_FrameConstants.enableTemporal = 1;
-    m_FrameConstants.enableSpatial = 1;
+    m_FrameConstants.enableRestir = 1;
+    m_FrameConstants.enableAvoidCaustics = 1;
+    m_FrameConstants.enableIndirectSpecular = 0;
 
     // Load GLTF model
     if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
@@ -498,17 +499,24 @@ void Application::RenderImGui()
         if (m_UsePathTracer)
         {
             ImGui::Indent();
-            bool enableTemporal = (m_FrameConstants.enableTemporal != 0);
-            if (ImGui::Checkbox("Enable Temporal", &enableTemporal))
+            bool enableRestir = (m_FrameConstants.enableRestir != 0);
+            if (ImGui::Checkbox("Enable ReSTIR GI", &enableRestir))
             {
-                m_FrameConstants.enableTemporal = enableTemporal ? 1 : 0;
+                m_FrameConstants.enableRestir = enableRestir ? 1 : 0;
                 m_FrameConstants.frameIndex = 0;
             }
 
-            bool enableSpatial = (m_FrameConstants.enableSpatial != 0);
-            if (ImGui::Checkbox("Enable Spatial", &enableSpatial))
+            bool avoidCaustics = (m_FrameConstants.enableAvoidCaustics != 0);
+            if (ImGui::Checkbox("Avoid Caustic Paths", &avoidCaustics))
             {
-                m_FrameConstants.enableSpatial = enableSpatial ? 1 : 0;
+                m_FrameConstants.enableAvoidCaustics = avoidCaustics ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
+
+            bool enableIndirectSpecular = (m_FrameConstants.enableIndirectSpecular != 0);
+            if (ImGui::Checkbox("Enable Indirect Specular", &enableIndirectSpecular))
+            {
+                m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
                 m_FrameConstants.frameIndex = 0;
             }
             ImGui::Unindent();

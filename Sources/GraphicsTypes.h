@@ -11,6 +11,7 @@ struct Reservoir
     DirectX::XMFLOAT3 hitPos;
     DirectX::XMFLOAT3 hitNormal;
     DirectX::XMFLOAT3 radiance;
+    float targetPDF;  // Added for RTXDI-style demodulated PDF tracking
     float w_sum;
     float M;
     float W;
@@ -76,9 +77,10 @@ struct FrameConstants
     int32_t depthIndex;
     int32_t shadowMapIndex;
     float exposure;
-    uint32_t enableTemporal;
-    uint32_t enableSpatial;
-    uint32_t padding;
+    uint32_t enableRestir;
+    uint32_t enableAvoidCaustics;
+    uint32_t enableIndirectSpecular;
+    uint32_t padding[1];
 };
 
 struct LightConstants

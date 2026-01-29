@@ -24,6 +24,37 @@ float Luminance(float3 c) {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+// Compute the Jacobian for a GI shift (point-to-point solid angle ratio)
+float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampleHitPos, float3 sampleHitNormal) {
+    float3 diffP = sampleHitPos - primaryPos;
+    float distSqP = max(0.0001f, dot(diffP, diffP));
+    float cosP = max(0.0001f, abs(dot(sampleHitNormal, diffP / sqrt(distSqP))));
+    
+    float3 diffQ = sampleHitPos - neighborPrimaryPos;
+    float distSqQ = max(0.0001f, dot(diffQ, diffQ));
+    float cosQ = max(0.0001f, abs(dot(sampleHitNormal, diffQ / sqrt(distSqQ))));
+    
+    // Solid angle at P / Solid angle at Q
+    return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));
+}
+
+// Evaluate the PBR BSDF (Diffuse and Specular components)
+void EvaluateBSDF(float3 N, float3 V, float3 L, float3 baseColor, float metallic, float roughness, out float3 diffuseBRDF, out float3 specularBRDF) {
+    float3 H = normalize(V + L);
+    float dotNL = max(0.0001f, dot(N, L));
+    float dotNV = max(0.0001f, dot(N, V));
+    float dotVH = max(0.0001f, dot(V, H));
+
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
+    float3 F = FresnelSchlick(dotVH, F0);
+    float D = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+
+    specularBRDF = (D * G * F) / (4.0f * dotNV * dotNL + 0.0001f);
+    float3 kD = (1.0f - F) * (1.0f - metallic);
+    diffuseBRDF = kD * baseColor / 3.14159265f;
+}
+
 // Random number generator (PCG)
 struct RNG {
     uint state;
@@ -81,6 +112,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     res.hitPos = 0;
     res.hitNormal = 0;
     res.radiance = 0;
+    res.targetPDF = 0;
     res.w_sum = 0;
     res.M = 0;
     res.W = 0;
@@ -89,7 +121,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float3 accumulatedColor = 0;    // store total light energy (radiance) reaches camera along path
     float3 throughput = 1;  // represent percentage light "survives" after bounce surface along path
-    float3 incomingThroughput = 1; // throughput starting from the first indirect hit
     float3 indirectRadianceAccum = 0;
 
     // ReSTIR Primary Hit Data
@@ -104,7 +135,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // ReSTIR Indirect Sample Data (Virtual Point Light)
     float3 indirectHitPos = 0;
     float3 indirectHitNormal = 0;
+    float3 indirectHitAlbedo = 1;
     bool hasIndirectHit = false;
+
+    bool isPathSpecular = false;
 
     for (int bounce = 0; bounce < 4; bounce++) {
         RayDesc ray;
@@ -152,7 +186,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 roughness *= mrSample.g;
                 metallic *= mrSample.b;
             }
-            roughness = max(0.01f, roughness);
+            
+            // Roughness Regularization: Increase minimum roughness for indirect bounces
+            // to reduce fireflies from sharp specular paths.
+            if (bounce > 0) {
+                roughness = max(0.15f, roughness);
+            } else {
+                roughness = max(0.01f, roughness);
+            }
 
             float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
             float3 V = -ray.Direction;
@@ -168,6 +209,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             } else if (bounce == 1) {
                 indirectHitPos = hitPos;
                 indirectHitNormal = worldNormal;
+                indirectHitAlbedo = baseColor.rgb;
                 hasIndirectHit = true;
             }
 
@@ -191,17 +233,19 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     sq.Proceed();
 
                     if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
-                        float D = DistributionGGX(worldNormal, H, roughness);
-                        float G = GeometrySmith(worldNormal, V, L, roughness);
+                        float3 diffuse, specular;
+                        EvaluateBSDF(worldNormal, V, L, baseColor.rgb, metallic, roughness, diffuse, specular);
                         
-                        float3 numerator = D * G * F;
-                        float denominator = 4.0 * ndotv * ndotl + 0.0001;
-                        float3 specular = numerator / denominator;
-                        
-                        float3 kD = (1.0 - F) * (1.0 - metallic);
-                        float3 diffuse = kD * baseColor.rgb / 3.14159265;
-                        
+                        // Indirect Specular suppression
+                        if (bounce > 0 && !g_Frame.enableIndirectSpecular) {
+                            specular = 0;
+                        }
+
+                        // Avoid Caustics (LSD): If path is already specular, suppress subsequent diffuse lighting
+                        if (isPathSpecular && g_Frame.enableAvoidCaustics) {
+                             diffuse = 0;
+                        }
+
                         directLight = (diffuse + specular) * g_Light.color.rgb * g_Light.intensity * ndotl;
                     }
                 }
@@ -210,15 +254,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             if (bounce == 0) {
                 accumulatedColor += directLight;
             } else {
-                indirectRadianceAccum += directLight * incomingThroughput;
+                indirectRadianceAccum += directLight * throughput;
             }
 
             // Path continuation (stochastic selection between diffuse and specular)
             float3 F_prob = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
             float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
+
             float rnd = next_float(rng);
 
             float3 throughputFactor = 1.0f;
+
             if (rnd < probSpecular) {
                 float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), worldNormal, roughness);
                 rayDir = reflect(-V, H);
@@ -228,16 +274,22 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float G = GeometrySmith(worldNormal, V, rayDir, roughness);
                 float3 F_spec = FresnelSchlick(VdotH, F0);
                 throughputFactor = (F_spec * G * VdotH) / (NdotV * NdotH * probSpecular);
+
+                isPathSpecular = true;
             } else {
-                float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
-                rayDir = align_to_normal(nextDirLocal, worldNormal);
-                float3 F_at_surface = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
-                float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
-                throughputFactor = (kD * baseColor.rgb) / (1.0 - probSpecular);
+                // Avoid Caustics (LSD): Terminate path if it tries to go diffuse after being specular
+                if (isPathSpecular && g_Frame.enableAvoidCaustics) {
+                    throughputFactor = 0;
+                } else {
+                    float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
+                    rayDir = align_to_normal(nextDirLocal, worldNormal);
+                    float3 F_at_surface = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
+                    float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
+                    throughputFactor = (kD * baseColor.rgb) / (1.0 - probSpecular);
+                }
             }
 
             throughput *= throughputFactor;
-            if (bounce > 0) incomingThroughput *= throughputFactor;
 
             rayPos = hitPos + worldNormal * 0.001f;
 
@@ -245,7 +297,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float p = max(throughput.r, max(throughput.g, throughput.b));
                 if (next_float(rng) > p) break;
                 throughput /= p;
-                incomingThroughput /= p;
             }
         } else {
             float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
@@ -255,112 +306,118 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 if (bounce == 1) {
                     indirectHitPos = ray.Origin + ray.Direction * 1000.0f;
                     indirectHitNormal = -ray.Direction;
+                    indirectHitAlbedo = 1.0f; // Sky has no albedo to divide out
                     hasIndirectHit = true;
                 }
-                indirectRadianceAccum += skyRadiance * incomingThroughput;
+                indirectRadianceAccum += skyRadiance * throughput;
             }
             break;
         }
     }
 
     // Initial reservoir update after multi-bounce path
-    if (hasPrimaryHit) {
+    if (g_Frame.enableRestir && hasPrimaryHit) {
         res.primaryPos = primaryHitPos;
         res.primaryNormal = primaryHitNormal;
         
         if (hasIndirectHit) {
-            float targetPDF = Luminance(indirectRadianceAccum);
-            updateReservoir(res, indirectHitPos, indirectHitNormal, indirectRadianceAccum, targetPDF, next_float(rng));
-        }
-    }
-
-    // Temporal Resampling
-    if (g_Frame.enableTemporal && hasPrimaryHit && g_Frame.frameIndex > 1) {
-        float4 clipPos = mul(float4(primaryHitPos, 1.0f), g_Frame.viewProjPrevious);
-        float2 prevUV = (clipPos.xy / clipPos.w) * 0.5f + 0.5f;
-        prevUV.y = 1.0f - prevUV.y;
-        
-        if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
-            uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
-            uint prevPixelIdx = prevIndex.y * launchDims.x + prevIndex.x;
-            Reservoir prevRes = g_ReservoirPrevious[prevPixelIdx];
+            // RTXDI Demodulation: RADIANCE is folded (includes albedo),
+            // but TargetPDF is demodulated (irradiance/lighting field).
+            float3 foldedRadiance = indirectRadianceAccum;
+            float targetPDF = Luminance(foldedRadiance / max(0.001f, indirectHitAlbedo));
             
-            // Re-validate and merge
-            float dotNormal = dot(res.primaryNormal, prevRes.primaryNormal);
-            float distPos = distance(res.primaryPos, prevRes.primaryPos);
+            updateReservoir(res, indirectHitPos, indirectHitNormal, foldedRadiance, targetPDF, targetPDF, next_float(rng));
+        }
 
-            float targetPDF = Luminance(prevRes.radiance);
-            if (prevRes.M > 0 && targetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
-                float weight = targetPDF * prevRes.W * prevRes.M;
-                mergeReservoirs(res, prevRes, weight, next_float(rng));
-                if (res.M > 60.0f) { // Slightly higher history for temporal
-                    res.w_sum *= 60.0f / res.M;
-                    res.M = 60.0f;
+        // Temporal Resampling
+        if (g_Frame.frameIndex > 1) {
+            float4 clipPos = mul(float4(primaryHitPos, 1.0f), g_Frame.viewProjPrevious);
+            float2 prevUV = (clipPos.xy / clipPos.w) * 0.5f + 0.5f;
+            prevUV.y = 1.0f - prevUV.y;
+            
+            if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
+                uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
+                uint prevPixelIdx = prevIndex.y * launchDims.x + prevIndex.x;
+                Reservoir prevRes = g_ReservoirPrevious[prevPixelIdx];
+                
+                // Re-validate and merge
+                float dotNormal = dot(res.primaryNormal, prevRes.primaryNormal);
+                float distPos = distance(res.primaryPos, prevRes.primaryPos);
+
+                float neighborTargetPDF = prevRes.targetPDF;
+                if (prevRes.M > 0 && neighborTargetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                    float weight = neighborTargetPDF * prevRes.W * prevRes.M;
+                    mergeReservoirs(res, prevRes, neighborTargetPDF, weight, next_float(rng));
+                    if (res.M > 60.0f) {
+                        res.w_sum *= 60.0f / res.M;
+                        res.M = 60.0f;
+                    }
                 }
             }
         }
-    }
 
-    // Spatial Resampling
-    if (g_Frame.enableSpatial && hasPrimaryHit && g_Frame.frameIndex > 1) {
-        for (int i = 0; i < 2; i++) {
-            float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
-            int2 neighborIndex = (int2)launchIndex + (int2)(offset * 15.0f); // increased range slightly
-            
-            if (neighborIndex.x >= 0 && neighborIndex.x < (int)launchDims.x && 
-                neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
+        // Spatial Resampling
+        if (g_Frame.frameIndex > 1) {
+            for (int i = 0; i < 2; i++) {
+                float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
+                int2 neighborIndex = (int2)launchIndex + (int2)(offset * 15.0f);
                 
-                uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
-                Reservoir neighborRes = g_ReservoirCurrent[neighborPixelIdx];
-                
-                // Similarity check: Normal and Position
-                float dotNormal = dot(res.primaryNormal, neighborRes.primaryNormal);
-                float distPos = distance(res.primaryPos, neighborRes.primaryPos);
-                float targetPDF = Luminance(neighborRes.radiance);
-
-                // Only merge if the neighbor is on a similar surface
-                if (neighborRes.M > 0 && targetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                if (neighborIndex.x >= 0 && neighborIndex.x < (int)launchDims.x && 
+                    neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
                     
-                    float weight = targetPDF * neighborRes.W * neighborRes.M;
-                    mergeReservoirs(res, neighborRes, weight, next_float(rng));
+                    uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
+                    Reservoir neighborRes = g_ReservoirCurrent[neighborPixelIdx];
+                    
+                    float dotNormal = dot(res.primaryNormal, neighborRes.primaryNormal);
+                    float distPos = distance(res.primaryPos, neighborRes.primaryPos);
+                    float neighborTargetPDF = neighborRes.targetPDF;
+
+                    if (neighborRes.M > 0 && neighborTargetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                        float jacobian = ComputeJacobian(res.primaryPos, neighborRes.primaryPos, neighborRes.hitPos, neighborRes.hitNormal);
+                        if (jacobian > 0.1f && jacobian < 10.0f) {
+                            float shiftedTargetPDF = neighborTargetPDF * jacobian;
+                            float weight = shiftedTargetPDF * neighborRes.W * neighborRes.M;
+                            mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
+                        }
+                    }
                 }
             }
         }
-    }
 
-    // Final reservoir weight normalization
-    float targetPDF = Luminance(res.radiance);
-    if (targetPDF > 0) {
-        // Weight ~ how much does this sample represent average of all samples
-        res.W = res.w_sum / (res.M * targetPDF);
-    } else {
-        res.W = 0;
-    }
-
-    // Apply Indirect contribution from Reservoir
-    if (hasPrimaryHit && res.W > 0) {
-        float3 L = normalize(res.hitPos - primaryHitPos);
-        float3 V = primaryV;
-        float3 N = primaryHitNormal;
-        
-        float ndotl = max(0.0f, dot(N, L));
-        float ndotv = max(0.0001f, dot(N, V));
-
-        if (ndotl > 0) {
-            float3 H = normalize(V + L);
-            float3 F0 = lerp(float3(0.04, 0.04, 0.04), primaryBaseColor, primaryMetallic);
-            
-            float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
-            float D = DistributionGGX(N, H, primaryRoughness);
-            float G = GeometrySmith(N, V, L, primaryRoughness);
-            
-            float3 specular = (D * G * F) / (4.0 * ndotv * ndotl + 0.0001);
-            float3 kD = (1.0 - F) * (1.0 - primaryMetallic);
-            float3 diffuse = kD * primaryBaseColor / 3.14159265;
-            
-            // Weight accounts for the probability of selecting this specific light path
-            accumulatedColor += (diffuse + specular) * res.radiance * res.W * ndotl;
+        // Final reservoir weight normalization
+        if (res.targetPDF > 0) {
+            res.W = res.w_sum / (res.M * res.targetPDF);
+        } else {
+            res.W = 0;
         }
+
+        // Apply Indirect contribution from Reservoir
+        if (res.W > 0) {
+            float3 L = normalize(res.hitPos - primaryHitPos);
+            float3 V = primaryV;
+            float3 N = primaryHitNormal;
+            
+            float ndotl = max(0.0f, dot(N, L));
+            if (ndotl > 0) {
+                float3 diffuse, specular;
+                EvaluateBSDF(N, V, L, primaryBaseColor, primaryMetallic, primaryRoughness, diffuse, specular);
+                
+                // Indirect Specular suppression
+                if (!g_Frame.enableIndirectSpecular) {
+                    specular = 0;
+                }
+
+                // Avoid Caustics: Suppress diffuse resolve if primary hit is highly specular (mirror-like)
+                if (primaryMetallic > 0.5f && g_Frame.enableAvoidCaustics) {
+                    diffuse = 0;
+                }
+
+                accumulatedColor += (diffuse + specular) * res.radiance * res.W * ndotl;
+            }
+        }
+    } else {
+        // Standard Path Tracing Resolve (No ReSTIR)
+        accumulatedColor += indirectRadianceAccum;
     }
 
     // Store reservoir for next frame

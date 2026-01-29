@@ -18,9 +18,10 @@ struct FrameConstants {
     int depthIndex;     // RT GBuffer depth indices
     int shadowMapIndex;
     float exposure;
-    uint enableTemporal;
-    uint enableSpatial;
-    uint padding;
+    uint enableRestir;
+    uint enableAvoidCaustics;
+    uint enableIndirectSpecular;
+    uint padding[1];
 };
 
 struct LightConstants {
@@ -63,7 +64,8 @@ struct DrawNodeData {
 struct Reservoir {
     float3 hitPos;     // Position of the indirect light hit
     float3 hitNormal;  // Normal at the hit point
-    float3 radiance;   // Radiance from the hit point
+    float3 radiance;   // Folded radiance from the hit point (includes albedo)
+    float targetPDF;   // Demodulated target PDF for selection
     float w_sum;       // Sum of weights
     float M;           // Number of samples
     float W;           // Normalization weight
@@ -73,28 +75,29 @@ struct Reservoir {
 
 // Weighted Reservoir Sampling helper
 // Returns true if the new sample was selected
-bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float weight, float rnd) {
+bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float targetPDF, float weight, float rnd) {
     r.w_sum += weight;
     r.M += 1.0f;
-    // luminance as weight, close to 1.0 for bright samples (very likely to be selected)
+    // weight is usually the targetPDF
     if (rnd < weight / r.w_sum) {
         r.hitPos = hitPos;
         r.hitNormal = hitNormal;
         r.radiance = radiance;
+        r.targetPDF = targetPDF;
         return true;
     }
     return false;
 }
 
-// Merge two reservoirs
-void mergeReservoirs(inout Reservoir r, Reservoir r2, float weight, float rnd) {
-    float M_before = r.M;
+// Merge two reservoirs with a shifted target PDF (Kajiya/RTXDI style)
+void mergeReservoirs(inout Reservoir r, Reservoir r2, float shiftedTargetPDF, float weight, float rnd) {
     r.w_sum += weight;
     r.M += r2.M;
     if (rnd < weight / r.w_sum) {
         r.hitPos = r2.hitPos;
         r.hitNormal = r2.hitNormal;
         r.radiance = r2.radiance;
+        r.targetPDF = shiftedTargetPDF;
     }
 }
 
