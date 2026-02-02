@@ -68,7 +68,7 @@ struct Reservoir {
     float targetPDF;   // Demodulated target PDF for selection
     float w_sum;       // Sum of weights
     float M;           // Number of samples
-    float W;           // Normalization weight
+    float W;           // Normalization weight (w_sum / (M * targetPDF))
     float3 primaryNormal; // For similarity checks
     float3 primaryPos;    // For similarity checks
 };

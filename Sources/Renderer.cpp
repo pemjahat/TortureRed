@@ -489,25 +489,35 @@ void Renderer::CreatePipelineState()
 
 void Renderer::CreateRayTracingPipeline()
 {
-    // Load Compute Shader
-    auto shaderCode = CompileShader("Shaders/PathTracer.hlsl", "CSMain", "cs_6_5");
-    if (shaderCode.empty())
+    // Load Path Tracer shader
+    auto pathTracerCode = CompileShader("Shaders/PathTracer.hlsl", "CSMain", "cs_6_5");
+    if (!pathTracerCode.empty())
     {
-        std::cerr << "Path Tracer shader compilation failed!" << std::endl;
-        return;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { pathTracerCode.data(), pathTracerCode.size() };
+        psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO)), "Failed to create Path Tracer Compute PSO");
     }
 
-    D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
-    psoDesc.pRootSignature = m_RootSignature.Get();
-    psoDesc.CS = { shaderCode.data(), shaderCode.size() };
-    psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    // Load ReSTIR GI shader
+    auto restirCode = CompileShader("Shaders/RestirGI.hlsl", "CSMain", "cs_6_5");
+    if (!restirCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { restirCode.data(), restirCode.size() };
+        psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
-    CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO)), "Failed to create Path Tracer Compute PSO");
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirGIPSO)), "Failed to create ReSTIR GI Compute PSO");
+    }
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)
 {
-    if (!m_PathTracerPSO || !model) return;
+    ID3D12PipelineState* pso = frame.enableRestir ? m_RestirGIPSO.Get() : m_PathTracerPSO.Get();
+    if (!pso || !model) return;
 
     // Update constant buffers
     memcpy(m_FrameCB.cpuPtr, &frame, sizeof(FrameConstants));
@@ -527,7 +537,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->ResourceBarrier(4, uavBarriers);
 
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
-    m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
+    m_CommandList->SetPipelineState(pso);
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
 
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);

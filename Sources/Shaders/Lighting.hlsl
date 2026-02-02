@@ -77,21 +77,11 @@ float4 PSMain(PSInput input) : SV_Target {
     float roughness = max(0.01f, material.r);
     float metallic = material.g;
 
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo.rgb, metallic);
-    float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
-
-    float D = DistributionGGX(N, H, roughness);
-    float G = GeometrySmith(N, V, L, roughness);
-
-    float3 numerator = D * G * F;
-    float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-    float3 specular = numerator / denominator;
-
-    float3 kS = F;
-    float3 kD = (1.0 - kS) * (1.0 - metallic);
+    float3 diffuse, specular;
+    EvaluateBSDF(N, V, L, albedo.rgb, metallic, roughness, diffuse, specular);
 
     float NdotL = max(dot(N, L), 0.0);
-    float3 directLighting = (kD * albedo.rgb / 3.14159265 + specular) * LightCB.color.rgb * LightCB.intensity * NdotL * shadow;
+    float3 directLighting = (diffuse + specular) * LightCB.color.rgb * LightCB.intensity * NdotL * shadow;
 
     float3 ambient = 0.03f * albedo.rgb;
     float3 finalColor = ambient + directLighting;

@@ -145,6 +145,7 @@ private:
     // Ray Tracing
     bool m_RayTracingSupported = false;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIPSO;
     std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;

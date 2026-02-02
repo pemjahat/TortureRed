@@ -51,4 +51,21 @@ float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
     return align_to_normal(H, N);
 }
 
+// Evaluate the PBR BSDF (Diffuse and Specular components)
+void EvaluateBSDF(float3 N, float3 V, float3 L, float3 baseColor, float metallic, float roughness, out float3 diffuseBRDF, out float3 specularBRDF) {
+    float3 H = normalize(V + L);
+    float dotNL = max(0.0001f, dot(N, L));
+    float dotNV = max(0.0001f, dot(N, V));
+    float dotVH = max(0.0001f, dot(V, H));
+
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
+    float3 F = FresnelSchlick(dotVH, F0);
+    float D = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+
+    specularBRDF = (D * G * F) / (4.0f * dotNV * dotNL + 0.0001f);
+    float3 kD = (1.0f - F) * (1.0f - metallic);
+    diffuseBRDF = kD * baseColor / 3.14159265f;
+}
+
 #endif // PBR_HLSL
