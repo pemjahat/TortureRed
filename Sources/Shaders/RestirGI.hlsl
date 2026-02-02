@@ -207,7 +207,34 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
                 if (prevRes.M > 0 && prevRes.targetPDF > 0) {
                     mergeReservoirs(res, prevRes, prevRes.targetPDF, prevRes.targetPDF * prevRes.W * prevRes.M, next_float(rng));
-                    if (res.M > 10.0f) { res.w_sum *= 10.0f / res.M; res.M = 10.0f; }
+                    if (res.M > 60.0f) { res.w_sum *= 60.0f / res.M; res.M = 60.0f; }
+                }
+            }
+        }
+
+        // Spatial
+        if (g_Frame.frameIndex > 1) {
+            for (int i = 0; i < 2; i++) {
+                float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
+                int2 neighborIndex = (int2)launchIndex + (int2)(offset * 15.0f);
+
+                if (neighborIndex.x >= 0 && neighborIndex.x < (int)launchDims.x && 
+                    neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
+                    uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
+                    Reservoir neighborRes = g_ReservoirCurrent[neighborPixelIdx];
+                    
+                    float dotNormal = dot(res.primaryNormal, neighborRes.primaryNormal);
+                    float distPos = distance(res.primaryPos, neighborRes.primaryPos);
+                    float neighborTargetPDF = neighborRes.targetPDF;
+
+                    if (neighborRes.M > 0 && neighborTargetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                        float jacobian = ComputeJacobian(res.primaryPos, neighborRes.primaryPos, neighborRes.hitPos, neighborRes.hitNormal);
+                        if (jacobian > 0.1f && jacobian < 10.0f) {
+                            float shiftedTargetPDF = neighborTargetPDF * jacobian;
+                            float weight = shiftedTargetPDF * neighborRes.W * neighborRes.M;
+                            mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
+                        }
+                    }
                 }
             }
         }
