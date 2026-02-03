@@ -1,5 +1,16 @@
 #include "CommonTracing.hlsl"
 
+// My notes on Restir
+// Temporal pass, intentionally pick brightest sample, and set probability proportional to targetPDF
+// Because "biasing" toward bright samples, radiance of winning sample is statically too high
+// To fix this, since probability of selecting sample Y is proportional to targetPDF(Y), we just need divide by probability.
+
+// 1/targetpdf is just normalizing probability of selecting that specific sample
+// However we need normalize how many other good sample available in the search space
+// if you find one bright light in dark room, w_sum will be small
+// if you find one bright light in room full of bright light, w_sum will be large
+// even you pick same bright sample, final contribution differs because "density" light in that area differs, w_sum/M capture this density information
+
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 RaytracingAccelerationStructure g_Scene : register(t2, space1);
@@ -10,7 +21,7 @@ StructuredBuffer<uint> g_GlobalIndices : register(t3, space1);
 ByteAddressBuffer g_Buffers[] : register(t0, space2);
 Texture2D g_Textures[] : register(t0, space0);
 
-RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);
+RWStructuredBuffer<Reservoir> g_ReservoirIntermediate : register(u2);
 RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
@@ -23,7 +34,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint2 launchIndex = dispatchThreadID.xy;
     uint2 launchDims;
-    g_Output.GetDimensions(launchDims.x, launchDims.y);
+    g_AccumulationBuffer.GetDimensions(launchDims.x, launchDims.y);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
@@ -41,13 +52,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     Reservoir res;
     res.hitPos = 0; res.hitNormal = 0; res.radiance = 0; res.targetPDF = 0;
     res.w_sum = 0; res.M = 0; res.W = 0; res.primaryPos = 0; res.primaryNormal = 0;
+    res.primaryAlbedo = 0; res.primaryRoughness = 0; res.primaryMetallic = 0; res.primaryDirect = 0;
 
-    float3 accumulatedColor = 0;
     float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
     
-    float3 primaryHitPos = 0, primaryHitNormal = 0, primaryV = 0, primaryBaseColor = 0;
-    float primaryMetallic = 0, primaryRoughness = 1.0f;
+    float3 primaryHitPos = 0, primaryHitNormal = 0, primaryV = 0;
     bool hasPrimaryHit = false;
 
     float3 indirectHitPos = 0, indirectHitNormal = 0;
@@ -56,6 +66,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 firstBounceThroughput = 1.0f;
     bool isPathDiffuse = false;
 
+    // --- Candidate Sampling (Path Tracing) ---
     for (int bounce = 0; bounce < 4; bounce++) {
         RayDesc ray;
         ray.Origin = rayPos; ray.Direction = rayDir;
@@ -99,13 +110,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
             if (bounce == 0) {
                 primaryHitPos = hitPos; primaryHitNormal = worldNormal; primaryV = V;
-                primaryBaseColor = baseColor.rgb; primaryMetallic = metallic; primaryRoughness = roughness;
+                res.primaryAlbedo = baseColor.rgb;
+                res.primaryRoughness = roughness;
+                res.primaryMetallic = metallic;
                 hasPrimaryHit = true;
             } else if (bounce == 1) {
                 indirectHitPos = hitPos; indirectHitNormal = worldNormal; hasIndirectHit = true;
             }
 
-            // NEE
+            // NEE for direct radiance estimation
             {
                 float3 L_light = -normalize(g_Light.direction.xyz);
                 float ndotl = max(0.0001f, dot(worldNormal, L_light));
@@ -123,23 +136,26 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                         EvaluateBSDF(worldNormal, V, L_light, baseColor.rgb, metallic, roughness, diffuse, specular);
                         if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) specular = 0;
                         float3 directLight = (diffuse + specular) * g_Light.color.rgb * g_Light.intensity * ndotl;
-                        if (bounce == 0) accumulatedColor += directLight;
+                        if (bounce == 0) res.primaryDirect += directLight;
                         else indirectRadianceAccum += directLight * throughput;
                     }
                 }
             }
 
-            // Scattering
+            // Path continuation
             float3 F_prob = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
             float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
             float rndCont = next_float(rng);
             float3 throughputFactor = 1.0f;
             float samplePDF = 1.0f;
 
+            // Compute MonteCarlo weight ~ brdf * cosTheta / pdf
+            // Split between PDF and Weight, because we need PDF for demodulated reservoir
             if (rndCont < probSpecular) {
                 if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) {
                     throughputFactor = 0;
                 } else {
+                    // specular is ImportanceGGX 
                     float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), worldNormal, roughness);
                     rayDir = reflect(-V, H);
                     float VdotH = max(dot(V, H), 0.0);
@@ -152,6 +168,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     samplePDF = (D * NdotH) / (4.0f * VdotH + 0.0001f) * probSpecular;
                 }
             } else {
+                // diffuse is cosine-weighted hemisphere
                 float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
                 rayDir = align_to_normal(nextDirLocal, worldNormal);
                 float3 H_diff = normalize(V + rayDir);
@@ -176,8 +193,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
         } else {
             float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
-            if (bounce == 0) accumulatedColor += skyRadiance;
-            else {
+            if (bounce == 0) {
+                res.primaryDirect = skyRadiance;
+            } else {
                 if (bounce == 1) {
                     indirectHitPos = ray.Origin + ray.Direction * 1000.0f;
                     indirectHitNormal = -ray.Direction;
@@ -189,82 +207,45 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
     }
 
+    // --- Temporal Merging ---
     if (hasPrimaryHit) {
         res.primaryPos = primaryHitPos; res.primaryNormal = primaryHitNormal;
         if (hasIndirectHit) {
             float3 incomingLight = indirectRadianceAccum / max(0.0001f, firstBounceThroughput);
+            // Target PDF is simply prioritize sample that physically bright -> Luminance
             float targetPDF = Luminance(incomingLight);
             float weight = targetPDF / max(0.00001f, firstBouncePDF);
+            // Formula: weight ~ target PDF / source PDF
             updateReservoir(res, indirectHitPos, indirectHitNormal, incomingLight, targetPDF, weight, next_float(rng));
         }
 
-        // Temporal
         if (g_Frame.frameIndex > 1) {
             float4 clipPos = mul(float4(primaryHitPos, 1.0f), g_Frame.viewProjPrevious);
             float2 prevUV = (clipPos.xy / clipPos.w) * 0.5f + 0.5f; prevUV.y = 1.0f - prevUV.y;
             if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
                 uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
                 Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
-                if (prevRes.M > 0 && prevRes.targetPDF > 0) {
+                
+                // Consistency check for temporal reprojection
+                float dotNormal = dot(res.primaryNormal, prevRes.primaryNormal);
+                float distPos = distance(res.primaryPos, prevRes.primaryPos);
+                
+                if (prevRes.M > 0 && prevRes.targetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                    // merged Weight ~ current desirability(targetPDF) * historic confidence (w_sum)
                     mergeReservoirs(res, prevRes, prevRes.targetPDF, prevRes.targetPDF * prevRes.W * prevRes.M, next_float(rng));
-                    if (res.M > 60.0f) { res.w_sum *= 60.0f / res.M; res.M = 60.0f; }
-                }
-            }
-        }
-
-        // Spatial
-        if (g_Frame.frameIndex > 1) {
-            for (int i = 0; i < 2; i++) {
-                float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
-                int2 neighborIndex = (int2)launchIndex + (int2)(offset * 15.0f);
-
-                if (neighborIndex.x >= 0 && neighborIndex.x < (int)launchDims.x && 
-                    neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
-                    uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
-                    Reservoir neighborRes = g_ReservoirCurrent[neighborPixelIdx];
                     
-                    float dotNormal = dot(res.primaryNormal, neighborRes.primaryNormal);
-                    float distPos = distance(res.primaryPos, neighborRes.primaryPos);
-                    float neighborTargetPDF = neighborRes.targetPDF;
-
-                    if (neighborRes.M > 0 && neighborTargetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
-                        float jacobian = ComputeJacobian(res.primaryPos, neighborRes.primaryPos, neighborRes.hitPos, neighborRes.hitNormal);
-                        if (jacobian > 0.1f && jacobian < 10.0f) {
-                            float shiftedTargetPDF = neighborTargetPDF * jacobian;
-                            float weight = shiftedTargetPDF * neighborRes.W * neighborRes.M;
-                            mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
-                        }
+                    // M-Clamping & Responsive Weighing
+                    if (res.M > 60.0f) { 
+                        res.w_sum *= (60.0f / res.M); 
+                        res.M = 60.0f; 
                     }
                 }
             }
         }
 
+        // Normalize Reservoir for Intermediate Storage
         if (res.targetPDF > 0) res.W = res.w_sum / max(1.f, res.M * res.targetPDF); else res.W = 0;
-
-        if (res.W > 0) {
-            float3 L_res = normalize(res.hitPos - primaryHitPos);
-            float ndotl_res = max(0.0f, dot(primaryHitNormal, L_res));
-            if (ndotl_res > 0) {
-                float3 diffuse, specular;
-                EvaluateBSDF(primaryHitNormal, primaryV, L_res, primaryBaseColor, primaryMetallic, primaryRoughness, diffuse, specular);
-                if (!g_Frame.enableIndirectSpecular || (g_Frame.enableAvoidCaustics && primaryMetallic < 0.5f)) specular = 0;
-                accumulatedColor += (diffuse + specular) * res.radiance * res.W * ndotl_res;
-            }
-        }
     }
 
-    g_ReservoirCurrent[launchIndex.y * launchDims.x + launchIndex.x] = res;
-
-    if (g_Frame.frameIndex <= 1) {
-        g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
-    } else {
-        float3 prevColor = g_AccumulationBuffer[launchIndex].rgb;
-        float n = (float)g_Frame.frameIndex;
-        float lerpFactor = (n - 1.0f) / min(n, 2000.0f);
-        accumulatedColor = lerp(accumulatedColor, prevColor, lerpFactor);
-        g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
-    }
-
-    float3 exposedColor = accumulatedColor * g_Frame.exposure;
-    g_Output[launchIndex] = float4(exposedColor / (exposedColor + 1.0f), 1.0f);
+    g_ReservoirIntermediate[launchIndex.y * launchDims.x + launchIndex.x] = res;
 }

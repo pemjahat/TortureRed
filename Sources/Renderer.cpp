@@ -171,6 +171,12 @@ bool Renderer::Initialize(HWND hwnd)
                 return false;
             }
         }
+
+        if (!CreateBuffer(m_ReservoirIntermediate, WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(Reservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+        {
+            std::cerr << "Failed to create ReSTIR intermediate reservoir buffer" << std::endl;
+            return false;
+        }
     }
 
     // Create command allocator
@@ -501,23 +507,38 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO)), "Failed to create Path Tracer Compute PSO");
     }
 
-    // Load ReSTIR GI shader
-    auto restirCode = CompileShader("Shaders/RestirGI.hlsl", "CSMain", "cs_6_5");
-    if (!restirCode.empty())
+    // Load ReSTIR Multi-pass shaders
+    auto restirTemporalCode = CompileShader("Shaders/RestirGI_Temporal.hlsl", "CSMain", "cs_6_5");
+    if (!restirTemporalCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
         psoDesc.pRootSignature = m_RootSignature.Get();
-        psoDesc.CS = { restirCode.data(), restirCode.size() };
-        psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+        psoDesc.CS = { restirTemporalCode.data(), restirTemporalCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirTemporalPSO)), "Failed to create ReSTIR Temporal PSO");
+    }
 
-        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirGIPSO)), "Failed to create ReSTIR GI Compute PSO");
+    auto restirSpatialCode = CompileShader("Shaders/RestirGI_Spatial.hlsl", "CSMain", "cs_6_5");
+    if (!restirSpatialCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { restirSpatialCode.data(), restirSpatialCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirSpatialPSO)), "Failed to create ReSTIR Spatial PSO");
+    }
+
+    auto restirResolveCode = CompileShader("Shaders/RestirGI_Resolve.hlsl", "CSMain", "cs_6_5");
+    if (!restirResolveCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { restirResolveCode.data(), restirResolveCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirResolvePSO)), "Failed to create ReSTIR Resolve PSO");
     }
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)
 {
-    ID3D12PipelineState* pso = frame.enableRestir ? m_RestirGIPSO.Get() : m_PathTracerPSO.Get();
-    if (!pso || !model) return;
+    if (!model) return;
 
     // Update constant buffers
     memcpy(m_FrameCB.cpuPtr, &frame, sizeof(FrameConstants));
@@ -528,16 +549,17 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    D3D12_RESOURCE_BARRIER uavBarriers[4];
+    D3D12_RESOURCE_BARRIER uavBarriers[5];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
     uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
     uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[0].resource.Get());
     uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[1].resource.Get());
-    m_CommandList->ResourceBarrier(4, uavBarriers);
+    uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+    m_CommandList->ResourceBarrier(5, uavBarriers);
 
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
-    m_CommandList->SetPipelineState(pso);
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
 
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
@@ -553,10 +575,39 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
-    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
-    m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
 
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    if (frame.enableRestir)
+    {
+        // Pass 1: Temporal
+        m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier1);
+
+        // Pass 2: Spatial
+        m_CommandList->SetPipelineState(m_RestirSpatialPSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier2);
+
+        // Pass 3: Resolve
+        m_CommandList->SetPipelineState(m_RestirResolvePSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
+    else
+    {
+        m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 

@@ -145,12 +145,15 @@ private:
     // Ray Tracing
     bool m_RayTracingSupported = false;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirTemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirSpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirResolvePSO;
     std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;
     GPUTexture m_AccumulationBuffer;
     GPUBuffer m_ReservoirBuffer[2]; // ReSTIR Reservoirs (Current and Previous)
+    GPUBuffer m_ReservoirIntermediate;
     int m_CurrentReservoirIndex = 0;
 
     // Descriptor Heaps

@@ -11,12 +11,16 @@ struct Reservoir
     DirectX::XMFLOAT3 hitPos;
     DirectX::XMFLOAT3 hitNormal;
     DirectX::XMFLOAT3 radiance;
-    float targetPDF;  // Added for RTXDI-style demodulated PDF tracking
+    float targetPDF;
     float w_sum;
     float M;
     float W;
     DirectX::XMFLOAT3 primaryNormal;
     DirectX::XMFLOAT3 primaryPos;
+    DirectX::XMFLOAT3 primaryAlbedo;
+    float primaryRoughness;
+    float primaryMetallic;
+    DirectX::XMFLOAT3 primaryDirect; // Direct lighting at primary hit
 };
 
 struct GPUResource

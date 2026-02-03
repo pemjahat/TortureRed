@@ -71,6 +71,10 @@ struct Reservoir {
     float W;           // Normalization weight (w_sum / (M * targetPDF))
     float3 primaryNormal; // For similarity checks
     float3 primaryPos;    // For similarity checks
+    float3 primaryAlbedo; 
+    float primaryRoughness;
+    float primaryMetallic;
+    float3 primaryDirect;
 };
 
 // Weighted Reservoir Sampling helper
