@@ -13,12 +13,6 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-RaytracingAccelerationStructure g_Scene : register(t2, space1);
-StructuredBuffer<DrawNodeData> g_DrawNodeBuffer : register(t1, space1);
-StructuredBuffer<MaterialConstants> g_Materials : register(t0, space1);
-StructuredBuffer<GLTFVertex> g_GlobalVertices : register(t4, space1);
-StructuredBuffer<uint> g_GlobalIndices : register(t3, space1);
-ByteAddressBuffer g_Buffers[] : register(t0, space2);
 Texture2D g_Textures[] : register(t0, space0);
 
 RWStructuredBuffer<Reservoir> g_ReservoirIntermediate : register(u2);
@@ -41,23 +35,18 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
-    float2 subpixel = float2(next_float(rng), next_float(rng));
-    float2 d = (((float2)launchIndex + subpixel) / (float2)launchDims) * 2.0f - 1.0f;
-    d.y = -d.y;
-
-    float4 targetRay = mul(float4(d, 1.0f, 1.0f), g_Frame.projectionInverse);
-    float3 rayDir = mul(float4(normalize(targetRay.xyz / targetRay.w), 0.0f), g_Frame.viewInverse).xyz;
-    float3 rayPos = g_Frame.cameraPosition.xyz;
+    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
+    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
 
     Reservoir res;
     res.hitPos = 0; res.hitNormal = 0; res.radiance = 0; res.targetPDF = 0;
-    res.w_sum = 0; res.M = 0; res.W = 0; res.primaryPos = 0; res.primaryNormal = 0;
-    res.primaryAlbedo = 0; res.primaryRoughness = 0; res.primaryMetallic = 0; res.primaryDirect = 0;
+    res.w_sum = 0; res.M = 0; res.W = 0;
 
     float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
     
-    float3 primaryHitPos = 0, primaryHitNormal = 0, primaryV = 0;
+    float3 primaryHitPos = 0, primaryHitNormal = 0, primaryV = 0, primaryAlbedo = 0;
+    float primaryRoughness = 0, primaryMetallic = 0;
     bool hasPrimaryHit = false;
 
     float3 indirectHitPos = 0, indirectHitNormal = 0;
@@ -66,157 +55,115 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 firstBounceThroughput = 1.0f;
     bool isPathDiffuse = false;
 
-    // --- Candidate Sampling (Path Tracing) ---
-    for (int bounce = 0; bounce < 4; bounce++) {
-        RayDesc ray;
-        ray.Origin = rayPos; ray.Direction = rayDir;
-        ray.TMin = 0.001f; ray.TMax = 10000.0f;
+    if (depth < 1.0f) {
+        primaryHitPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
+        primaryHitNormal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
+        primaryV = normalize(g_Frame.cameraPosition.xyz - primaryHitPos);
+        
+        hasPrimaryHit = true;
+        primaryAlbedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
+        float4 materialProps = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
+        primaryRoughness = max(0.01f, materialProps.r);
+        primaryMetallic = materialProps.g;
 
-        RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
-        q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-        q.Proceed();
+        // Generate first indirect bounce
+        float3 nextRayDir;
+        SampleIndirectRay(primaryHitNormal, primaryV, primaryAlbedo, primaryMetallic, primaryRoughness, rng, nextRayDir, firstBounceThroughput, firstBouncePDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            uint instanceIdx = q.CommittedInstanceID();
-            uint triIdx = q.CommittedPrimitiveIndex();
-            float2 barys = q.CommittedTriangleBarycentrics();
-            DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-            MaterialConstants mat = g_Materials[nodeData.materialID];
+        throughput *= firstBounceThroughput;
+        float3 rayPos = primaryHitPos + primaryHitNormal * 0.001f;
+        float3 rayDir = nextRayDir;
+        
+        // --- Path Tracing for Indirect Light ---
+        for (int bounce = 1; bounce < 4; bounce++) {
+            RayDesc ray;
+            ray.Origin = rayPos; ray.Direction = rayDir;
+            ray.TMin = 0.001f; ray.TMax = 10000.0f;
 
-            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+            RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+            q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+            q.Proceed();
 
-            float3 worldNormal = normalize(mul(v0.normal * (1.0f-barys.x-barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-            float2 uv = v0.texCoord * (1.0f-barys.x-barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
-            float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
+            if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+                uint instanceIdx = q.CommittedInstanceID();
+                uint triIdx = q.CommittedPrimitiveIndex();
+                float2 barys = q.CommittedTriangleBarycentrics();
+                DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
+                MaterialConstants mat = g_Materials[nodeData.materialID];
 
-            float4 baseColor = mat.baseColorFactor;
-            if (mat.baseColorTextureIndex >= 0) baseColor *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, uv, 0);
+                uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+                uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+                uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+                GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+                GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+                GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
 
-            float metallic = mat.metallicFactor;
-            float roughness = mat.roughnessFactor;
-            if (mat.metallicRoughnessTextureIndex >= 0) {
-                float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, uv, 0);
-                roughness *= mrSample.g; metallic *= mrSample.b;
-            }
-            roughness = (bounce > 0) ? max(0.15f, roughness) : max(0.01f, roughness);
+                float3 worldNormal = normalize(mul(v0.normal * (1.0f-barys.x-barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
+                float2 uv_hit = v0.texCoord * (1.0f-barys.x-barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
+                float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
 
-            float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
-            float3 V = -ray.Direction;
+                float4 albedo_hit = mat.baseColorFactor;
+                if (mat.baseColorTextureIndex >= 0) albedo_hit *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, uv_hit, 0);
 
-            if (bounce == 0) {
-                primaryHitPos = hitPos; primaryHitNormal = worldNormal; primaryV = V;
-                res.primaryAlbedo = baseColor.rgb;
-                res.primaryRoughness = roughness;
-                res.primaryMetallic = metallic;
-                hasPrimaryHit = true;
-            } else if (bounce == 1) {
-                indirectHitPos = hitPos; indirectHitNormal = worldNormal; hasIndirectHit = true;
-            }
-
-            // NEE for direct radiance estimation
-            {
-                float3 L_light = -normalize(g_Light.direction.xyz);
-                float ndotl = max(0.0001f, dot(worldNormal, L_light));
-                if (ndotl > 0) {
-                    RayDesc shadowRay;
-                    shadowRay.Origin = hitPos + worldNormal * 0.001f;
-                    shadowRay.Direction = L_light;
-                    shadowRay.TMin = 0.001f; shadowRay.TMax = 10000.0f;
-                    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-                    sq.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-                    sq.Proceed();
-
-                    if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        float3 diffuse, specular;
-                        EvaluateBSDF(worldNormal, V, L_light, baseColor.rgb, metallic, roughness, diffuse, specular);
-                        if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) specular = 0;
-                        float3 directLight = (diffuse + specular) * g_Light.color.rgb * g_Light.intensity * ndotl;
-                        if (bounce == 0) res.primaryDirect += directLight;
-                        else indirectRadianceAccum += directLight * throughput;
-                    }
+                float metallic_hit = mat.metallicFactor;
+                float roughness_hit = mat.roughnessFactor;
+                if (mat.metallicRoughnessTextureIndex >= 0) {
+                    float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, uv_hit, 0);
+                    roughness_hit *= mrSample.g; metallic_hit *= mrSample.b;
                 }
-            }
+                roughness_hit = max(0.15f, roughness_hit); // Indirect stability
 
-            // Path continuation
-            float3 F_prob = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
-            float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
-            float rndCont = next_float(rng);
-            float3 throughputFactor = 1.0f;
-            float samplePDF = 1.0f;
+                float3 V_hit = -ray.Direction;
 
-            // Compute MonteCarlo weight ~ brdf * cosTheta / pdf
-            // Split between PDF and Weight, because we need PDF for demodulated reservoir
-            if (rndCont < probSpecular) {
-                if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) {
-                    throughputFactor = 0;
-                } else {
-                    // specular is ImportanceGGX 
-                    float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), worldNormal, roughness);
-                    rayDir = reflect(-V, H);
-                    float VdotH = max(dot(V, H), 0.0);
-                    float NdotV = max(dot(worldNormal, V), 0.0001);
-                    float NdotH = max(dot(worldNormal, H), 0.0001);
-                    float G = GeometrySmith(worldNormal, V, rayDir, roughness);
-                    float D = DistributionGGX(worldNormal, H, roughness);
-                    float3 F_spec = FresnelSchlick(VdotH, F0);
-                    throughputFactor = (F_spec * G * VdotH) / (NdotV * NdotH * probSpecular);
-                    samplePDF = (D * NdotH) / (4.0f * VdotH + 0.0001f) * probSpecular;
+                if (bounce == 1) {
+                    indirectHitPos = hitPos; indirectHitNormal = worldNormal; hasIndirectHit = true;
+                }
+
+                // NEE
+                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, g_Light, g_Frame, isPathDiffuse) * throughput;
+
+                // Path continuation
+                float3 nextDir;
+                float3 nextThroughput;
+                float next_pdf;
+                SampleIndirectRay(worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+
+                throughput *= nextThroughput;
+                rayPos = hitPos + worldNormal * 0.001f;
+                rayDir = nextDir;
+                
+                // Russian Roulette
+                if (bounce > 2) {
+                    float p = max(throughput.r, max(throughput.g, throughput.b));
+                    if (next_float(rng) > p) break;
+                    throughput /= p;
                 }
             } else {
-                // diffuse is cosine-weighted hemisphere
-                float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
-                rayDir = align_to_normal(nextDirLocal, worldNormal);
-                float3 H_diff = normalize(V + rayDir);
-                float3 F_at_surface = FresnelSchlick(max(dot(V, H_diff), 0.0), F0);
-                float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
-                throughputFactor = (kD * baseColor.rgb) / (1.0 - probSpecular);
-                samplePDF = (max(dot(worldNormal, rayDir), 0.0f) / 3.14159265f) * (1.0 - probSpecular);
-                isPathDiffuse = true;
-            }
-
-            if (bounce == 0) {
-                firstBounceThroughput = throughputFactor;
-                firstBouncePDF = samplePDF;
-            }
-
-            throughput *= throughputFactor;
-            rayPos = hitPos + worldNormal * 0.001f;
-            if (bounce > 2) {
-                float p = max(throughput.r, max(throughput.g, throughput.b));
-                if (next_float(rng) > p) break;
-                throughput /= p;
-            }
-        } else {
-            float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
-            if (bounce == 0) {
-                res.primaryDirect = skyRadiance;
-            } else {
+                float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
                 if (bounce == 1) {
                     indirectHitPos = ray.Origin + ray.Direction * 1000.0f;
                     indirectHitNormal = -ray.Direction;
                     hasIndirectHit = true;
                 }
                 indirectRadianceAccum += skyRadiance * throughput;
+                break;
             }
-            break;
         }
     }
 
     // --- Temporal Merging ---
     if (hasPrimaryHit) {
-        res.primaryPos = primaryHitPos; res.primaryNormal = primaryHitNormal;
-        if (hasIndirectHit) {
-            float3 incomingLight = indirectRadianceAccum / max(0.0001f, firstBounceThroughput);
-            // Target PDF is simply prioritize sample that physically bright -> Luminance
-            float targetPDF = Luminance(incomingLight);
-            float weight = targetPDF / max(0.00001f, firstBouncePDF);
-            // Formula: weight ~ target PDF / source PDF
-            updateReservoir(res, indirectHitPos, indirectHitNormal, incomingLight, targetPDF, weight, next_float(rng));
+        if (hasPrimaryHit) {            
+            // We want res.radiance * res.W to be an unbiased estimator of L_in
+            // throughput = (BRDF * Cos) / PDF. 
+            // L_total = L_in * throughput
+            // Therefore, L_in = L_total / throughput            
+            float3 L_in_unbiased = indirectRadianceAccum / max(0.0001f, firstBounceThroughput);
+            
+            float targetPDF = Luminance(L_in_unbiased);
+            float weight = targetPDF / max(1e-6f, firstBouncePDF); 
+            
+            updateReservoir(res, indirectHitPos, indirectHitNormal, L_in_unbiased, targetPDF, weight, next_float(rng));
         }
 
         if (g_Frame.frameIndex > 1) {
@@ -226,25 +173,24 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
                 Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
                 
-                // Consistency check for temporal reprojection
-                float dotNormal = dot(res.primaryNormal, prevRes.primaryNormal);
-                float distPos = distance(res.primaryPos, prevRes.primaryPos);
-                
-                if (prevRes.M > 0 && prevRes.targetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
-                    // merged Weight ~ current desirability(targetPDF) * historic confidence (w_sum)
-                    mergeReservoirs(res, prevRes, prevRes.targetPDF, prevRes.targetPDF * prevRes.W * prevRes.M, next_float(rng));
+                if (prevRes.M > 0 && prevRes.targetPDF > 0) {
+                    // Merging with confidence-weighted RIS
+                    float weight = prevRes.W * prevRes.M * prevRes.targetPDF;
+                    mergeReservoirs(res, prevRes, prevRes.targetPDF, weight, next_float(rng));
                     
-                    // M-Clamping & Responsive Weighing
-                    if (res.M > 60.0f) { 
-                        res.w_sum *= (60.0f / res.M); 
-                        res.M = 60.0f; 
+                    if (res.M > 30.0f) { 
+                        res.w_sum *= (30.0f / res.M); 
+                        res.M = 30.0f; 
                     }
                 }
             }
         }
 
-        // Normalize Reservoir for Intermediate Storage
-        if (res.targetPDF > 0) res.W = res.w_sum / max(1.f, res.M * res.targetPDF); else res.W = 0;
+        // Final Normalization with Bias Fix (avoid using 1.0 as epsilon)
+        if (res.targetPDF > 0) 
+            res.W = res.w_sum / max(1e-6f, res.M * res.targetPDF); 
+        else 
+            res.W = 0;
     }
 
     g_ReservoirIntermediate[launchIndex.y * launchDims.x + launchIndex.x] = res;

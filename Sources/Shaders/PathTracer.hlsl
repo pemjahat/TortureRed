@@ -2,12 +2,6 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-RaytracingAccelerationStructure g_Scene : register(t2, space1);
-StructuredBuffer<DrawNodeData> g_DrawNodeBuffer : register(t1, space1);
-StructuredBuffer<MaterialConstants> g_Materials : register(t0, space1);
-StructuredBuffer<GLTFVertex> g_GlobalVertices : register(t4, space1);
-StructuredBuffer<uint> g_GlobalIndices : register(t3, space1);
-ByteAddressBuffer g_Buffers[] : register(t0, space2);
 Texture2D g_Textures[] : register(t0, space0);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
@@ -27,143 +21,109 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
-    // Camera ray generation with jitter for anti-aliasing
-    float2 subpixel = float2(next_float(rng), next_float(rng));
-    float2 d = (((float2)launchIndex + subpixel) / (float2)launchDims) * 2.0f - 1.0f;
-    d.y = -d.y;
-
-    float4 target = mul(float4(d, 1.0f, 1.0f), g_Frame.projectionInverse);
-    float3 rayDir = mul(float4(normalize(target.xyz / target.w), 0.0f), g_Frame.viewInverse).xyz;
-    float3 rayPos = g_Frame.cameraPosition.xyz;
+    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
+    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
 
     float3 accumulatedColor = 0;
-    float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
-    bool isPathDiffuse = false;
+    float3 throughput = 1;
 
-    for (int bounce = 0; bounce < 4; bounce++) {
-        RayDesc ray;
-        ray.Origin = rayPos;
-        ray.Direction = rayDir;
-        ray.TMin = 0.001f;
-        ray.TMax = 10000.0f;
+    if (depth >= 1.0f) {
+        accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+    } else {
+        float3 primaryHitPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
+        float3 primaryNormal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
+        float4 primaryAlbedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0);
+        float4 primaryMaterial = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
+        float primaryRoughness = max(0.01f, primaryMaterial.r);
+        float primaryMetallic = primaryMaterial.g;
 
-        RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
-        q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-        q.Proceed();
+        float3 V = normalize(g_Frame.cameraPosition.xyz - primaryHitPos);
+        bool isPathDiffuse = false;
 
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            uint instanceIdx = q.CommittedInstanceID();
-            uint triIdx = q.CommittedPrimitiveIndex();
-            float2 barys = q.CommittedTriangleBarycentrics();
-            
-            DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-            MaterialConstants mat = g_Materials[nodeData.materialID];
+        // --- Step 1: Direct Lighting for Primary Hit (Raster Surface) ---
+        accumulatedColor = GetDirectLighting(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, g_Scene, g_Light, g_Frame);
 
-            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+        // --- Step 2: Sample First Indirect Ray from Primary Hit ---
+        float3 rayDir;
+        float3 firstThroughput;
+        float firstPDF;
+        SampleIndirectRay(primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, rng, rayDir, firstThroughput, firstPDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
-            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+        throughput *= firstThroughput;
+        float3 rayPos = primaryHitPos + primaryNormal * 0.001f;
 
-            float3 worldNormal = normalize(mul(v0.normal * (1.0f - barys.x - barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-            float2 uv = v0.texCoord * (1.0f - barys.x - barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
-            float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
+        // --- Step 3: Indirect Bounces ---
+        for (int bounce = 1; bounce < 4; bounce++) {
+            if (all(throughput <= 0.0f)) break;
 
-            float4 baseColor = mat.baseColorFactor;
-            if (mat.baseColorTextureIndex >= 0) {
-                baseColor *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, uv, 0);
-            }
+            RayDesc ray;
+            ray.Origin = rayPos;
+            ray.Direction = rayDir;
+            ray.TMin = 0.001f;
+            ray.TMax = 10000.0f;
 
-            float metallic = mat.metallicFactor;
-            float roughness = mat.roughnessFactor;
+            RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+            q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+            q.Proceed();
 
-            if (mat.metallicRoughnessTextureIndex >= 0) {
-                float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, uv, 0);
-                roughness *= mrSample.g;
-                metallic *= mrSample.b;
-            }
-            
-            roughness = (bounce > 0) ? max(0.15f, roughness) : max(0.01f, roughness);
+            if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+                uint instanceIdx = q.CommittedInstanceID();
+                uint triIdx = q.CommittedPrimitiveIndex();
+                float2 barys = q.CommittedTriangleBarycentrics();
+                
+                DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
+                MaterialConstants mat = g_Materials[nodeData.materialID];
 
-            float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
-            float3 V = -ray.Direction;
+                uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+                uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+                uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
 
-            // NEE for Directional Light
-            {
-                float3 L = -normalize(g_Light.direction.xyz);
-                float ndotl = max(0.0001f, dot(worldNormal, L));
+                GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+                GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+                GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
 
-                if (ndotl > 0) {
-                    RayDesc shadowRay;
-                    shadowRay.Origin = hitPos + worldNormal * 0.001f;
-                    shadowRay.Direction = L;
-                    shadowRay.TMin = 0.001f;
-                    shadowRay.TMax = 10000.0f;
+                float3 worldNormal = normalize(mul(v0.normal * (1.0f - barys.x - barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
+                float2 hitUv = v0.texCoord * (1.0f - barys.x - barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
+                float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
 
-                    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-                    sq.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-                    sq.Proceed();
+                float4 albedo_hit = mat.baseColorFactor;
+                if (mat.baseColorTextureIndex >= 0) albedo_hit *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
 
-                    if (sq.CommittedStatus() == COMMITTED_NOTHING) {
-                        float3 diffuse, specular;
-                        EvaluateBSDF(worldNormal, V, L, baseColor.rgb, metallic, roughness, diffuse, specular);
-                        
-                        if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) {
-                            specular = 0;
-                        }
-
-                        float3 directLight = (diffuse + specular) * g_Light.color.rgb * g_Light.intensity * ndotl;
-                        if (bounce == 0) accumulatedColor += directLight;
-                        else indirectRadianceAccum += directLight * throughput;
-                    }
+                float metallic_hit = mat.metallicFactor;
+                float roughness_hit = mat.roughnessFactor;
+                if (mat.metallicRoughnessTextureIndex >= 0) {
+                    float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+                    roughness_hit *= mrSample.g; metallic_hit *= mrSample.b;
                 }
-            }
+                
+                roughness_hit = max(0.15f, roughness_hit);
+                float3 V_hit = -ray.Direction;
 
-            // Path continuation
-            float3 F_prob = FresnelSchlick(max(dot(worldNormal, V), 0.0), F0);
-            float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
-            float rnd = next_float(rng);
-            float3 throughputFactor = 1.0f;
+                // NEE
+                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, g_Light, g_Frame, isPathDiffuse) * throughput;
 
-            if (rnd < probSpecular) {
-                if ((bounce > 0 && !g_Frame.enableIndirectSpecular) || (isPathDiffuse && g_Frame.enableAvoidCaustics)) {
-                    throughputFactor = 0;
-                } else {
-                    float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), worldNormal, roughness);
-                    rayDir = reflect(-V, H);
-                    float VdotH = max(dot(V, H), 0.0);
-                    float NdotV = max(dot(worldNormal, V), 0.0001);
-                    float NdotH = max(dot(worldNormal, H), 0.0001);
-                    float G = GeometrySmith(worldNormal, V, rayDir, roughness);
-                    float3 F_spec = FresnelSchlick(VdotH, F0);
-                    throughputFactor = (F_spec * G * VdotH) / (NdotV * NdotH * probSpecular);
+                // Sample next bounce
+                float3 nextDir;
+                float3 nextThroughput;
+                float next_pdf;
+                SampleIndirectRay(worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+
+                throughput *= nextThroughput;
+                rayPos = hitPos + worldNormal * 0.001f;
+                rayDir = nextDir;
+
+                // Russian Roulette
+                if (bounce > 2) {
+                    float p = max(throughput.r, max(throughput.g, throughput.b));
+                    if (next_float(rng) > p) break;
+                    throughput /= p;
                 }
             } else {
-                float3 nextDirLocal = sample_cosine_weighted(float2(next_float(rng), next_float(rng)));
-                rayDir = align_to_normal(nextDirLocal, worldNormal);
-                float3 H = normalize(V + rayDir);
-                float3 F_at_surface = FresnelSchlick(max(dot(V, H), 0.0), F0);
-                float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
-                throughputFactor = (kD * baseColor.rgb) / (1.0 - probSpecular);
-                isPathDiffuse = true;
+                float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+                indirectRadianceAccum += skyRadiance * throughput;
+                break;
             }
-
-            throughput *= throughputFactor;
-            rayPos = hitPos + worldNormal * 0.001f;
-
-            if (bounce > 2) {
-                float p = max(throughput.r, max(throughput.g, throughput.b));
-                if (next_float(rng) > p) break;
-                throughput /= p;
-            }
-        } else {
-            float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
-            if (bounce == 0) accumulatedColor += skyRadiance;
-            else indirectRadianceAccum += skyRadiance * throughput;
-            break;
         }
     }
 

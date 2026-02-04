@@ -24,6 +24,14 @@ struct FrameConstants {
     uint padding[1];
 };
 
+float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {
+    float4 ndc = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);
+    float4 viewPos = mul(ndc, projectionInverse);
+    viewPos /= viewPos.w;
+    float4 worldPos = mul(viewPos, viewInverse);
+    return worldPos.xyz;
+}
+
 struct LightConstants {
     row_major float4x4 viewProj;
     float4 position;
@@ -69,12 +77,6 @@ struct Reservoir {
     float w_sum;       // Sum of weights
     float M;           // Number of samples
     float W;           // Normalization weight (w_sum / (M * targetPDF))
-    float3 primaryNormal; // For similarity checks
-    float3 primaryPos;    // For similarity checks
-    float3 primaryAlbedo; 
-    float primaryRoughness;
-    float primaryMetallic;
-    float3 primaryDirect;
 };
 
 // Weighted Reservoir Sampling helper

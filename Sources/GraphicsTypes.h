@@ -15,12 +15,6 @@ struct Reservoir
     float w_sum;
     float M;
     float W;
-    DirectX::XMFLOAT3 primaryNormal;
-    DirectX::XMFLOAT3 primaryPos;
-    DirectX::XMFLOAT3 primaryAlbedo;
-    float primaryRoughness;
-    float primaryMetallic;
-    DirectX::XMFLOAT3 primaryDirect; // Direct lighting at primary hit
 };
 
 struct GPUResource
