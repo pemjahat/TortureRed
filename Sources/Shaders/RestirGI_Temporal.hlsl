@@ -153,14 +153,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- Temporal Merging ---
     if (hasPrimaryHit) {
-        if (hasPrimaryHit) {            
+        if (hasIndirectHit) {            
             // We want res.radiance * res.W to be an unbiased estimator of L_in
             // throughput = (BRDF * Cos) / PDF. 
             // L_total = L_in * throughput
             // Therefore, L_in = L_total / throughput            
             float3 L_in_unbiased = indirectRadianceAccum / max(0.0001f, firstBounceThroughput);
             
-            float targetPDF = Luminance(L_in_unbiased);
+            float targetPDF = Luminance(indirectRadianceAccum * firstBouncePDF);
             float weight = targetPDF / max(1e-6f, firstBouncePDF); 
             
             updateReservoir(res, indirectHitPos, indirectHitNormal, L_in_unbiased, targetPDF, weight, next_float(rng));
@@ -174,8 +174,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
                 
                 if (prevRes.M > 0 && prevRes.targetPDF > 0) {
+                    // Reweight for current pixel targetPDF
+                    float targetPDF = Luminance(indirectRadianceAccum * firstBouncePDF);
+                    float reweightFactor = targetPDF / max(1e-6f, prevRes.targetPDF);
+
                     // Merging with confidence-weighted RIS
-                    float weight = prevRes.W * prevRes.M * prevRes.targetPDF;
+                    float weight = prevRes.W * prevRes.M * prevRes.targetPDF * reweightFactor;
                     mergeReservoirs(res, prevRes, prevRes.targetPDF, weight, next_float(rng));
                     
                     if (res.M > 30.0f) { 

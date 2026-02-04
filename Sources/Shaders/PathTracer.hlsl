@@ -135,7 +135,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     } else {
         float3 prevColor = g_AccumulationBuffer[launchIndex].rgb;
         float n = (float)g_Frame.frameIndex;
-        float lerpFactor = (n - 1.0f) / min(n, 2000.0f);
+        float lerpFactor = min( (n - 1.0f) / min(n, 2000.0f), 1.0f );  // Clamp to <= 1
         accumulatedColor = lerp(accumulatedColor, prevColor, lerpFactor);
         g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
     }
