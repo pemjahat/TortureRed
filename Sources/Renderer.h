@@ -148,12 +148,23 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirResolvePSO;
+    
+    // RTXDI SDK Pipeline States
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirTemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirSpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirResolvePSO;
+
     std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;
     GPUTexture m_AccumulationBuffer;
     GPUBuffer m_ReservoirBuffer[2]; // ReSTIR Reservoirs (Current and Previous)
     GPUBuffer m_ReservoirIntermediate;
+    
+    // RTXDI Reservoir Buffer (RTXDI_PackedGIReservoir)
+    GPUBuffer m_RtxdiReservoirBuffer[2];
+    GPUBuffer m_RtxdiNeighborOffsetsBuffer;
+    
     int m_CurrentReservoirIndex = 0;
 
     // Descriptor Heaps

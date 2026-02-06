@@ -518,6 +518,13 @@ void Application::RenderImGui()
                 m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
                 m_FrameConstants.frameIndex = 0;
             }
+
+            bool useRTXDI = (m_FrameConstants.useRTXDI != 0);
+            if (ImGui::Checkbox("Use NVIDIA RTXDI", &useRTXDI))
+            {
+                m_FrameConstants.useRTXDI = useRTXDI ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
             ImGui::Unindent();
         }
     }

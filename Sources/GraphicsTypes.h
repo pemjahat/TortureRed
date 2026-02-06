@@ -78,7 +78,7 @@ struct FrameConstants
     uint32_t enableRestir;
     uint32_t enableAvoidCaustics;
     uint32_t enableIndirectSpecular;
-    uint32_t padding[1];
+    uint32_t useRTXDI;
 };
 
 struct LightConstants

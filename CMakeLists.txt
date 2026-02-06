@@ -84,6 +84,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(directxtex)
 
+# Download RTXDI-Library
+FetchContent_Declare(
+    rtxdi
+    GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXDI-Library.git
+    GIT_TAG main
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/rtxdi-library
+)
+FetchContent_MakeAvailable(rtxdi)
+
 # Create ImGui library
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -113,6 +122,7 @@ include_directories(${imgui_SOURCE_DIR})
 include_directories(${imgui_SOURCE_DIR}/backends)
 include_directories(${cgltf_SOURCE_DIR})
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
+include_directories(${rtxdi_SOURCE_DIR}/Include)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -129,6 +139,9 @@ file(GLOB_RECURSE SHADER_SOURCES
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+# Set RTXDI include path for shaders
+target_compile_definitions(${PROJECT_NAME} PRIVATE RTXDI_INCLUDE_DIR="${rtxdi_SOURCE_DIR}/Include")
+
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
     SDL2::SDL2
@@ -139,6 +152,7 @@ target_link_libraries(${PROJECT_NAME}
     dxcompiler.lib
     ImGui
     DirectXTex
+    Rtxdi
 )
 
 # Copy shader source files to output directory
@@ -206,7 +220,7 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf (automatically downloaded)")
+message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf, DirectXTex, RTXDI-Library (automatically downloaded)")
 message(STATUS "Windowing: SDL2")
 message(STATUS "Rendering: DirectX 12")
 message(STATUS "Debugging: ImGui")

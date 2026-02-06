@@ -5,6 +5,8 @@
 #include <fstream>
 #include <dxcapi.h>
 #include <cassert>
+#include "Rtxdi/GI/ReSTIRGIParameters.h"
+#include "Rtxdi/RtxdiUtils.h"
 
 Renderer::Renderer()
     : m_FrameIndex(0)
@@ -177,6 +179,46 @@ bool Renderer::Initialize(HWND hwnd)
             std::cerr << "Failed to create ReSTIR intermediate reservoir buffer" << std::endl;
             return false;
         }
+
+        // Create RTXDI Reservoirs
+        // See RtxdiUtils.cpp: CalculateReservoirBufferParameters
+        uint32_t renderWidthBlocks = (WINDOW_WIDTH + 15) / 16;
+        uint32_t renderHeightBlocks = (WINDOW_HEIGHT + 15) / 16;
+        uint32_t reservoirArrayPitch = renderWidthBlocks * 256 * renderHeightBlocks;
+
+        for (int i = 0; i < 2; ++i)
+        {
+            if (!CreateBuffer(m_RtxdiReservoirBuffer[i], reservoirArrayPitch * sizeof(RTXDI_PackedGIReservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+            {
+                std::cerr << "Failed to create RTXDI reservoir buffer " << i << std::endl;
+                return false;
+            }
+        }
+
+        // Create Neighbor Offsets Buffer
+        const uint32_t neighborOffsetCount = 8192;
+        if (!CreateBuffer(m_RtxdiNeighborOffsetsBuffer, neighborOffsetCount * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false))
+        {
+            std::cerr << "Failed to create RTXDI neighbor offset buffer" << std::endl;
+            return false;
+        }
+        
+        std::vector<uint8_t> offsets(neighborOffsetCount * 2);
+        rtxdi::FillNeighborOffsetBuffer(offsets.data(), neighborOffsetCount);
+        memcpy(m_RtxdiNeighborOffsetsBuffer.cpuPtr, offsets.data(), offsets.size());
+
+        // Create Typed SRV for Neighbor Offsets
+        m_RtxdiNeighborOffsetsBuffer.srvIndex = AllocateDescriptor();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_R8G8_SNORM;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Buffer.FirstElement = 0;
+        srvDesc.Buffer.NumElements = neighborOffsetCount;
+        srvDesc.Buffer.StructureByteStride = 0;
+        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        m_Device->CreateShaderResourceView(m_RtxdiNeighborOffsetsBuffer.resource.Get(), &srvDesc, GetCPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
     }
 
     // Create command allocator
@@ -346,7 +388,10 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE uavRange3;
     uavRange3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 3, 0); // u3 space0: Reservoir Previous
 
-    CD3DX12_ROOT_PARAMETER rootParameters[12];
+    CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
+    srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
+
+    CD3DX12_ROOT_PARAMETER rootParameters[13];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsConstantBufferView(1); // b1: Light constants
     rootParameters[2].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
@@ -359,6 +404,7 @@ void Renderer::CreateRootSignature()
     rootParameters[9].InitAsDescriptorTable(1, &uavRange1); // u1
     rootParameters[10].InitAsDescriptorTable(1, &uavRange2); // u2
     rootParameters[11].InitAsDescriptorTable(1, &uavRange3); // u3
+    rootParameters[12].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -534,6 +580,34 @@ void Renderer::CreateRayTracingPipeline()
         psoDesc.CS = { restirResolveCode.data(), restirResolveCode.size() };
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirResolvePSO)), "Failed to create ReSTIR Resolve PSO");
     }
+
+    // RTXDI PSOs
+    auto rtxdiTemporalCode = CompileShader("Shaders/RestirGI_RTXDI_Temporal.hlsl", "CSMain", "cs_6_5");
+    if (!rtxdiTemporalCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { rtxdiTemporalCode.data(), rtxdiTemporalCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirTemporalPSO)), "Failed to create RTXDI Temporal PSO");
+    }
+
+    auto rtxdiSpatialCode = CompileShader("Shaders/RestirGI_RTXDI_Spatial.hlsl", "CSMain", "cs_6_5");
+    if (!rtxdiSpatialCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { rtxdiSpatialCode.data(), rtxdiSpatialCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirSpatialPSO)), "Failed to create RTXDI Spatial PSO");
+    }
+
+    auto rtxdiResolveCode = CompileShader("Shaders/RestirGI_RTXDI_Resolve.hlsl", "CSMain", "cs_6_5");
+    if (!rtxdiResolveCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { rtxdiResolveCode.data(), rtxdiResolveCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirResolvePSO)), "Failed to create RTXDI Resolve PSO");
+    }
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)
@@ -550,14 +624,18 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     TransitionResource(m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    D3D12_RESOURCE_BARRIER uavBarriers[5];
+    D3D12_RESOURCE_BARRIER uavBarriers[7];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
     uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
     uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[0].resource.Get());
     uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[1].resource.Get());
     uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
-    m_CommandList->ResourceBarrier(5, uavBarriers);
+    uavBarriers[5] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[0].resource.Get());
+    uavBarriers[6] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
+    m_CommandList->ResourceBarrier(7, uavBarriers);
 
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
@@ -576,8 +654,38 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
 
-    if (frame.enableRestir)
+    if (frame.useRTXDI)
     {
+        // NVIDIA RTXDI Path
+        // Bind common RTXDI resources
+        m_CommandList->SetComputeRootDescriptorTable(12, GetGPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
+
+        // Pass 1: Temporal Resampling
+        m_CommandList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier1);
+
+        // Pass 2: Spatial Resampling
+        m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier2);
+
+        // Pass 3: Resolve
+        m_CommandList->SetPipelineState(m_RtxdiRestirResolvePSO.Get());
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
+    else if (frame.enableRestir)
+    {
+        // Torture ReSTIR (Manual Implementation)
         // Pass 1: Temporal
         m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
         m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
@@ -603,9 +711,8 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     }
     else
     {
+        // Old Path Trace
         m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
 
@@ -1063,6 +1170,13 @@ std::vector<char> Renderer::CompileShader(const std::string& filename, const std
     arguments.push_back(L"2021");
     arguments.push_back(L"-I");
     arguments.push_back(L"Shaders");
+
+#ifdef RTXDI_INCLUDE_DIR
+    std::string rtxdiInclude = RTXDI_INCLUDE_DIR;
+    std::wstring rtxdiIncludeW(rtxdiInclude.begin(), rtxdiInclude.end());
+    arguments.push_back(L"-I");
+    arguments.push_back(rtxdiIncludeW.c_str());
+#endif
 
     DxcBuffer sourceBuffer;
     sourceBuffer.Ptr = sourceBlob->GetBufferPointer();
