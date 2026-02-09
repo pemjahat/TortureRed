@@ -52,7 +52,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RTXDI_GISpatialResamplingParameters sparams;
     sparams.numSamples = 4;
     sparams.samplingRadius = 20.0f;
-    sparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
+    //sparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
+    sparams.biasCorrectionMode = 1;
 
     RTXDI_GIReservoir result = RTXDI_GISpatialResampling(
         launchIndex, surface, inputReservoir, rng, params, reservoirParams, sparams);

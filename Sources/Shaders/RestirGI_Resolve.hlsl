@@ -44,7 +44,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         accumulatedColor += GetDirectLighting(worldPos, N, V, albedo, metallic, roughness, g_Scene, g_Light, g_Frame);
 
         // --- Indirect Lighting from Reservoir ---
-        if (res.W > 0 && res.targetPDF > 0) {
+        if (res.W > 0) {
             float3 L_res = normalize(res.hitPos - worldPos);
             float NdotL_res = max(0.0f, dot(N, L_res));
             
@@ -56,8 +56,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 evalContrib = (diffuse + specular) * NdotL_res;
                 
                 // Final Unbiased ReSTIR GI Resolve:
-                // res.radiance is demodulated incoming radiance (L_in / PDF).
-                // We re-modulate by the current BRDF and weight by normalization W.
+                // res.radiance is incident radiance (L_in).
+                // We multiply by the current BRDF and weight by normalization W.
                 float3 indirectRadiance = evalContrib * res.radiance * res.W;
                 
                 // Clamp to prevent fireflies from extreme weights

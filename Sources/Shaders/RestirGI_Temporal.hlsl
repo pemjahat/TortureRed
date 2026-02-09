@@ -45,8 +45,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
     
-    float3 primaryHitPos = 0, primaryHitNormal = 0, primaryV = 0, primaryAlbedo = 0;
-    float primaryRoughness = 0, primaryMetallic = 0;
+    Surface surface;
     bool hasPrimaryHit = false;
 
     float3 indirectHitPos = 0, indirectHitNormal = 0;
@@ -56,22 +55,23 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     bool isPathDiffuse = false;
 
     if (depth < 1.0f) {
-        primaryHitPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-        primaryHitNormal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        primaryV = normalize(g_Frame.cameraPosition.xyz - primaryHitPos);
+        surface.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
+        surface.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
+        surface.viewDir = normalize(g_Frame.cameraPosition.xyz - surface.worldPos);
         
         hasPrimaryHit = true;
-        primaryAlbedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
+        surface.albedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
         float4 materialProps = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
-        primaryRoughness = max(0.01f, materialProps.r);
-        primaryMetallic = materialProps.g;
+        surface.roughness = max(0.01f, materialProps.r);
+        surface.metallic = materialProps.g;
 
         // Generate first indirect bounce
         float3 nextRayDir;
-        SampleIndirectRay(primaryHitNormal, primaryV, primaryAlbedo, primaryMetallic, primaryRoughness, rng, nextRayDir, firstBounceThroughput, firstBouncePDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+        SampleIndirectRay(surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, rng, nextRayDir, firstBounceThroughput, firstBouncePDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
-        throughput *= firstBounceThroughput;
-        float3 rayPos = primaryHitPos + primaryHitNormal * 0.001f;
+        // Reset throughput to 1.0 for incident radiance accumulation
+        throughput = 1.0f;
+        float3 rayPos = surface.worldPos + surface.normal * 0.001f;
         float3 rayDir = nextRayDir;
         
         // --- Path Tracing for Indirect Light ---
@@ -154,33 +154,32 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // --- Temporal Merging ---
     if (hasPrimaryHit) {
         if (hasIndirectHit) {            
-            // We want res.radiance * res.W to be an unbiased estimator of L_in
-            // throughput = (BRDF * Cos) / PDF. 
-            // L_total = L_in * throughput
-            // Therefore, L_in = L_total / throughput            
-            float3 L_in_unbiased = indirectRadianceAccum / max(0.0001f, firstBounceThroughput);
+            // Radiance is now incident radiance by design, no division needed
+            float3 L_in = indirectRadianceAccum;
             
-            float targetPDF = Luminance(indirectRadianceAccum * firstBouncePDF);
+            // Use GetTargetPDF to determine weight for initial sample
+            float targetPDF = GetTargetPDF(surface, indirectHitPos, L_in);
             float weight = targetPDF / max(1e-6f, firstBouncePDF); 
             
-            updateReservoir(res, indirectHitPos, indirectHitNormal, L_in_unbiased, targetPDF, weight, next_float(rng));
+            updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, targetPDF, weight, next_float(rng));
         }
 
         if (g_Frame.frameIndex > 1) {
-            float4 clipPos = mul(float4(primaryHitPos, 1.0f), g_Frame.viewProjPrevious);
+            float4 clipPos = mul(float4(surface.worldPos, 1.0f), g_Frame.viewProjPrevious);
             float2 prevUV = (clipPos.xy / clipPos.w) * 0.5f + 0.5f; prevUV.y = 1.0f - prevUV.y;
             if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
                 uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
                 Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
                 
-                if (prevRes.M > 0 && prevRes.targetPDF > 0) {
-                    // Reweight for current pixel targetPDF
-                    float targetPDF = Luminance(indirectRadianceAccum * firstBouncePDF);
-                    float reweightFactor = targetPDF / max(1e-6f, prevRes.targetPDF);
+                if (prevRes.M > 0) {
+                    // Re-calculate target PDF of previous sample relative to CURRENT surface
+                    float currentTargetPDF = GetTargetPDF(surface, prevRes.hitPos, prevRes.radiance);
 
-                    // Merging with confidence-weighted RIS
-                    float weight = prevRes.W * prevRes.M * prevRes.targetPDF * reweightFactor;
-                    mergeReservoirs(res, prevRes, prevRes.targetPDF, weight, next_float(rng));
+                    if (currentTargetPDF > 0) {
+                        // Merging with confidence-weighted RIS
+                        float weight = prevRes.W * prevRes.M * currentTargetPDF;
+                        mergeReservoirs(res, prevRes, currentTargetPDF, weight, next_float(rng));
+                    }
                     
                     if (res.M > 30.0f) { 
                         res.w_sum *= (30.0f / res.M); 
@@ -190,11 +189,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
         }
 
-        // Final Normalization with Bias Fix (avoid using 1.0 as epsilon)
-        if (res.targetPDF > 0) 
-            res.W = res.w_sum / max(1e-6f, res.M * res.targetPDF); 
-        else 
+        // Final Normalization: Re-evaluate target PDF for the winning sample
+        float finalTargetPDF = GetTargetPDF(surface, res.hitPos, res.radiance);
+        if (finalTargetPDF > 0) {
+            res.W = res.w_sum / max(1e-6f, res.M * finalTargetPDF); 
+            res.W = min(res.W, 10.0f); // Weight Clamping to 10.0
+        } else {
             res.W = 0;
+        }
     }
 
     g_ReservoirIntermediate[launchIndex.y * launchDims.x + launchIndex.x] = res;

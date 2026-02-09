@@ -16,6 +16,26 @@ float Luminance(float3 c) {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+struct Surface {
+    float3 worldPos;
+    float3 normal;
+    float3 viewDir;
+    float3 albedo;
+    float metallic;
+    float roughness;
+};
+
+float GetTargetPDF(Surface s, float3 samplePos, float3 sampleRadiance) {
+    float3 L = normalize(samplePos - s.worldPos);
+    float dotNL = max(0.0f, dot(s.normal, L));
+    if (dotNL <= 0) return 0;
+    
+    float3 d, spec;
+    EvaluateBSDF(s.normal, s.viewDir, L, s.albedo, s.metallic, s.roughness, d, spec);
+    float3 reflected = (d + spec) * sampleRadiance * dotNL;
+    return max(0.0f, Luminance(reflected));
+}
+
 // Compute the Jacobian for a GI shift (point-to-point solid angle ratio)
 float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampleHitPos, float3 sampleHitNormal) {
     float3 diffP = sampleHitPos - primaryPos;
@@ -27,7 +47,8 @@ float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampl
     float cosQ = max(0.0001f, abs(dot(sampleHitNormal, diffQ / sqrt(distSqQ))));
     
     // Solid angle at P / Solid angle at Q
-    return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));
+    //return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));
+    return (distSqQ) / (max(0.00001f, distSqP));
 }
 
 // Random number generator (PCG)
@@ -118,6 +139,24 @@ float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float meta
         }
     }
     return 0;
+}
+
+bool CheckVisibility(float3 P, float3 N, float3 samplePos) {
+    float3 L = samplePos - P;
+    float dist = length(L);
+    L /= dist;
+
+    RayDesc ray;
+    ray.Origin = P + N * 0.001f;
+    ray.Direction = L;
+    ray.TMin = 0.001f;
+    ray.TMax = dist - 0.002f;
+
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> q;
+    q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+    q.Proceed();
+
+    return q.CommittedStatus() == COMMITTED_NOTHING;
 }
 
 #endif // COMMON_TRACING_HLSL

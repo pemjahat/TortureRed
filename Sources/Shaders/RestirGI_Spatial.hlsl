@@ -26,10 +26,19 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
     float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
-    float3 primaryPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-    float3 primaryNormal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
+    
+    Surface centerSurface;
+    if (depth < 1.0f) {
+        centerSurface.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
+        centerSurface.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
+        centerSurface.viewDir = normalize(g_Frame.cameraPosition.xyz - centerSurface.worldPos);
+        centerSurface.albedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
+        float4 materialProps = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
+        centerSurface.roughness = max(0.01f, materialProps.r);
+        centerSurface.metallic = materialProps.g;
+    }
 
-    if (res.M > 0 && depth < 1.0f) {
+    if (res.M > 0 && depth < 1.0f) {    
         // --- Spatial Reuse ---
         for (int i = 0; i < 4; i++) {
             float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
@@ -47,24 +56,24 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 neighborPos = ReconstructWorldPos(neighborUV, neighborDepth, g_Frame.projectionInverse, g_Frame.viewInverse);
                 
                 // Consistency Checks
-                float dotNormal = dot(primaryNormal, neighborNormal);
-                float distPos = distance(primaryPos, neighborPos);
+                float dotNormal = dot(centerSurface.normal, neighborNormal);
+                float distPos = distance(centerSurface.worldPos, neighborPos);
                 
-                if (neighborRes.M > 0 && neighborRes.targetPDF > 0 && dotNormal > 0.95f && distPos < 0.5f) {
+                if (neighborRes.M > 0 && dotNormal > 0.95f && distPos < 0.5f) {
                     // Jacobian for geometry shift
-                    float jacobian = ComputeJacobian(primaryPos, neighborPos, neighborRes.hitPos, neighborRes.hitNormal);
+                    float jacobian = ComputeJacobian(centerSurface.worldPos, neighborPos, neighborRes.hitPos, neighborRes.hitNormal);
                     jacobian = clamp(jacobian, 0.1f, 10.0f);
                     
-                    // Re-evaluate readability of neighbor sample at current pixel
-                    // This uses the fact that neighborRes.radiance is demodulated incoming radiance.
-                    float3 L_res = normalize(neighborRes.hitPos - primaryPos);
-                    float NdotL = max(0.0f, dot(primaryNormal, L_res));
-                    float shiftedTargetPDF = neighborRes.targetPDF * jacobian; 
+                    // Re-evaluate target PDF of neighbor sample at current pixel
+                    float currentTargetPDF = GetTargetPDF(centerSurface, neighborRes.hitPos, neighborRes.radiance);
+                    float shiftedTargetPDF = currentTargetPDF * jacobian; 
                     
-                    if (NdotL > 0) {
-                        // Correct RIS Weight for merging
-                        float weight = shiftedTargetPDF * neighborRes.W * neighborRes.M;
-                        mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
+                    if (shiftedTargetPDF > 0) {
+                        // Conservative Visibility Check
+                        if (CheckVisibility(centerSurface.worldPos, centerSurface.normal, neighborRes.hitPos)) {
+                            float weight = neighborRes.W * neighborRes.M * shiftedTargetPDF;
+                            mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
+                        }
                     }
                 }
             }
@@ -77,9 +86,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         res.M = 60.0f;
     }
 
-    // Final Normalization (Avoid bias at low light levels)
-    if (res.targetPDF > 0) {
-        res.W = res.w_sum / max(1e-6f, res.M * res.targetPDF);
+    // Final Normalization: Re-evaluate target PDF for the winning sample
+    float finalTargetPDF = GetTargetPDF(centerSurface, res.hitPos, res.radiance);
+    if (finalTargetPDF > 0) {
+        res.W = res.w_sum / max(1e-6f, res.M * finalTargetPDF);
         res.W = min(res.W, 10.0f); // Weight Clamping to 10.0
     } else {
         res.W = 0;

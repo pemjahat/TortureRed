@@ -107,4 +107,18 @@ void mergeReservoirs(inout Reservoir r, Reservoir r2, float shiftedTargetPDF, fl
     }
 }
 
+// Returns true if the reservoir was updated with the new sample
+bool mergeReservoirsCheck(inout Reservoir r, Reservoir r2, float targetPDF, float weight, float rnd) {
+    r.w_sum += weight;
+    r.M += r2.M;
+    if (rnd < weight / r.w_sum) {
+        r.hitPos = r2.hitPos;
+        r.hitNormal = r2.hitNormal;
+        r.radiance = r2.radiance;
+        r.targetPDF = targetPDF;
+        return true;
+    }
+    return false;
+}
+
 #endif // COMMON_HLSL
