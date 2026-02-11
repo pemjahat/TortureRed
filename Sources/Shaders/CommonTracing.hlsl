@@ -47,8 +47,7 @@ float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampl
     float cosQ = max(0.0001f, abs(dot(sampleHitNormal, diffQ / sqrt(distSqQ))));
     
     // Solid angle at P / Solid angle at Q
-    //return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));
-    return (distSqQ) / (max(0.00001f, distSqP));
+    return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));    
 }
 
 // Random number generator (PCG)

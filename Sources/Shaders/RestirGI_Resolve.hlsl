@@ -2,7 +2,7 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);
+RWStructuredBuffer<Reservoir> g_ReservoirFinal : register(u2);  // Spatial output (final reservoir)
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 ConstantBuffer<LightConstants> g_Light : register(b1);
@@ -21,7 +21,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- Read Reservoir for Primary Surface Properties ---
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
-    Reservoir res = g_ReservoirCurrent[pixelIdx];
+    Reservoir res = g_ReservoirFinal[pixelIdx];
 
     float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
     float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
@@ -44,7 +44,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         accumulatedColor += GetDirectLighting(worldPos, N, V, albedo, metallic, roughness, g_Scene, g_Light, g_Frame);
 
         // --- Indirect Lighting from Reservoir ---
-        if (res.W > 0) {
+        if (res.w_sum > 0) {
             float3 L_res = normalize(res.hitPos - worldPos);
             float NdotL_res = max(0.0f, dot(N, L_res));
             
@@ -58,7 +58,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 // Final Unbiased ReSTIR GI Resolve:
                 // res.radiance is incident radiance (L_in).
                 // We multiply by the current BRDF and weight by normalization W.
-                float3 indirectRadiance = evalContrib * res.radiance * res.W;
+                float3 indirectRadiance = evalContrib * res.radiance * res.w_sum;
                 
                 // Clamp to prevent fireflies from extreme weights
                 accumulatedColor += min(indirectRadiance, 10.0f);

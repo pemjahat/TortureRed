@@ -1,8 +1,8 @@
 #include "CommonTracing.hlsl"
 
 RWTexture2D<float4> g_Output : register(u1);
-RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);
-RWStructuredBuffer<Reservoir> g_ReservoirIntermediate : register(u3);
+RWStructuredBuffer<Reservoir> g_ReservoirOutput : register(u2);      // Spatial output (goes to Resolve)
+RWStructuredBuffer<Reservoir> g_ReservoirTemporalInput : register(u3); // Temporal output for this frame
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 
@@ -22,12 +22,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     seed_rng(rng, launchIndex, g_Frame.frameIndex + 1); // Avoid same RNG as temporal
 
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
-    Reservoir res = g_ReservoirIntermediate[pixelIdx];
+    Reservoir temporalRes = g_ReservoirTemporalInput[pixelIdx];
+    float selectedTargetPdf = 0;
 
     float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
     float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
     
-    Surface centerSurface;
+    Surface centerSurface = (Surface)0;
     if (depth < 1.0f) {
         centerSurface.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
         centerSurface.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
@@ -38,7 +39,22 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         centerSurface.metallic = materialProps.g;
     }
 
-    if (res.M > 0 && depth < 1.0f) {    
+    // 1. Start with an EMPTY reservoir for the spatial accumulation
+    Reservoir spatialRes;
+    spatialRes.hitPos = 0;
+    spatialRes.hitNormal = 0;
+    spatialRes.radiance = 0;
+    spatialRes.targetPDF = 0;
+    spatialRes.w_sum = 0;
+    spatialRes.M = 0;
+
+    // 2. Merge the temporal reservoir as the first candidate
+    if (temporalRes.M > 0) {
+        selectedTargetPdf = GetTargetPDF(centerSurface, temporalRes.hitPos, temporalRes.radiance);
+        mergeReservoirs(spatialRes, temporalRes, selectedTargetPdf, 0.5f);
+    }
+
+    if (spatialRes.M > 0 && depth < 1.0f) {
         // --- Spatial Reuse ---
         for (int i = 0; i < 4; i++) {
             float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
@@ -48,7 +64,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
                 
                 uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
-                Reservoir neighborRes = g_ReservoirIntermediate[neighborPixelIdx];
+                Reservoir neighborRes = g_ReservoirTemporalInput[neighborPixelIdx];
 
                 float2 neighborUV = ((float2)neighborIndex + 0.5f) / (float2)launchDims;
                 float neighborDepth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, neighborUV, 0).r;
@@ -70,10 +86,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     
                     if (shiftedTargetPDF > 0) {
                         // Conservative Visibility Check
-                        if (CheckVisibility(centerSurface.worldPos, centerSurface.normal, neighborRes.hitPos)) {
-                            float weight = neighborRes.W * neighborRes.M * shiftedTargetPDF;
-                            mergeReservoirs(res, neighborRes, shiftedTargetPDF, weight, next_float(rng));
-                        }
+                        //if (CheckVisibility(centerSurface.worldPos, centerSurface.normal, neighborRes.hitPos)) {
+                            //mergeReservoirs(res, neighborRes, currentTargetPDF, weight, next_float(rng));
+                            if (mergeReservoirs(spatialRes, neighborRes, shiftedTargetPDF, next_float(rng)))
+                            {
+                                selectedTargetPdf = currentTargetPDF;
+                            }
+                        //}
                     }
                 }
             }
@@ -81,19 +100,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     // Final M-Clamping for Spatial
-    if (res.M > 60.0f) {
-        res.w_sum *= (60.0f / res.M);
-        res.M = 60.0f;
-    }
+     if (spatialRes.M > 60.0f) {
+         spatialRes.w_sum *= (60.0f / spatialRes.M);
+         spatialRes.M = 60.0f;
+     }
 
     // Final Normalization: Re-evaluate target PDF for the winning sample
-    float finalTargetPDF = GetTargetPDF(centerSurface, res.hitPos, res.radiance);
-    if (finalTargetPDF > 0) {
-        res.W = res.w_sum / max(1e-6f, res.M * finalTargetPDF);
-        res.W = min(res.W, 10.0f); // Weight Clamping to 10.0
+    if (selectedTargetPdf > 0 && spatialRes.M > 0) {
+        spatialRes.w_sum = spatialRes.w_sum / (spatialRes.M * selectedTargetPdf);
     } else {
-        res.W = 0;
+        spatialRes.w_sum = 0;
     }
 
-    g_ReservoirCurrent[pixelIdx] = res;
+    g_ReservoirOutput[pixelIdx] = spatialRes;
 }

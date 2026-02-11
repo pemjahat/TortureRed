@@ -686,27 +686,27 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     else if (frame.enableRestir)
     {
         // Torture ReSTIR (Manual Implementation)
-        // Pass 1: Temporal
+        // Pass 1: Temporal — writes to ReservoirBuffer[current], reads history from ReservoirBuffer[previous]
         m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-        D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+        D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier1);
 
-        // Pass 2: Spatial
+        // Pass 2: Spatial — writes to Intermediate, reads temporal from ReservoirBuffer[current]
         m_CommandList->SetPipelineState(m_RestirSpatialPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get());
+        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
 
-        // Pass 3: Resolve
+        // Pass 3: Resolve — reads spatial output from Intermediate
         m_CommandList->SetPipelineState(m_RestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
     else

@@ -166,7 +166,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     tparams.screenSpaceMotion.z = 0; // Simple for now
     tparams.sourceBufferIndex = 1; // Used if reading from multiple-arrayed buffer, but we use history buffer directly
     tparams.maxHistoryLength = 32;
-    tparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
+    //tparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
+    tparams.biasCorrectionMode = 1;
     tparams.depthThreshold = 0.1f;
     tparams.normalThreshold = 0.5f;
     tparams.maxReservoirAge = 30;

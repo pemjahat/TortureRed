@@ -15,8 +15,8 @@ RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 Texture2D g_Textures[] : register(t0, space0);
 
-RWStructuredBuffer<Reservoir> g_ReservoirIntermediate : register(u2);
-RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3);
+RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);  // Temporal output (ping-pong with Previous)
+RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3); // Previous frame's temporal output
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 ConstantBuffer<LightConstants> g_Light : register(b1);
@@ -40,7 +40,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     Reservoir res;
     res.hitPos = 0; res.hitNormal = 0; res.radiance = 0; res.targetPDF = 0;
-    res.w_sum = 0; res.M = 0; res.W = 0;
+    res.w_sum = 0; res.M = 0;
 
     float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
@@ -152,6 +152,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     // --- Temporal Merging ---
+    float selectedTargetPdf = 0;
     if (hasPrimaryHit) {
         if (hasIndirectHit) {            
             // Radiance is now incident radiance by design, no division needed
@@ -159,9 +160,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             
             // Use GetTargetPDF to determine weight for initial sample
             float targetPDF = GetTargetPDF(surface, indirectHitPos, L_in);
-            float weight = targetPDF / max(1e-6f, firstBouncePDF); 
-            
-            updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, targetPDF, weight, next_float(rng));
+            if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, targetPDF, firstBouncePDF, next_float(rng))) {
+                selectedTargetPdf = targetPDF;
+            }
         }
 
         if (g_Frame.frameIndex > 1) {
@@ -175,29 +176,42 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     // Re-calculate target PDF of previous sample relative to CURRENT surface
                     float currentTargetPDF = GetTargetPDF(surface, prevRes.hitPos, prevRes.radiance);
 
-                    if (currentTargetPDF > 0) {
-                        // Merging with confidence-weighted RIS
-                        float weight = prevRes.W * prevRes.M * currentTargetPDF;
-                        mergeReservoirs(res, prevRes, currentTargetPDF, weight, next_float(rng));
-                    }
+                     if (currentTargetPDF > 0) {
+                         // Apply Jacobian to temporal reservoir's weight (matches RTXDI)
+                         // This corrects for solid-angle change when reprojecting from previous to current pixel
+                        //  float3 prevWorldPos = ReconstructWorldPos(prevUV, 
+                        //      g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, prevUV, 0).r,
+                        //      g_Frame.projectionInverse, g_Frame.viewInversePrevious);
+                        //  float jacobian = ComputeJacobian(surface.worldPos, prevWorldPos, prevRes.hitPos, prevRes.hitNormal);
+                        //  if (jacobian <= 0 || jacobian > 64.0f || isnan(jacobian) || isinf(jacobian)) {
+                        //      // Reject sample with extreme Jacobian (matches RTXDI RAB_ValidateGISampleWithJacobian)
+                        //  } else {
+                             // Clamp M before combine (matches RTXDI: cap history length)
+                             //prevRes.M = min(prevRes.M, 30.0f);
+                             //prevRes.w_sum *= jacobian;
+
+                             if (mergeReservoirs(res, prevRes, currentTargetPDF, next_float(rng)))
+                             {
+                                 selectedTargetPdf = currentTargetPDF;
+                             }
+                         //}
+                     }
                     
-                    if (res.M > 30.0f) { 
-                        res.w_sum *= (30.0f / res.M); 
-                        res.M = 30.0f; 
-                    }
+                     if (res.M > 30.0f) { 
+                         res.w_sum *= (30.0f / res.M); 
+                         res.M = 30.0f; 
+                     }
                 }
             }
         }
 
         // Final Normalization: Re-evaluate target PDF for the winning sample
-        float finalTargetPDF = GetTargetPDF(surface, res.hitPos, res.radiance);
-        if (finalTargetPDF > 0) {
-            res.W = res.w_sum / max(1e-6f, res.M * finalTargetPDF); 
-            res.W = min(res.W, 10.0f); // Weight Clamping to 10.0
-        } else {
-            res.W = 0;
-        }
+         if (selectedTargetPdf > 0 && res.M > 0) {
+             res.w_sum = res.w_sum / (res.M * selectedTargetPdf);
+         } else {
+             res.w_sum = 0;
+         }
     }
 
-    g_ReservoirIntermediate[launchIndex.y * launchDims.x + launchIndex.x] = res;
+    g_ReservoirCurrent[launchIndex.y * launchDims.x + launchIndex.x] = res;
 }
