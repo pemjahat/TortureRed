@@ -1,11 +1,5 @@
 #pragma once
 
-#include <d3d12.h>
-#include <directx/d3dx12.h>
-#include <dxgi1_6.h>
-#include <wrl.h>
-#include <DirectXMath.h>
-
 struct Reservoir
 {
     DirectX::XMFLOAT3 hitPos;
@@ -78,7 +72,9 @@ struct FrameConstants
     uint32_t enableRestir;
     uint32_t enableAvoidCaustics;
     uint32_t enableIndirectSpecular;
-    uint32_t useRTXDI;
+    uint32_t useRTXDI; // Kept but maybe unused
+    uint32_t lightsBufferIndex;
+    uint32_t numLights;
 };
 
 struct LightConstants

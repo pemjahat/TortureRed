@@ -10,7 +10,6 @@ RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirInput : register(u3);
 Buffer<float2> g_NeighborOffsets : register(t5, space1);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirInput

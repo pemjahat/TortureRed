@@ -1,5 +1,6 @@
+#include "pch.h"
+
 #include "Camera.h"
-#include <algorithm>
 
 // Camera implementation
 Camera::Camera()

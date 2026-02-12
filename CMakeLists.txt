@@ -121,6 +121,7 @@ include_directories(${directx_headers_SOURCE_DIR}/include)
 include_directories(${imgui_SOURCE_DIR})
 include_directories(${imgui_SOURCE_DIR}/backends)
 include_directories(${cgltf_SOURCE_DIR})
+include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/jsmn)
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${rtxdi_SOURCE_DIR}/Include)
 
@@ -138,6 +139,8 @@ file(GLOB_RECURSE SHADER_SOURCES
 
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
+
+target_precompile_headers(${PROJECT_NAME} PRIVATE Sources/pch.h)
 
 # Set RTXDI include path for shaders
 target_compile_definitions(${PROJECT_NAME} PRIVATE RTXDI_INCLUDE_DIR="${rtxdi_SOURCE_DIR}/Include")

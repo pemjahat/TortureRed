@@ -21,7 +21,9 @@ struct FrameConstants {
     uint enableRestir;
     uint enableAvoidCaustics;
     uint enableIndirectSpecular;
-    uint padding[1];
+    uint useRTXDI;
+    uint lightsBufferIndex;
+    uint numLights;
 };
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {

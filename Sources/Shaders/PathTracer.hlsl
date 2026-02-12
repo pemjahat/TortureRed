@@ -5,7 +5,6 @@ RWTexture2D<float4> g_Output : register(u1);
 Texture2D g_Textures[] : register(t0, space0);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 
 SamplerState g_LinearSampler : register(s0);
 
@@ -17,6 +16,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     g_Output.GetDimensions(launchDims.x, launchDims.y);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
+
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
@@ -42,7 +44,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         bool isPathDiffuse = false;
 
         // --- Step 1: Direct Lighting for Primary Hit (Raster Surface) ---
-        accumulatedColor = GetDirectLighting(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, g_Scene, g_Light, g_Frame);
+        accumulatedColor = GetDirectLighting(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, g_Scene, mainLight, g_Frame);
 
         // --- Step 2: Sample First Indirect Ray from Primary Hit ---
         float3 rayDir;
@@ -101,7 +103,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 V_hit = -ray.Direction;
 
                 // NEE
-                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, g_Light, g_Frame, isPathDiffuse) * throughput;
+                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse) * throughput;
 
                 // Sample next bounce
                 float3 nextDir;

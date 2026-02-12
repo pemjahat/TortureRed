@@ -7,7 +7,6 @@ Texture2D g_Textures[] : register(t0, space0);
 RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirBuffer
@@ -24,6 +23,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
+
     RAB_Surface surface = RAB_GetGBufferSurface(launchIndex, false);
     
     RTXDI_ReservoirBufferParameters reservoirParams;
@@ -38,7 +40,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
     } else {
         // --- Direct Lighting ---
-        accumulatedColor += GetDirectLighting(surface.worldPos, surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, g_Scene, g_Light, g_Frame);
+        accumulatedColor += GetDirectLighting(surface.worldPos, surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, g_Scene, mainLight, g_Frame);
 
         // --- Indirect Lighting from Reservoir ---
         if (res.weightSum > 0) {

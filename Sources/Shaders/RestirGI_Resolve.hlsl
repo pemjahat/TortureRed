@@ -5,7 +5,6 @@ RWTexture2D<float4> g_Output : register(u1);
 RWStructuredBuffer<Reservoir> g_ReservoirFinal : register(u2);  // Spatial output (final reservoir)
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 
 Texture2D g_Textures[] : register(t0, space0);
 SamplerState g_LinearSampler : register(s0);
@@ -18,6 +17,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     g_Output.GetDimensions(launchDims.x, launchDims.y);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
+
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
 
     // --- Read Reservoir for Primary Surface Properties ---
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
@@ -41,7 +43,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 V = normalize(g_Frame.cameraPosition.xyz - worldPos);
 
         // --- Direct Lighting (Re-evaluating NEE since it's no longer in reservoir) ---
-        accumulatedColor += GetDirectLighting(worldPos, N, V, albedo, metallic, roughness, g_Scene, g_Light, g_Frame);
+        accumulatedColor += GetDirectLighting(worldPos, N, V, albedo, metallic, roughness, g_Scene, mainLight, g_Frame);
 
         // --- Indirect Lighting from Reservoir ---
         if (res.w_sum > 0) {

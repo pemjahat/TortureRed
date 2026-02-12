@@ -10,7 +10,6 @@ RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirHistory : register(u3);
 Buffer<float2> g_NeighborOffsets : register(t5, space1);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_ALLOWED_BIAS_CORRECTION RTXDI_BIAS_CORRECTION_BASIC
@@ -30,6 +29,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     g_AccumulationBuffer.GetDimensions(launchDims.x, launchDims.y);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
+
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
 
     RAB_RandomSamplerState rng = RAB_InitRandomSampler(launchIndex, g_Frame.frameIndex);
     RAB_Surface surface = RAB_GetGBufferSurface(launchIndex, false);
@@ -102,7 +104,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             float3 V_hit = -ray.Direction;
 
             // Direct lighting at hit point
-            float3 L_direct = GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, g_Light, g_Frame, isPathDiffuse);
+            float3 L_direct = GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse);
             
             if (bounce == 1) {
                 pos_secondary = hitPos;

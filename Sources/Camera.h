@@ -1,6 +1,5 @@
 #pragma once
 
-#include <DirectXMath.h>
 using namespace DirectX;
 
 // Camera class for 3D navigation

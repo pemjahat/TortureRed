@@ -1,13 +1,11 @@
-#define NOMINMAX
+#include "pch.h"
+#define CGLTF_IMPLEMENTATION
+#include <cgltf.h>
+
 #include "Model.h"
 #include "Renderer.h"
 #include "Utility.h"
 #include "ResourceUploadBatch.h"
-#include <iostream>
-#include <cgltf.h>
-#define CGLTF_IMPLEMENTATION
-#include <wrl/client.h>
-#include <DirectXTex.h>
 #include <cstdint>
 #include <algorithm>
 
@@ -993,22 +991,22 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
     // Reset debug counter
     m_NodesSurviveFrustum = 0;
 
-    // Bind material buffer to root parameter 2
+    // Bind material buffer to root parameter 1
     if (m_MaterialBuffer.resource)
     {
-        commandList->SetGraphicsRootShaderResourceView(2, m_MaterialBuffer.gpuAddress);
+        commandList->SetGraphicsRootShaderResourceView(1, m_MaterialBuffer.gpuAddress);
     }
 
-    // Bind draw node buffer to root parameter 3
+    // Bind draw node buffer to root parameter 2
     if (m_DrawNodeBuffer.resource)
     {
-        commandList->SetGraphicsRootShaderResourceView(3, m_DrawNodeBuffer.gpuAddress);
+        commandList->SetGraphicsRootShaderResourceView(2, m_DrawNodeBuffer.gpuAddress);
     }
 
-    // Bind global vertex buffer to root parameter 7
+    // Bind global vertex buffer to root parameter 6
     if (m_GlobalVertexBuffer.resource)
     {
-        commandList->SetGraphicsRootShaderResourceView(7, m_GlobalVertexBuffer.gpuAddress);
+        commandList->SetGraphicsRootShaderResourceView(6, m_GlobalVertexBuffer.gpuAddress);
     }
 
     // Bind global index buffer to IA

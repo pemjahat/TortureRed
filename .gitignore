@@ -6,7 +6,8 @@ Build/
 ThirdParty/
 
 # Content and assets (can be large and platform-specific)
-Content/
+/Content/*
+!/Content/Scenes/
 
 # CMake generated files
 CMakeCache.txt

@@ -1,9 +1,7 @@
+#include "pch.h"
+
 #include "Application.h"
-#include <SDL.h>
 #include <SDL_syswm.h>
-#include <iostream>
-#define CGLTF_IMPLEMENTATION
-#include <cgltf.h>
 #include <DirectXCollision.h>
 
 const char* WINDOW_TITLE = "TortureRed";
@@ -15,7 +13,6 @@ Application::Application()
     , m_LastMouseX(0)
     , m_LastMouseY(0)
     , m_FrameConstants{}
-    , m_MainLight{}
 {
     m_LastViewMatrix = DirectX::XMMatrixIdentity();
 }
@@ -70,6 +67,7 @@ void Application::Initialize()
     HWND hwnd = wmInfo.info.win.window;
 
     CHECK_BOOL(m_Renderer.Initialize(hwnd), "Renderer initialization failed");
+    m_Renderer.CreateLightsBuffer();
 
     // Set camera projection parameters
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
@@ -82,8 +80,18 @@ void Application::Initialize()
     m_FrameConstants.enableAvoidCaustics = 1;
     m_FrameConstants.enableIndirectSpecular = 0;
 
+    // Load Scene
+    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
+        // Fallback or exit? For now just log
+    }
+
     // Load GLTF model
-    if (!m_Model.LoadGLTFModel(&m_Renderer, "Content/Sponza/Sponza.gltf"))
+    std::string modelPath = m_Scene.GetModelPath();
+    if (modelPath.empty()) modelPath = "Content/Sponza/Sponza.gltf"; // Default
+
+    if (!m_Model.LoadGLTFModel(&m_Renderer, modelPath))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF model");
     }
@@ -97,11 +105,19 @@ void Application::Initialize()
     // Initialize ImGui
     InitializeImGui();
 
-    // Initialize directional light
-    m_MainLight.color = { 1.0f, 0.9f, 0.8f, 1.0f };
-    m_MainLight.intensity = 1.0f;
-    m_MainLight.direction = { -1.0f, -1.0f, 1.0f, 0.0f };
-    m_MainLight.position = { 0.0f, 10.0f, 0.0f, 1.0f }; // Not used for dir light but good to have
+    // Initialize/Upload lights
+    if (m_Scene.GetLights().empty())
+    {
+        // Fallback default light if scene has none
+        LightConstants defaultLight = {};
+        defaultLight.color = { 1.0f, 0.9f, 0.8f, 1.0f };
+        defaultLight.intensity = 1.0f;
+        defaultLight.direction = { -1.0f, -1.0f, 1.0f, 0.0f };
+        defaultLight.position = { 0.0f, 10.0f, 0.0f, 1.0f };
+        m_Scene.GetLights().push_back(defaultLight);
+    }
+    
+    m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
 
     m_LastViewMatrix = m_Camera.GetViewMatrix();
 
@@ -278,23 +294,29 @@ void Application::Update(float deltaTime)
 
     const auto& gbuffer = m_Renderer.GetGBuffer();
     m_FrameConstants.albedoIndex = gbuffer.albedo.srvIndex;
+    m_FrameConstants.lightsBufferIndex = m_Renderer.GetLightsDescriptorIndex();
+    m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
     m_FrameConstants.normalIndex = gbuffer.normal.srvIndex;
     m_FrameConstants.materialIndex = gbuffer.material.srvIndex;
     m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
     m_FrameConstants.shadowMapIndex = m_Renderer.GetShadowMap().srvIndex;
     m_FrameConstants.exposure = m_Exposure;
 
-    m_Renderer.UpdateFrameCB(m_FrameConstants);
+    // Update Light in scene and then sync
+    if (!m_Scene.GetLights().empty())
+    {
+        LightConstants& sun = m_Scene.GetLights()[0];
+        
+        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&sun.direction);
+        DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f); // Position light back along direction
+        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
+        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
+        DirectX::XMMATRIX lightViewProj = lightView * lightProj;
+        DirectX::XMStoreFloat4x4(&sun.viewProj, lightViewProj);
+    }
 
-    // Update Light CB
-    m_MainLight.intensity = m_SunIntensity;
-    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
-    DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f); // Position light back along direction
-    DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
-    DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
-    DirectX::XMMATRIX lightViewProj = lightView * lightProj;
-    DirectX::XMStoreFloat4x4(&m_MainLight.viewProj, lightViewProj);
-    m_Renderer.UpdateLightCB(m_MainLight);
+    m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
+    m_Renderer.UpdateFrameCB(m_FrameConstants);
 }
 
 void Application::Render()
@@ -319,15 +341,21 @@ void Application::Render()
 
         cmdList->SetPipelineState(m_Renderer.GetShadowPSO());
 
-        // Temporarily bind light viewProj to root param 0 for shadow pass
-        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetLightGPUAddress());
+        // Temporarily bind light viewProj using a temporary frame constant setup
+        FrameConstants shadowFrame = m_FrameConstants;
+        shadowFrame.viewProj = m_Scene.GetLights()[0].viewProj;
+        m_Renderer.UpdateFrameCB(shadowFrame);
 
-        // Calculate shadow frustum in world space
-        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
+
+        // Calculate shadow frustum in world space from First Light
+        const LightConstants& shadowLight = m_Scene.GetLights()[0];
+
+        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&shadowLight.direction);
         DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f);
         DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
         DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
-
+        
         DirectX::BoundingFrustum shadowFrustum(lightProj, false);
         DirectX::XMMATRIX invLightView = DirectX::XMMatrixInverse(nullptr, lightView);
         shadowFrustum.Transform(shadowFrustum, invLightView);
@@ -344,6 +372,7 @@ void Application::Render()
     cmdList->RSSetScissorRects(1, &scissorRect);
 
     // Restore camera viewProj to root param 0
+    m_Renderer.UpdateFrameCB(m_FrameConstants);
     cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
 
     // Compute frustum for culling
@@ -408,7 +437,7 @@ void Application::Render()
         m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-        m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_MainLight);
+        m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
         m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
 
         // Setup viewport and RTV for ImGui rendering on top of PT output
@@ -535,7 +564,10 @@ void Application::RenderImGui()
 
     ImGui::Separator();
     ImGui::Text("Direct Light");
-    if (ImGui::DragFloat("Sun Intensity", &m_SunIntensity, 0.1f, 0.0f, 100.0f))
+    
+    LightConstants& sun = m_Scene.GetLights()[0];
+
+    if (ImGui::DragFloat("Sun Intensity", &sun.intensity, 0.1f, 0.0f, 100.0f))
     {
         m_FrameConstants.frameIndex = 0; // Reset path tracer if intensity changes
     }
@@ -543,19 +575,19 @@ void Application::RenderImGui()
     {
         // exposure doesn't require reset as it's just post-process
     }
-    if (ImGui::DragFloat3("Direction", &m_MainLight.direction.x, 0.01f, -1.0f, 1.0f))
+    if (ImGui::DragFloat3("Direction", &sun.direction.x, 0.01f, -1.0f, 1.0f))
     {
         m_FrameConstants.frameIndex = 0;
     }
-    if (ImGui::ColorEdit3("Light Color", &m_MainLight.color.x))
+    if (ImGui::ColorEdit3("Light Color", &sun.color.x))
     {
         m_FrameConstants.frameIndex = 0;
     }
     
     // Normalize light direction
-    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&m_MainLight.direction);
+    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&sun.direction);
     lightDir = DirectX::XMVector3Normalize(lightDir);
-    DirectX::XMStoreFloat4(&m_MainLight.direction, lightDir);
+    DirectX::XMStoreFloat4(&sun.direction, lightDir);
 
     ImGui::Separator();
 

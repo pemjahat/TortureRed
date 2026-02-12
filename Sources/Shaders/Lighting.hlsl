@@ -25,7 +25,6 @@ SamplerState pointSampler : register(s0);
 SamplerComparisonState shadowSampler : register(s1);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<LightConstants> LightCB : register(b1);
 
 float CalcShadow(float4 shadowPos) {
     shadowPos.xyz /= shadowPos.w;
@@ -64,27 +63,57 @@ float4 PSMain(PSInput input) : SV_Target {
     viewPos /= viewPos.w;
     float4 worldPos = mul(viewPos, FrameCB.viewInverse);
 
-    // Shadow calculation
-    float4 shadowPos = mul(worldPos, LightCB.viewProj);
-    float shadow = CalcShadow(shadowPos);
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[FrameCB.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
 
-    // PBR Lighting
+    // PBR setup
     float3 N = normalize(normal);
     float3 V = normalize(FrameCB.cameraPosition.xyz - worldPos.xyz);
-    float3 L = normalize(-LightCB.direction.xyz);
-    float3 H = normalize(V + L);
-
     float roughness = max(0.01f, material.r);
     float metallic = material.g;
 
-    float3 diffuse, specular;
-    EvaluateBSDF(N, V, L, albedo.rgb, metallic, roughness, diffuse, specular);
+    // 1. Main Directional Light (Index 0)
+    float3 L_main = normalize(-mainLight.direction.xyz);
+    float NdotL_main = max(dot(N, L_main), 0.0);
+    
+    float4 shadowPos = mul(worldPos, mainLight.viewProj);
+    float shadowFactor = CalcShadow(shadowPos);
 
-    float NdotL = max(dot(N, L), 0.0);
-    float3 directLighting = (diffuse + specular) * LightCB.color.rgb * LightCB.intensity * NdotL * shadow;
+    float3 diff_main, spec_main;
+    EvaluateBSDF(N, V, L_main, albedo.rgb, metallic, roughness, diff_main, spec_main);
+    float3 totalDirectLighting = (diff_main + spec_main) * mainLight.color.rgb * mainLight.intensity * NdotL_main * shadowFactor;
+
+    // 2. Local Light Loop (Index 1+)
+    for(uint i = 1; i < FrameCB.numLights; ++i)
+    {
+        LightConstants light = lightBuffer[i];
+        
+        // Only handle point/spot lights in this loop
+        if (light.position.w > 0.5f) 
+        {
+             float3 d = light.position.xyz - worldPos.xyz;
+             float dist = length(d);
+             float3 L_i = normalize(d);
+             
+             // Spot attenuation
+             float cosAngle = dot(-L_i, normalize(light.direction.xyz));
+             float cosOuter = light.direction.w;
+             float cosInner = asfloat(light.padding[0]);
+             
+             float spotEffect = smoothstep(cosOuter, cosInner, cosAngle);
+             float attenuation = 1.0f / (1.0f + 0.1f*dist + 0.01f*dist*dist);
+             
+             float NdotL_i = max(dot(N, L_i), 0.0);
+             
+             float3 diff_i, spec_i;
+             EvaluateBSDF(N, V, L_i, albedo.rgb, metallic, roughness, diff_i, spec_i);
+             
+             totalDirectLighting += (diff_i + spec_i) * light.color.rgb * light.intensity * NdotL_i * spotEffect * attenuation;
+        }
+    }
 
     float3 ambient = 0.03f * albedo.rgb;
-    float3 finalColor = ambient + directLighting;
+    float3 finalColor = ambient + totalDirectLighting;
     
     // Basic Tone Mapping
     float3 exposedColor = finalColor * FrameCB.exposure;

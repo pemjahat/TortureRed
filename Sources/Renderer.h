@@ -1,12 +1,5 @@
 #pragma once
 
-#include <d3d12.h>
-#include <directx/d3dx12.h>
-#include <dxgi1_6.h>
-#include <wrl.h>
-#include <DirectXMath.h>
-#include <vector>
-#include <string>
 #include <unordered_map>
 #include "GraphicsTypes.h"
 
@@ -64,7 +57,6 @@ public:
 
     // Constant buffer management
     void UpdateFrameCB(const FrameConstants& frameConstants);
-    void UpdateLightCB(const LightConstants& lightConstants);
 
     // Getters
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -87,7 +79,6 @@ public:
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
 
     D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
-    D3D12_GPU_VIRTUAL_ADDRESS GetLightGPUAddress() const { return m_LightCB.gpuAddress; }
 
     D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(UINT index) const {
         D3D12_GPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetGPUDescriptorHandleForHeapStart();
@@ -114,6 +105,12 @@ public:
     GBuffer& GetGBuffer() { return m_GBuffer; }
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
     GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
+
+    // Lights
+    void CreateLightsBuffer();
+    void UpdateLightsBuffer(const std::vector<LightConstants>& lights);
+    D3D12_GPU_VIRTUAL_ADDRESS GetLightsBufferGPUAddress() const;
+    UINT GetLightsDescriptorIndex() const { return (UINT)m_LightsBuffer.srvIndex; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -149,6 +146,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirResolvePSO;
     
+    // Light Resources
+    GPUBuffer m_LightsBuffer;
+    UINT m_MaxLights = 32;
+    
     // RTXDI SDK Pipeline States
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirSpatialPSO;
@@ -180,7 +181,6 @@ private:
 
     // Constant Buffers
     GPUBuffer m_FrameCB;
-    GPUBuffer m_LightCB;
 
     // Synchronization
     UINT m_FrameIndex;

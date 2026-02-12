@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <cassert>
 
 // Error checking macro for DirectX calls

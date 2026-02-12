@@ -35,7 +35,6 @@ SamplerState linearSampler : register(s0);
 SamplerComparisonState shadowSampler : register(s1);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<LightConstants> LightCB : register(b1);
 
 float CalcShadow(float4 shadowPos) {
     shadowPos.xyz /= shadowPos.w;
@@ -73,8 +72,11 @@ float4 PSMain(VSOutput input) : SV_Target
     viewPos /= viewPos.w;
     float4 worldPos = mul(viewPos, FrameCB.viewInverse);    
     
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[FrameCB.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
+
     // Compute shadow position
-    float4 shadowPos = mul(worldPos, LightCB.viewProj);
+    float4 shadowPos = mul(worldPos, mainLight.viewProj);
     
     // Calculate shadow factor
     float shadow = CalcShadow(shadowPos);

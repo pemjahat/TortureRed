@@ -1,7 +1,8 @@
+#include "pch.h"
+
 #include "ResourceUploadBatch.h"
 #include "Renderer.h"
 #include "Utility.h"
-#include <iostream>
 
 ResourceUploadBatch::ResourceUploadBatch(Renderer* renderer)
     : m_Renderer(renderer)

@@ -19,7 +19,6 @@ RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);  // Temporal ou
 RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3); // Previous frame's temporal output
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<LightConstants> g_Light : register(b1);
 
 SamplerState g_LinearSampler : register(s0);
 
@@ -31,6 +30,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     g_AccumulationBuffer.GetDimensions(launchDims.x, launchDims.y);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
+
+    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
+    LightConstants mainLight = lightBuffer[0];
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
@@ -120,7 +122,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 }
 
                 // NEE
-                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, g_Light, g_Frame, isPathDiffuse) * throughput;
+                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse) * throughput;
 
                 // Path continuation
                 float3 nextDir;

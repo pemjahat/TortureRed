@@ -1,13 +1,5 @@
 #pragma once
 
-#include <d3d12.h>
-#include <d3dx12.h>
-#include <wrl.h>
-#include <vector>
-#include <string>
-#include <DirectXMath.h>
-#include <DirectXCollision.h>
-#include <DirectXTex.h>
 #include "GraphicsTypes.h"
 
 // Forward declarations
