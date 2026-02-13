@@ -2,26 +2,224 @@
   "models": ["Content/Sponza/Sponza.gltf"],
   "graph": [
     {
-		"name": "Lights",
-		"children": [
-			{
-				"name": "Sun",
-				"type": "DirectionalLight",
-				"color": [1.0, 0.9, 0.8],
-				"intensity": 5.0,
-				"direction": [0.0, -0.9, 0.2]
-			},
-			{
-				"name": "Spot1",
-				"type": "SpotLight",
-				"color": [1.0, 0.0, 0.0],
-				"intensity": 50.0,
-				"translation": [5.0, 5.0, 0.0],
-				"direction": [0.0, -1.0, 0.0],
-				"innerAngle": 30.0,
-				"outerAngle": 45.0
-			}				
-		]
+      "name": "Lights",
+      "children": [
+        {
+          "name": "Sun",
+          "type": "DirectionalLight",
+          "color": [1.0, 0.9, 0.8],
+          "intensity": 5.0,
+          "direction": [0.0, -0.9, 0.2]
+        },
+        {
+          "name": "Light",
+          "type": "PointLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 54.35,
+          "translation": [4.0762, 5.9039, -1.0055],
+          "direction": [-0.5664, -0.7947, 0.2184]
+        },
+        {
+          "name": "spotLight1",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-8.192, 3.7315, -1.3952],
+          "direction": [0.0147, -0.8619, -0.5069],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight2",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-4.3353, 3.7315, -1.3952],
+          "direction": [0.0147, -0.8619, -0.5069],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight3",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-0.5987, 3.7315, -1.3952],
+          "direction": [0.0147, -0.8619, -0.5069],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight4",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [3.13, 3.7315, -1.3952],
+          "direction": [0.0147, -0.8619, -0.5069],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight5",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [6.7304, 3.7315, -1.3952],
+          "direction": [0.0147, -0.8619, -0.5069],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight6",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-8.192, 3.7315, 0.5379],
+          "direction": [-0.0145, -0.8663, 0.4992],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight7",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-4.3353, 3.7315, 0.5379],
+          "direction": [-0.0145, -0.8663, 0.4992],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight8",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-0.5987, 3.7315, 0.5379],
+          "direction": [-0.0145, -0.8663, 0.4992],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight9",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [3.13, 3.7315, 0.5379],
+          "direction": [-0.0145, -0.8663, 0.4992],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight10",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [6.7304, 3.7315, 0.5379],
+          "direction": [-0.0145, -0.8663, 0.4992],
+          "innerAngle": 27.75,
+          "outerAngle": 36.69
+        },
+        {
+          "name": "spotLight11",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [11.8476, 3.3048, -0.3404],
+          "direction": [0.0, -1.0, 0.0],
+          "innerAngle": 50.0,
+          "outerAngle": 58.95
+        },
+        {
+          "name": "spotLight12",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-12.8231, 3.672, -0.3403],
+          "direction": [0.0, -1.0, 0.0],
+          "innerAngle": 50.0,
+          "outerAngle": 58.95
+        },
+        {
+          "name": "spotLight13",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-6.7355, 7.8192, 3.761],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        },
+        {
+          "name": "spotLight14",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-0.3239, 7.8192, 3.761],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        },
+        {
+          "name": "spotLight15",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-6.7672, 7.8192, -4.742],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        },
+        {
+          "name": "spotLight16",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-0.3717, 7.8192, -4.742],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        },
+        {
+          "name": "spotLight17",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [-8.732, 8.9689, -0.3516],
+          "direction": [0.0, -1.0, 0.0],
+          "innerAngle": 50.0,
+          "outerAngle": 58.95
+        },
+        {
+          "name": "spotLight18",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [6.8634, 8.9689, -0.3516],
+          "direction": [0.0, -1.0, 0.0],
+          "innerAngle": 50.0,
+          "outerAngle": 58.95
+        },
+        {
+          "name": "spotLight19",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [5.0046, 7.8192, 3.761],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        },
+        {
+          "name": "spotLight20",
+          "type": "SpotLight",
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 13.59,
+          "translation": [5.5604, 7.8192, -4.742],
+          "direction": [-0.0711, -0.9968, 0.0375],
+          "innerAngle": 31.81,
+          "outerAngle": 40.75
+        }
+      ]
     }
   ]
 }
