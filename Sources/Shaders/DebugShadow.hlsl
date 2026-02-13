@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "CommonTracing.hlsl"
 
 struct VSOutput
 {
@@ -31,57 +32,54 @@ VSOutput VSMain(uint vertexID : SV_VertexID)
 
 Texture2D textures[] : register(t0, space0);
 
-SamplerState linearSampler : register(s0);
-SamplerComparisonState shadowSampler : register(s1);
+SamplerState pointSampler : register(s0);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-
-// float CalcShadow(float4 shadowPos) {
-//     shadowPos.xyz /= shadowPos.w;
-//     float2 shadowTexCoord = shadowPos.xy * 0.5f + 0.5f;
-//     shadowTexCoord.y = 1.0f - shadowTexCoord.y;
-
-//     if (saturate(shadowTexCoord.x) != shadowTexCoord.x || saturate(shadowTexCoord.y) != shadowTexCoord.y) {
-//         return 1.0f;
-//     }
-
-//     float shadowDepth = shadowPos.z;
-//     float shadow = 0.0f;
-    
-//     // 3x3 PCF
-//     const float shadowMapSize = 2048.0f;
-//     const float texelSize = 1.0f / shadowMapSize;
-    
-//     for (int x = -1; x <= 1; ++x) {
-//         for (int y = -1; y <= 1; ++y) {
-//             shadow += textures[FrameCB.shadowMapIndex].SampleCmpLevelZero(shadowSampler, shadowTexCoord + float2(x, y) * texelSize, shadowDepth);
-//         }
-//     }
-    
-//     return shadow / 9.0f;
-// }
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    // Sample depth
-    // float depth = textures[FrameCB.depthIndex].Sample(linearSampler, input.uv).r;
+    float depth = textures[FrameCB.depthIndex].Sample(pointSampler, input.uv).r;
+    float3 normal = textures[FrameCB.normalIndex].Sample(pointSampler, input.uv).rgb * 2.0f - 1.0f;
     
-    // // Reconstruct world position
-    // float4 ndc = float4(input.uv.x * 2.0f - 1.0f, (1.0f - input.uv.y) * 2.0f - 1.0f, depth, 1.0f);
-    // float4 viewPos = mul(ndc, FrameCB.projectionInverse);
-    // viewPos /= viewPos.w;
-    // float4 worldPos = mul(viewPos, FrameCB.viewInverse);    
+    // Early exit for sky pixels
+    if (depth == 0.0f) {
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
     
-    // StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[FrameCB.lightsBufferIndex];
-    // LightConstants mainLight = lightBuffer[0];
-
-    // // Compute shadow position
-    // float4 shadowPos = mul(worldPos, mainLight.viewProj);
+    // Reconstruct world position from depth
+    float4 ndc = float4(input.uv.x * 2.0f - 1.0f, (1.0f - input.uv.y) * 2.0f - 1.0f, depth, 1.0f);
+    float4 viewPos = mul(ndc, FrameCB.projectionInverse);
+    viewPos /= viewPos.w;
+    float4 worldPos = mul(viewPos, FrameCB.viewInverse);
     
-    // // Calculate shadow factor
-    // float shadow = CalcShadow(shadowPos);
+    LightConstants mainLight = g_Lights[0];
     
-    // // Output shadow factor as grayscale (1.0 = fully lit, 0.0 = fully shadowed)
-    // return float4(shadow, shadow, shadow, 1.0);
-    return float4(0.0, 0.0, 0.0, 1.0);
+    float3 N = normalize(normal);
+    float3 L_main = normalize(-mainLight.direction.xyz);
+    float NdotL_main = max(dot(N, L_main), 0.0);
+    
+    float shadowFactor = 1.0f;
+    
+    // Ray-Traced Shadow for Main Light (same logic as Lighting.hlsl)
+    if (NdotL_main > 0.0f) {
+        RayDesc shadowRay;
+        shadowRay.Origin = worldPos.xyz + N * 0.001f;  // Normal bias to avoid self-intersection
+        shadowRay.Direction = L_main;
+        shadowRay.TMin = 0.001f;
+        shadowRay.TMax = 10000.0f;  // Large value for directional light
+        
+        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> shadowQuery;
+        shadowQuery.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, shadowRay);
+        shadowQuery.Proceed();
+        
+        // Check if ray hit anything (shadowed) or missed (lit)
+        shadowFactor = (shadowQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
+    } else {
+        // Back-facing surface
+        shadowFactor = 0.0f;
+    }
+    
+    // Output shadow mask for debug: white = lit, black = shadowed
+    return float4(shadowFactor, shadowFactor, shadowFactor, 1.0);
 }
