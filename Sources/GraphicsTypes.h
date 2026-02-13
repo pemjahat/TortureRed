@@ -67,13 +67,11 @@ struct FrameConstants
     int32_t normalIndex;
     int32_t materialIndex;
     int32_t depthIndex;
-    int32_t shadowMapIndex;
     float exposure;
     uint32_t enableRestir;
     uint32_t enableAvoidCaustics;
     uint32_t enableIndirectSpecular;
     uint32_t useRTXDI; // Kept but maybe unused
-    uint32_t lightsBufferIndex;
     uint32_t numLights;
 };
 

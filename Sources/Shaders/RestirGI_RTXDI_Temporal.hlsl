@@ -10,6 +10,7 @@ RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirHistory : register(u3);
 Buffer<float2> g_NeighborOffsets : register(t5, space1);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_ALLOWED_BIAS_CORRECTION RTXDI_BIAS_CORRECTION_BASIC
@@ -30,8 +31,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     RAB_RandomSamplerState rng = RAB_InitRandomSampler(launchIndex, g_Frame.frameIndex);
     RAB_Surface surface = RAB_GetGBufferSurface(launchIndex, false);

@@ -19,6 +19,7 @@ RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);  // Temporal ou
 RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3); // Previous frame's temporal output
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 SamplerState g_LinearSampler : register(s0);
 
@@ -31,8 +32,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);

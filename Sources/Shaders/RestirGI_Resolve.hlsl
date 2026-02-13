@@ -5,6 +5,7 @@ RWTexture2D<float4> g_Output : register(u1);
 RWStructuredBuffer<Reservoir> g_ReservoirFinal : register(u2);  // Spatial output (final reservoir)
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 Texture2D g_Textures[] : register(t0, space0);
 SamplerState g_LinearSampler : register(s0);
@@ -18,8 +19,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     // --- Read Reservoir for Primary Surface Properties ---
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;

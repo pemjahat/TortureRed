@@ -1,5 +1,6 @@
 #include "Common.hlsl"
 #include "PBR.hlsl"
+#include "CommonTracing.hlsl"
 
 struct VSInput {
     uint vertexID : SV_VertexID;
@@ -22,34 +23,9 @@ PSInput VSMain(VSInput input) {
 Texture2D textures[] : register(t0, space0);
 
 SamplerState pointSampler : register(s0);
-SamplerComparisonState shadowSampler : register(s1);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-
-float CalcShadow(float4 shadowPos) {
-    shadowPos.xyz /= shadowPos.w;
-    float2 shadowTexCoord = shadowPos.xy * 0.5f + 0.5f;
-    shadowTexCoord.y = 1.0f - shadowTexCoord.y;
-
-    if (saturate(shadowTexCoord.x) != shadowTexCoord.x || saturate(shadowTexCoord.y) != shadowTexCoord.y) {
-        return 1.0f;
-    }
-
-    float shadowDepth = shadowPos.z;
-    float shadow = 0.0f;
-    
-    // 3x3 PCF
-    const float shadowMapSize = 2048.0f;
-    const float texelSize = 1.0f / shadowMapSize;
-    
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += textures[FrameCB.shadowMapIndex].SampleCmpLevelZero(shadowSampler, shadowTexCoord + float2(x, y) * texelSize, shadowDepth);
-        }
-    }
-    
-    return shadow / 9.0f;
-}
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 float4 PSMain(PSInput input) : SV_Target {
     float4 albedo = textures[FrameCB.albedoIndex].Sample(pointSampler, input.texCoord);
@@ -57,14 +33,18 @@ float4 PSMain(PSInput input) : SV_Target {
     float4 material = textures[FrameCB.materialIndex].Sample(pointSampler, input.texCoord);
     float depth = textures[FrameCB.depthIndex].Sample(pointSampler, input.texCoord).r;
 
+    // Early exit for sky pixels
+    // if (depth == 0.0f) {
+    //     return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    // }
+
     // Reconstruction of world position from depth
     float4 ndc = float4(input.texCoord.x * 2.0f - 1.0f, (1.0f - input.texCoord.y) * 2.0f - 1.0f, depth, 1.0f);
     float4 viewPos = mul(ndc, FrameCB.projectionInverse);
     viewPos /= viewPos.w;
     float4 worldPos = mul(viewPos, FrameCB.viewInverse);
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[FrameCB.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     // PBR setup
     float3 N = normalize(normal);
@@ -72,12 +52,30 @@ float4 PSMain(PSInput input) : SV_Target {
     float roughness = max(0.01f, material.r);
     float metallic = material.g;
 
-    // 1. Main Directional Light (Index 0)
+    // 1. Main Directional Light (Index 0) with Ray-Traced Shadows
     float3 L_main = normalize(-mainLight.direction.xyz);
     float NdotL_main = max(dot(N, L_main), 0.0);
     
-    float4 shadowPos = mul(worldPos, mainLight.viewProj);
-    float shadowFactor = CalcShadow(shadowPos);
+    float shadowFactor = 1.0f;
+    
+    // Trace shadow ray using inline ray tracing (only if surface faces the light)
+    if (NdotL_main > 0.0f) {
+        RayDesc shadowRay;
+        shadowRay.Origin = worldPos.xyz + N * 0.001f;  // Normal bias to avoid self-intersection
+        shadowRay.Direction = L_main;
+        shadowRay.TMin = 0.001f;
+        shadowRay.TMax = 10000.0f;  // Large value for directional light
+        
+        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> shadowQuery;
+        shadowQuery.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, shadowRay);
+        shadowQuery.Proceed();
+        
+        // Check if ray hit anything (shadowed) or missed (lit)
+        shadowFactor = (shadowQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
+    } else {
+        // Back-facing surface, no contribution from this light
+        shadowFactor = 0.0f;
+    }
 
     float3 diff_main, spec_main;
     EvaluateBSDF(N, V, L_main, albedo.rgb, metallic, roughness, diff_main, spec_main);
@@ -86,7 +84,7 @@ float4 PSMain(PSInput input) : SV_Target {
     // 2. Local Light Loop (Index 1+)
     for(uint i = 1; i < FrameCB.numLights; ++i)
     {
-        LightConstants light = lightBuffer[i];
+        LightConstants light = g_Lights[i];
         
         // Only handle point/spot lights in this loop
         if (light.position.w > 0.5f) 

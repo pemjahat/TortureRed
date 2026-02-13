@@ -16,7 +16,7 @@ static int cgltf_json_strcmp(const jsmntok_t* tok, const uint8_t* json_chunk, co
     if (tok->type != JSMN_STRING) return 1;
     size_t str_len = strlen(str);
     size_t name_length = tok->end - tok->start;
-    return (str_len == name_length) ? strncmp((const char*)json_chunk + tok->start, str, str_len) : 128;
+    return (str_len == name_length) ? _strnicmp((const char*)json_chunk + tok->start, str, str_len) : 128;
 }
 
 static float cgltf_json_to_float(const jsmntok_t* tok, const uint8_t* json_chunk)
@@ -31,30 +31,21 @@ static float cgltf_json_to_float(const jsmntok_t* tok, const uint8_t* json_chunk
 
 static int cgltf_skip_json(const jsmntok_t* tokens, int i)
 {
-    int end = i + 1;
-    while (i < end)
+    // Use the token's byte range (start/end) for OBJECT and ARRAY to reliably
+    // skip all children, since JSMN's size field can be undercounted when
+    // JSMN_PARENT_LINKS is enabled and there are nested containers.
+    int type = tokens[i].type;
+    int end_pos = tokens[i].end; // byte position after this token in JSON string
+    i++;
+    if (type == JSMN_OBJECT || type == JSMN_ARRAY)
     {
-        switch (tokens[i].type)
+        // All child tokens have start < end_pos of their parent container.
+        // Tokens following this container have start >= end_pos.
+        while (tokens[i].start < end_pos)
         {
-        case JSMN_OBJECT:
-            end += tokens[i].size * 2;
-            break;
-
-        case JSMN_ARRAY:
-            end += tokens[i].size;
-            break;
-
-        case JSMN_PRIMITIVE:
-        case JSMN_STRING:
-            break;
-
-        default:
-            return -1;
+            i++;
         }
-
-        i++;
     }
-
     return i;
 }
 
@@ -145,14 +136,14 @@ bool Scene::ParseJson(const char* json, size_t length)
         {
              // generic graph parser
              int graphIndex = i + 1;
-             int numNodes = tokens[graphIndex].size;
+             int graphEnd = cgltf_skip_json(tokens.data(), graphIndex);
              
              int currentNodeIdx = graphIndex + 1;
-             for (int n = 0; n < numNodes; ++n)
+             while (currentNodeIdx < graphEnd)
              {
                  currentNodeIdx = ParseGraphNode(this, json_ptr, tokens.data(), currentNodeIdx);
              }
-             i = cgltf_skip_json(tokens.data(), graphIndex);
+             i = graphEnd;
         }
         else
         {
@@ -167,7 +158,11 @@ bool Scene::ParseJson(const char* json, size_t length)
 static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* tokens, int nodeIndex)
 {
     // nodeIndex points to Object { ... }
-    int numKeys = tokens[nodeIndex].size;
+    // NOTE: We cannot rely on tokens[nodeIndex].size for the key count because
+    // JSMN with JSMN_PARENT_LINKS may undercount keys when nested arrays exist
+    // inside an object that is itself inside an array. Instead, compute the end
+    // of this node and iterate until we reach it.
+    int nodeEnd = cgltf_skip_json(tokens, nodeIndex);
     int cur = nodeIndex + 1;
     
     // Properties to extract
@@ -180,7 +175,7 @@ static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* to
     float innerAngle = 0.0f;
     float outerAngle = 0.0f;
     
-    for (int k = 0; k < numKeys; ++k)
+    while (cur < nodeEnd)
     {
         const jsmntok_t* keyToken = &tokens[cur];
         const jsmntok_t* valueToken = &tokens[cur + 1];
@@ -221,8 +216,24 @@ static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* to
         {
             outerAngle = cgltf_json_to_float(valueToken, json);
         }
+        else if (cgltf_json_strcmp(keyToken, json, "children") == 0)
+        {
+            if (valueToken->type == JSMN_ARRAY)
+            {
+                int arrayEnd = cgltf_skip_json(tokens, cur + 1);
+                int childIdx = cur + 2; // first element in the array
+                while (childIdx < arrayEnd)
+                {
+                    childIdx = ParseGraphNode(scene, json, tokens, childIdx);
+                }
+            }
+            else if (valueToken->type == JSMN_OBJECT)
+            {
+                 ParseGraphNode(scene, json, tokens, cur + 1);
+            }
+        }
 
-        // Advance to next key using cgltf_skip_json
+        // Advance past the key token, then skip the value
         cur = cgltf_skip_json(tokens, cur + 1);
     }
     

@@ -7,6 +7,7 @@ Texture2D g_Textures[] : register(t0, space0);
 RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirBuffer
@@ -23,8 +24,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     RAB_Surface surface = RAB_GetGBufferSurface(launchIndex, false);
     

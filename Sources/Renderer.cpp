@@ -304,6 +304,12 @@ void Renderer::BeginFrame()
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
 
+    // Bind TLAS for ray-traced shadows in pixel shader
+    m_CommandList->SetGraphicsRootShaderResourceView(4, m_TLAS.gpuAddress);
+
+    // Bind Lights Buffer (t1, space0) - root parameter 12
+    m_CommandList->SetGraphicsRootShaderResourceView(12, m_LightsBuffer.gpuAddress);
+
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
     m_CommandList->RSSetViewports(1, &viewport);
@@ -376,7 +382,7 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
-    CD3DX12_ROOT_PARAMETER rootParameters[12];
+    CD3DX12_ROOT_PARAMETER rootParameters[13];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -389,6 +395,7 @@ void Renderer::CreateRootSignature()
     rootParameters[9].InitAsDescriptorTable(1, &uavRange2); // u2
     rootParameters[10].InitAsDescriptorTable(1, &uavRange3); // u3
     rootParameters[11].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
+    rootParameters[12].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -634,6 +641,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
     m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_AccumulationBuffer.uavIndex));
     m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
+    m_CommandList->SetComputeRootShaderResourceView(12, m_LightsBuffer.gpuAddress); // Lights Buffer
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;

@@ -16,13 +16,11 @@ struct FrameConstants {
     int normalIndex;    // RT GBuffer normal indices
     int materialIndex;  // RT GBuffer material indices
     int depthIndex;     // RT GBuffer depth indices
-    int shadowMapIndex;
     float exposure;
     uint enableRestir;
     uint enableAvoidCaustics;
     uint enableIndirectSpecular;
     uint useRTXDI;
-    uint lightsBufferIndex;
     uint numLights;
 };
 

@@ -294,13 +294,11 @@ void Application::Update(float deltaTime)
 
     const auto& gbuffer = m_Renderer.GetGBuffer();
     m_FrameConstants.albedoIndex = gbuffer.albedo.srvIndex;
-    m_FrameConstants.lightsBufferIndex = m_Renderer.GetLightsDescriptorIndex();
-    m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
     m_FrameConstants.normalIndex = gbuffer.normal.srvIndex;
     m_FrameConstants.materialIndex = gbuffer.material.srvIndex;
     m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
-    m_FrameConstants.shadowMapIndex = m_Renderer.GetShadowMap().srvIndex;
     m_FrameConstants.exposure = m_Exposure;
+    m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
 
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
@@ -326,44 +324,6 @@ void Application::Render()
 
     auto cmdList = m_Renderer.GetCommandList();
     auto& gbuffer = m_Renderer.GetGBuffer();
-    auto& shadowMap = m_Renderer.GetShadowMap();
-
-    // 0. Shadow Pass
-    {
-        m_Renderer.TransitionResource(shadowMap, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cmdList->ClearDepthStencilView(shadowMap.dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &shadowMap.dsvHandle);
-
-        D3D12_VIEWPORT shadowViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, 2048.0f, 2048.0f);
-        D3D12_RECT shadowScissor = CD3DX12_RECT(0, 0, 2048, 2048);
-        cmdList->RSSetViewports(1, &shadowViewport);
-        cmdList->RSSetScissorRects(1, &shadowScissor);
-
-        cmdList->SetPipelineState(m_Renderer.GetShadowPSO());
-
-        // Temporarily bind light viewProj using a temporary frame constant setup
-        FrameConstants shadowFrame = m_FrameConstants;
-        shadowFrame.viewProj = m_Scene.GetLights()[0].viewProj;
-        m_Renderer.UpdateFrameCB(shadowFrame);
-
-        cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
-
-        // Calculate shadow frustum in world space from First Light
-        const LightConstants& shadowLight = m_Scene.GetLights()[0];
-
-        DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&shadowLight.direction);
-        DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f);
-        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
-        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
-        
-        DirectX::BoundingFrustum shadowFrustum(lightProj, false);
-        DirectX::XMMATRIX invLightView = DirectX::XMMatrixInverse(nullptr, lightView);
-        shadowFrustum.Transform(shadowFrustum, invLightView);
-
-        m_Model.Render(cmdList, &m_Renderer, shadowFrustum, AlphaMode::Opaque);
-
-        m_Renderer.TransitionResource(shadowMap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    }
 
     // Reset viewport and scissor for main pass
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
@@ -371,7 +331,7 @@ void Application::Render()
     cmdList->RSSetViewports(1, &viewport);
     cmdList->RSSetScissorRects(1, &scissorRect);
 
-    // Restore camera viewProj to root param 0
+    // Set camera viewProj to root param 0
     m_Renderer.UpdateFrameCB(m_FrameConstants);
     cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
 

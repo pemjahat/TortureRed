@@ -5,6 +5,7 @@ RWTexture2D<float4> g_Output : register(u1);
 Texture2D g_Textures[] : register(t0, space0);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 SamplerState g_LinearSampler : register(s0);
 
@@ -17,8 +18,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    StructuredBuffer<LightConstants> lightBuffer = ResourceDescriptorHeap[g_Frame.lightsBufferIndex];
-    LightConstants mainLight = lightBuffer[0];
+    LightConstants mainLight = g_Lights[0];
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
