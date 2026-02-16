@@ -48,6 +48,8 @@ private:
     DirectX::XMFLOAT4 m_LastCameraPos;
     FrameConstants m_FrameConstants;
 
+    int m_SelectedLightIndex = 0;
+
     // ImGui
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_ImGuiDescriptorHeap;
 

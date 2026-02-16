@@ -307,8 +307,9 @@ void Renderer::BeginFrame()
     // Bind TLAS for ray-traced shadows in pixel shader
     m_CommandList->SetGraphicsRootShaderResourceView(4, m_TLAS.gpuAddress);
 
-    // Bind Lights Buffer (t1, space0) - root parameter 12
+    // Bind Lights Buffer (t0, space2) - root parameter 12
     m_CommandList->SetGraphicsRootShaderResourceView(12, m_LightsBuffer.gpuAddress);
+    m_CommandList->SetGraphicsRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT (t1, space2)
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -382,7 +383,7 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
-    CD3DX12_ROOT_PARAMETER rootParameters[13];
+    CD3DX12_ROOT_PARAMETER rootParameters[14];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -396,6 +397,7 @@ void Renderer::CreateRootSignature()
     rootParameters[10].InitAsDescriptorTable(1, &uavRange3); // u3
     rootParameters[11].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
     rootParameters[12].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
+    rootParameters[13].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -642,6 +644,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_AccumulationBuffer.uavIndex));
     m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
     m_CommandList->SetComputeRootShaderResourceView(12, m_LightsBuffer.gpuAddress); // Lights Buffer
+    m_CommandList->SetComputeRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
@@ -882,12 +885,98 @@ void Renderer::UpdateLightsBuffer(const std::vector<LightConstants>& lights)
 {
     if (lights.empty()) return;
     UINT numLights = std::min((UINT)lights.size(), m_MaxLights);
-    memcpy(m_LightsBuffer.cpuPtr, lights.data(), numLights * sizeof(LightConstants));
+    
+    // Calculate selection PDFs before copying to GPU
+    std::vector<LightConstants> lightsWithPDF = lights;
+    float totalWeight = 0.0f;
+    std::vector<float> weights(numLights);
+
+    for (UINT i = 0; i < numLights; ++i) {
+        float luminance = 0.2126f * lights[i].color.x + 0.7152f * lights[i].color.y + 0.0722f * lights[i].color.z;
+        float w = lights[i].intensity * luminance;
+        weights[i] = w;
+        totalWeight += w;
+    }
+
+    for (UINT i = 0; i < numLights; ++i) {
+        if (totalWeight > 0.0f) {
+            lightsWithPDF[i].selectionPDF = weights[i] / totalWeight;
+        } else {
+            lightsWithPDF[i].selectionPDF = 1.0f / float(numLights);
+        }
+    }
+
+    memcpy(m_LightsBuffer.cpuPtr, lightsWithPDF.data(), numLights * sizeof(LightConstants));
+    
+    // Also update the LUT buffer for importance sampling
+    UpdateLightLUTBuffer(lightsWithPDF);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::GetLightsBufferGPUAddress() const
 {
     return m_LightsBuffer.gpuAddress;
+}
+
+void Renderer::CreateLightLUTBuffer()
+{
+    // LUT buffer: 256 uint entries for O(1) light sampling
+    // Each entry maps a CDF bucket to a light index
+    CHECK_BOOL(CreateBuffer(m_LightLUTBuffer, sizeof(uint32_t) * LIGHT_LUT_RESOLUTION, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, true), "CreateLightLUTBuffer failed");
+}
+
+void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
+{
+    if (lights.empty() || m_LightLUTBuffer.cpuPtr == nullptr) return;
+    
+    UINT numLights = std::min((UINT)lights.size(), m_MaxLights);
+    std::vector<uint32_t> lut(LIGHT_LUT_RESOLUTION);
+    std::vector<float> weights(numLights);
+    
+    // Compute importance weights for each light
+    float totalWeight = 0.0f;
+    for (UINT i = 0; i < numLights; ++i) {
+        // Importance = intensity * luminance(color)
+        // Skip directional lights (position.w == 0) - they get 0 weight in stochastic sampling
+        float w = 0.0f;
+        if (lights[i].position.w > 0.5f) {
+            float luminance = 0.2126f * lights[i].color.x + 0.7152f * lights[i].color.y + 0.0722f * lights[i].color.z;
+            w = lights[i].intensity * luminance;
+        }
+        weights[i] = w;
+        totalWeight += w;
+    }
+    
+    // Build CDF
+    std::vector<float> cdf(numLights);
+    float cumulative = 0.0f;
+    for (UINT i = 0; i < numLights; ++i) {
+        if (totalWeight > 0.0f) {
+            cumulative += weights[i] / totalWeight;
+        }
+        cdf[i] = cumulative;
+    }
+    if (numLights > 0) cdf[numLights - 1] = 1.0f;
+    
+    // Build LUT: for each LUT entry, find which light index to sample
+    for (UINT i = 0; i < LIGHT_LUT_RESOLUTION; ++i) {
+        float u = (i + 0.5f) / float(LIGHT_LUT_RESOLUTION); // Center of bin
+        
+        // Binary search in CDF to find light index
+        uint32_t lightIdx = 0;
+        if (numLights > 0 && totalWeight > 0.0f) {
+            // Find first CDF entry >= u
+            for (UINT j = 0; j < numLights; ++j) {
+                if (u <= cdf[j]) {
+                    lightIdx = j;
+                    break;
+                }
+            }
+        }
+        lut[i] = lightIdx;
+    }
+    
+    // Copy to GPU
+    memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
 }
 
 bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV)

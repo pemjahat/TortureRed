@@ -73,6 +73,8 @@ struct FrameConstants
     uint32_t enableIndirectSpecular;
     uint32_t useRTXDI; // Kept but maybe unused
     uint32_t numLights;
+    uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
+    uint32_t lightLUTBufferIndex; // Index into the light LUT buffer for O(1) importance sampling
 };
 
 struct LightConstants
@@ -82,5 +84,6 @@ struct LightConstants
     DirectX::XMFLOAT4 color;
     DirectX::XMFLOAT4 direction;
     float intensity;
-    uint32_t padding[3];
+    float selectionPDF;
+    uint32_t padding[2];
 };

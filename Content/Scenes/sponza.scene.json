@@ -12,14 +12,6 @@
           "direction": [0.0, -0.9, 0.2]
         },
         {
-          "name": "Light",
-          "type": "PointLight",
-          "color": [1.0, 1.0, 1.0],
-          "intensity": 54.35,
-          "translation": [4.0762, 5.9039, -1.0055],
-          "direction": [-0.5664, -0.7947, 0.2184]
-        },
-        {
           "name": "spotLight1",
           "type": "SpotLight",
           "color": [1.0, 1.0, 1.0],

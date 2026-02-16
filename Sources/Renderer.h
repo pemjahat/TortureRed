@@ -111,6 +111,11 @@ public:
     void UpdateLightsBuffer(const std::vector<LightConstants>& lights);
     D3D12_GPU_VIRTUAL_ADDRESS GetLightsBufferGPUAddress() const;
     UINT GetLightsDescriptorIndex() const { return (UINT)m_LightsBuffer.srvIndex; }
+    
+    // Light LUT buffer for O(1) importance sampling
+    void CreateLightLUTBuffer();
+    void UpdateLightLUTBuffer(const std::vector<LightConstants>& lights);
+    UINT GetLightLUTDescriptorIndex() const { return (UINT)m_LightLUTBuffer.srvIndex; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -148,7 +153,9 @@ private:
     
     // Light Resources
     GPUBuffer m_LightsBuffer;
-    UINT m_MaxLights = 32;
+    GPUBuffer m_LightLUTBuffer; // LUT for O(1) importance sampling
+    static constexpr UINT LIGHT_LUT_RESOLUTION = 256;
+    UINT m_MaxLights = 256;
     
     // RTXDI SDK Pipeline States
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirTemporalPSO;

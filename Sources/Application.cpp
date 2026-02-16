@@ -68,6 +68,7 @@ void Application::Initialize()
 
     CHECK_BOOL(m_Renderer.Initialize(hwnd), "Renderer initialization failed");
     m_Renderer.CreateLightsBuffer();
+    m_Renderer.CreateLightLUTBuffer();
 
     // Set camera projection parameters
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
@@ -76,9 +77,10 @@ void Application::Initialize()
     float farZ = 1000.0f;
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
     
-    m_FrameConstants.enableRestir = 1;
+    m_FrameConstants.enableRestir = 0;
     m_FrameConstants.enableAvoidCaustics = 1;
     m_FrameConstants.enableIndirectSpecular = 0;
+    m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
 
     // Load Scene
     if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
@@ -299,6 +301,7 @@ void Application::Update(float deltaTime)
     m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
     m_FrameConstants.exposure = m_Exposure;
     m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
+    m_FrameConstants.lightLUTBufferIndex = m_Renderer.GetLightLUTDescriptorIndex();
 
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
@@ -514,6 +517,15 @@ void Application::RenderImGui()
                 m_FrameConstants.useRTXDI = useRTXDI ? 1 : 0;
                 m_FrameConstants.frameIndex = 0;
             }
+            
+            // Light Sampling Mode
+            const char* samplingModes[] = { "Uniform", "Importance (CDF)", "All Lights (Brute Force)" };
+            int currentMode = (int)m_FrameConstants.lightSamplingMode;
+            if (ImGui::Combo("Indirect Light Sampling", &currentMode, samplingModes, IM_ARRAYSIZE(samplingModes)))
+            {
+                m_FrameConstants.lightSamplingMode = (uint32_t)currentMode;
+                m_FrameConstants.frameIndex = 0;
+            }
             ImGui::Unindent();
         }
     }
@@ -523,31 +535,89 @@ void Application::RenderImGui()
     }
 
     ImGui::Separator();
-    ImGui::Text("Direct Light");
+    ImGui::Text("Light Editor");
     
-    LightConstants& sun = m_Scene.GetLights()[0];
-
-    if (ImGui::DragFloat("Sun Intensity", &sun.intensity, 0.1f, 0.0f, 100.0f))
+    std::vector<LightConstants>& lights = m_Scene.GetLights();
+    if (!lights.empty())
     {
-        m_FrameConstants.frameIndex = 0; // Reset path tracer if intensity changes
+        std::vector<std::string> lightNames;
+        for (size_t i = 0; i < lights.size(); ++i) {
+            std::string type = (lights[i].direction.w < 0.5f) ? "Dir" : "Spot";
+            lightNames.push_back("Light " + std::to_string(i) + " (" + type + ")");
+        }
+
+        if (ImGui::BeginCombo("Select Light", lightNames[m_SelectedLightIndex].c_str()))
+        {
+            for (int i = 0; i < (int)lights.size(); ++i)
+            {
+                bool isSelected = (m_SelectedLightIndex == i);
+                if (ImGui::Selectable(lightNames[i].c_str(), isSelected))
+                {
+                    m_SelectedLightIndex = i;
+                }
+                if (isSelected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        LightConstants& selectedLight = lights[m_SelectedLightIndex];
+        bool changed = false;
+
+        if (ImGui::DragFloat("Intensity", &selectedLight.intensity, 0.1f, 0.0f, 1000.0f))
+        {
+            changed = true;
+        }
+
+        if (ImGui::ColorEdit3("Color", &selectedLight.color.x))
+        {
+            changed = true;
+        }
+
+        if (selectedLight.direction.w < 0.5f) // Directional
+        {
+            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
+            {
+                // Normalize direction
+                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
+                lightDir = DirectX::XMVector3Normalize(lightDir);
+                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
+                changed = true;
+            }
+        }
+        else // Point/Spot
+        {
+            if (ImGui::DragFloat3("Position", &selectedLight.position.x, 0.1f))
+            {
+                changed = true;
+            }
+            
+            // If it's a spot light (direction is used)
+            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
+            {
+                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
+                lightDir = DirectX::XMVector3Normalize(lightDir);
+                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            m_FrameConstants.frameIndex = 0; // Reset path tracer if light changes
+        }
     }
+    else
+    {
+        ImGui::Text("No lights in scene.");
+    }
+    
     if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, 0.0f, 10.0f))
     {
         // exposure doesn't require reset as it's just post-process
     }
-    if (ImGui::DragFloat3("Direction", &sun.direction.x, 0.01f, -1.0f, 1.0f))
-    {
-        m_FrameConstants.frameIndex = 0;
-    }
-    if (ImGui::ColorEdit3("Light Color", &sun.color.x))
-    {
-        m_FrameConstants.frameIndex = 0;
-    }
-    
-    // Normalize light direction
-    DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&sun.direction);
-    lightDir = DirectX::XMVector3Normalize(lightDir);
-    DirectX::XMStoreFloat4(&sun.direction, lightDir);
 
     ImGui::Separator();
 

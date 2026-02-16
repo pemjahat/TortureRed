@@ -22,6 +22,8 @@ struct FrameConstants {
     uint enableIndirectSpecular;
     uint useRTXDI;
     uint numLights;
+    uint lightSamplingMode; // 0=uniform, 1=importance sampling (indirect only)
+    uint lightLUTBufferIndex; // Index into light LUT buffer
 };
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {
@@ -38,7 +40,8 @@ struct LightConstants {
     float4 color;
     float4 direction;
     float intensity;
-    uint32_t padding[3];
+    float selectionPDF;
+    uint32_t padding[2];
 };
 
 struct RayPayload {

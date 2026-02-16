@@ -44,7 +44,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         bool isPathDiffuse = false;
 
         // --- Step 1: Direct Lighting for Primary Hit (Raster Surface) ---
-        accumulatedColor = GetDirectLighting(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, g_Scene, mainLight, g_Frame);
+        // Use multi-light function to evaluate all lights (directional + local lights)
+        accumulatedColor = GetDirectLightingMultiLights(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, 
+                                                        primaryMetallic, primaryRoughness, g_Scene, 
+                                                        g_Lights, g_Frame.numLights, g_Frame, false);
 
         // --- Step 2: Sample First Indirect Ray from Primary Hit ---
         float3 rayDir;
@@ -56,6 +59,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 rayPos = primaryHitPos + primaryNormal * 0.001f;
 
         // --- Step 3: Indirect Bounces ---
+        float next_pdf = firstPDF;
         for (int bounce = 1; bounce < 4; bounce++) {
             if (all(throughput <= 0.0f)) break;
 
@@ -102,13 +106,19 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 roughness_hit = max(0.15f, roughness_hit);
                 float3 V_hit = -ray.Direction;
 
-                // NEE
-                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse) * throughput;
+                // NEE - Stochastic light sampling for indirect bounces (with MIS)
+                // Generate fresh random sample for light selection
+                float2 lightRngSample = float2(next_float(rng), next_float(rng));
+                
+                float3 ndl = GetDirectLightingHybrid(hitPos, worldNormal, V_hit, albedo_hit.rgb,
+                                                    metallic_hit, roughness_hit, g_Scene,
+                                                    g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse,
+                                                    lightRngSample, next_pdf, true) * throughput;
+                indirectRadianceAccum += ndl;
 
                 // Sample next bounce
                 float3 nextDir;
                 float3 nextThroughput;
-                float next_pdf;
                 SampleIndirectRay(worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
                 throughput *= nextThroughput;
