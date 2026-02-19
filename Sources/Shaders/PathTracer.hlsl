@@ -113,7 +113,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 ndl = GetDirectLightingHybrid(hitPos, worldNormal, V_hit, albedo_hit.rgb,
                                                     metallic_hit, roughness_hit, g_Scene,
                                                     g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse,
-                                                    lightRngSample, next_pdf, true) * throughput;
+                                                    lightRngSample, true) * throughput;
                 indirectRadianceAccum += ndl;
 
                 // Sample next bounce

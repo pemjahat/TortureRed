@@ -309,6 +309,27 @@ LightSampleResult SampleSingleLight(
 
 // Legacy CDF functions removed - LUT is O(1) and sufficient for max 256 lights
 
+// Sample a single light uniformly - each light has equal probability 1/numLights
+LightSampleResult SampleSingleLightUniform(
+    float rngSample,                        // Random value in [0, 1)
+    StructuredBuffer<LightConstants> lights,
+    uint numLights) {
+    
+    LightSampleResult result;
+    
+    if (numLights <= 1) {
+        result.lightIndex = 0;
+        result.pdf = 1.0f;
+    } else {
+        uint idx = min(uint(rngSample * float(numLights)), numLights - 1);
+        result.lightIndex = idx;
+        result.pdf = 1.0f / float(numLights);
+    }
+    
+    result.light = lights[result.lightIndex];
+    return result;
+}
+
 // Evaluate lighting from a sampled light with proper weighting
 // For indirect bounces: uses stochastic light sampling + MIS with BSDF
 float3 EvaluateSingleLightWithMIS(
@@ -363,7 +384,10 @@ float BSDFPDFToLightPDF(float bsdfPDF, float3 P, float3 sampleDir, float3 lightP
     return bsdfPDF * cosTheta / max(distSq, 0.0001f);
 }
 
-// Stochastic NEE for indirect bounces with MIS (LUT-based)
+// Stochastic NEE for indirect bounces with MIS
+// Branches based on frame.lightSamplingMode:
+//   0 = Uniform: each light selected with equal probability (1/numLights)
+//   1 = Importance (CDF): LUT-based selection weighted by intensity
 float3 GetDirectLightingStochastic(
     float3 P, float3 N, float3 V,
     float3 albedo, float metallic, float roughness,
@@ -372,27 +396,33 @@ float3 GetDirectLightingStochastic(
     uint numLights,
     FrameConstants frame,
     float2 rngSample,
-    float bsdfPDF,
     bool isDiffuse) {
     
-    if (numLights == 0 || frame.lightLUTBufferIndex == 0xFFFFFFFF) return 0.0f;
+    if (numLights == 0) return 0.0f;
     
-    // Sample a single light using LUT (O(1))
-    LightSampleResult lightSample = SampleSingleLight(
-        rngSample, lights, numLights, frame);
+    LightSampleResult lightSample;
     
-    // Evaluate the sampled light
-    float3 lightContribution = EvaluateSingleLightWithMIS(
+    if (frame.lightSamplingMode == 0) {
+        // Uniform sampling: pick any light with equal probability
+        lightSample = SampleSingleLightUniform(rngSample.x, lights, numLights);
+    } else {
+        // Importance (CDF) sampling: LUT-based, weighted by intensity
+        // Requires a valid LUT buffer
+        if (frame.lightLUTBufferIndex == 0xFFFFFFFF) return 0.0f;
+        lightSample = SampleSingleLight(rngSample, lights, numLights, frame);
+    }
+    
+    // Evaluate the sampled light (result is already divided by PDF)
+    return EvaluateSingleLightWithMIS(
         P, N, V, albedo, metallic, roughness,
         lightSample, scene, frame, isDiffuse);
-    
-    // Apply MIS balance heuristic
-    float misWeight = lightSample.pdf / (lightSample.pdf + bsdfPDF + 0.0001f);
-    
-    return lightContribution * misWeight;
 }
 
-// Hybrid: All lights for primary hits, stochastic for indirect bounces
+// Hybrid: Primary hits always evaluate all lights.
+// Indirect bounces dispatch based on frame.lightSamplingMode:
+//   0 = Uniform     : stochastic, equal probability per light
+//   1 = Importance  : stochastic, LUT-weighted by intensity
+//   2 = Brute Force : evaluate all lights (no stochastic approximation)
 float3 GetDirectLightingHybrid(
     float3 P, float3 N, float3 V,
     float3 albedo, float metallic, float roughness,
@@ -401,17 +431,16 @@ float3 GetDirectLightingHybrid(
     uint numLights,
     FrameConstants frame,
     bool isDiffuse,
-    float2 rngSample,    // Only used for indirect
-    float bsdfPDF,       // Only used for indirect
+    float2 rngSample,    // Only used for stochastic modes
     bool isIndirect) {   // true for indirect bounces
     
-    if (isIndirect && numLights > 1) {
-        // Stochastic light sampling for indirect bounces using LUT
+    if (isIndirect && numLights > 1 && frame.lightSamplingMode != 2) {
+        // Stochastic light sampling (Uniform or Importance CDF)
         return GetDirectLightingStochastic(P, N, V, albedo, metallic, roughness,
                                           scene, lights, numLights, frame,
-                                          rngSample, bsdfPDF, isDiffuse);
+                                          rngSample, isDiffuse);
     } else {
-        // Full evaluation for primary hit (or fallback)
+        // Brute force: evaluate every light (primary hit or mode 2)
         return GetDirectLightingMultiLights(P, N, V, albedo, metallic, roughness,
                                            scene, lights, numLights, frame, isDiffuse);
     }
