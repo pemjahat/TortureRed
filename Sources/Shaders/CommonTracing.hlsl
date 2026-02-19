@@ -418,6 +418,125 @@ float3 GetDirectLightingStochastic(
         lightSample, scene, frame, isDiffuse);
 }
 
+// ============================================================================
+// RIS (Resampled Importance Sampling) for indirect bounce light selection.
+// Selects 1 winning light from M candidates using an unshadowed BSDF-weighted
+// target PDF. Only 1 shadow ray is fired (for the winner), giving O(1) cost.
+// ============================================================================
+
+// Unshadowed target PDF: p̂(l) = luminance( BSDF * NdotL * L_color * intensity * attenuation )
+float RIS_TargetPDF(
+    float3 P, float3 N, float3 V,
+    float3 albedo, float metallic, float roughness,
+    LightConstants light)
+{
+    float3 L;
+    float  attenuation = 1.0f;
+    float  spotEffect  = 1.0f;
+
+    if (light.direction.w < 0.5f)
+    {
+        // Directional
+        L = -normalize(light.direction.xyz);
+    }
+    else
+    {
+        // Point / Spot
+        float3 diff = light.position.xyz - P;
+        float  dist = length(diff);
+        if (dist < 0.0001f) return 0.0f;
+        L           = diff / dist;
+        attenuation = 1.0f / (1.0f + 0.1f * dist + 0.01f * dist * dist);
+        float cosAngle = dot(-L, normalize(light.direction.xyz));
+        float cosOuter = light.direction.w;
+        float cosInner = asfloat(light.padding[0]);
+        spotEffect = smoothstep(cosOuter, cosInner, cosAngle);
+    }
+
+    float NdotL = dot(N, L);
+    if (NdotL <= 0.0f) return 0.0f;
+
+    float3 diffBRDF, specBRDF;
+    EvaluateBSDF(N, V, L, albedo, metallic, roughness, diffBRDF, specBRDF);
+    return max(0.0f, Luminance((diffBRDF + specBRDF) * NdotL
+                               * light.color.rgb * light.intensity
+                               * attenuation * spotEffect));
+}
+
+// RIS light selection: M candidates → 1 winner → 1 shadow ray.
+// Returns an unbiased estimate of direct lighting summed over all local lights.
+// numCandidates: tune 4 for first indirect bounce, 1 for deeper bounces.
+float3 GetDirectLightingRIS(
+    float3 P, float3 N, float3 V,
+    float3 albedo, float metallic, float roughness,
+    RaytracingAccelerationStructure scene,
+    StructuredBuffer<LightConstants> lights,
+    uint numLights,
+    FrameConstants frame,
+    inout RNG rng,
+    bool isDiffuse,
+    uint numCandidates = 4)
+{
+    if (numLights == 0) return 0.0f;
+
+    // --- Phase 1: weighted reservoir sampling over M candidates (no shadow) ---
+    uint  selectedIndex = 0;
+    float weightSum     = 0.0f;
+
+    for (uint i = 0; i < numCandidates; ++i)
+    {
+        float2 u = float2(next_float(rng), next_float(rng));
+        LightSampleResult lsr = SampleSingleLight(u, lights, numLights, frame);
+
+        float targetPDF = RIS_TargetPDF(P, N, V, albedo, metallic, roughness, lsr.light);
+        float risWeight = targetPDF / max(lsr.pdf, 1e-6f);
+
+        weightSum += risWeight;
+        if (next_float(rng) < (risWeight / max(weightSum, 1e-6f)))
+            selectedIndex = lsr.lightIndex;
+    }
+
+    if (weightSum <= 0.0f) return 0.0f;
+
+    // --- Phase 2: evaluate winner with 1 shadow ray ---
+    LightConstants winner = lights[selectedIndex];
+    float winnerTarget = RIS_TargetPDF(P, N, V, albedo, metallic, roughness, winner);
+    if (winnerTarget <= 0.0f) return 0.0f;
+
+    float3 L_winner = 0.0f;
+    if (winner.direction.w < 0.5f)
+    {
+        // Directional
+        float3 L = -normalize(winner.direction.xyz);
+        float NdotL = max(0.0001f, dot(N, L));
+        RayDesc sr;
+        sr.Origin = P + N * 0.001f;
+        sr.Direction = L;
+        sr.TMin = 0.001f;
+        sr.TMax = 10000.0f;
+        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
+        sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, sr);
+        sq.Proceed();
+        if (sq.CommittedStatus() == COMMITTED_NOTHING)
+        {
+            float3 d, s;
+            EvaluateBSDF(N, V, L, albedo, metallic, roughness, d, s);
+            if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) s = 0;
+            L_winner = (d + s) * winner.color.rgb * winner.intensity * NdotL;
+        }
+    }
+    else
+    {
+        // Point / Spot — EvaluateLocalLight already traces the shadow ray
+        L_winner = EvaluateLocalLight(P, N, V, albedo, metallic, roughness,
+                                      winner, scene, frame, isDiffuse);
+    }
+
+    // Unbiased RIS contribution weight: W = weightSum / (M * p̂(x*))
+    float W = weightSum / (float(numCandidates) * winnerTarget);
+    return L_winner * W;
+}
+
 // Hybrid: Primary hits always evaluate all lights.
 // Indirect bounces dispatch based on frame.lightSamplingMode:
 //   0 = Uniform     : stochastic, equal probability per light

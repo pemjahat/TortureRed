@@ -31,8 +31,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    LightConstants mainLight = g_Lights[0];
-
     RAB_RandomSamplerState rng = RAB_InitRandomSampler(launchIndex, g_Frame.frameIndex);
     RAB_Surface surface = RAB_GetGBufferSurface(launchIndex, false);
 
@@ -103,9 +101,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
             float3 V_hit = -ray.Direction;
 
-            // Direct lighting at hit point
-            float3 L_direct = GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse);
-            
+            // RIS light selection: 4 candidates for first bounce, 1 for deeper bounces.
+            // Only 1 shadow ray fired for the winning light — O(1) cost per secondary hit.
+            uint risCandidates = (bounce == 1) ? 4 : 1;
+            float3 L_direct = GetDirectLightingRIS(
+                hitPos, worldNormal, V_hit,
+                albedo_hit.rgb, metallic_hit, roughness_hit,
+                g_Scene, g_Lights, g_Frame.numLights,
+                g_Frame, rng, isPathDiffuse, risCandidates);
+
             if (bounce == 1) {
                 pos_secondary = hitPos;
                 norm_secondary = worldNormal;
