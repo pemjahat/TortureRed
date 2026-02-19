@@ -19,8 +19,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    LightConstants mainLight = g_Lights[0];
-
     // --- Read Reservoir for Primary Surface Properties ---
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
     Reservoir res = g_ReservoirFinal[pixelIdx];
@@ -42,8 +40,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         
         float3 V = normalize(g_Frame.cameraPosition.xyz - worldPos);
 
-        // --- Direct Lighting (Re-evaluating NEE since it's no longer in reservoir) ---
-        accumulatedColor += GetDirectLighting(worldPos, N, V, albedo, metallic, roughness, g_Scene, mainLight, g_Frame);
+        // --- Direct Lighting: brute force all lights on primary surface ---
+        accumulatedColor += GetDirectLightingMultiLights(
+            worldPos, N, V, albedo, metallic, roughness,
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false);
 
         // --- Indirect Lighting from Reservoir ---
         if (res.w_sum > 0) {

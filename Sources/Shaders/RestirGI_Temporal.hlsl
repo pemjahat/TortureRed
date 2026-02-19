@@ -32,8 +32,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
-    LightConstants mainLight = g_Lights[0];
-
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
@@ -121,8 +119,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     indirectHitPos = hitPos; indirectHitNormal = worldNormal; hasIndirectHit = true;
                 }
 
-                // NEE
-                indirectRadianceAccum += GetDirectLighting(hitPos, worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, g_Scene, mainLight, g_Frame, isPathDiffuse) * throughput;
+                // NEE: RIS light sampling — 4 candidates on first bounce, 1 on deeper bounces.
+                // Only 1 shadow ray fired for the winner; O(1) cost regardless of light count.
+                uint risCandidates = (bounce == 1) ? 4 : 1;
+                indirectRadianceAccum += GetDirectLightingRIS(
+                    hitPos, worldNormal, V_hit,
+                    albedo_hit.rgb, metallic_hit, roughness_hit,
+                    g_Scene, g_Lights, g_Frame.numLights,
+                    g_Frame, rng, isPathDiffuse, risCandidates) * throughput;
 
                 // Path continuation
                 float3 nextDir;
