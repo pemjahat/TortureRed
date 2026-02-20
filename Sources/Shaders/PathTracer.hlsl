@@ -43,11 +43,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 V = normalize(g_Frame.cameraPosition.xyz - primaryHitPos);
         bool isPathDiffuse = false;
 
-        // --- Step 1: Direct Lighting for Primary Hit (Raster Surface) ---
-        // Use multi-light function to evaluate all lights (directional + local lights)
-        accumulatedColor = GetDirectLightingMultiLights(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb, 
-                                                        primaryMetallic, primaryRoughness, g_Scene, 
-                                                        g_Lights, g_Frame.numLights, g_Frame, false);
+        // --- Step 1: Direct Lighting for Primary Hit ---
+        // Dispatch based on lightSamplingMode: 0=Uniform, 1=ImportancePDF, 2=BruteForce
+        accumulatedColor = GetDirectLightingHybrid(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb,
+                                                   primaryMetallic, primaryRoughness, g_Scene,
+                                                   g_Lights, g_Frame.numLights, g_Frame, false,
+                                                   float2(next_float(rng), next_float(rng)));
 
         // --- Step 2: Sample First Indirect Ray from Primary Hit ---
         float3 rayDir;
@@ -113,7 +114,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 ndl = GetDirectLightingHybrid(hitPos, worldNormal, V_hit, albedo_hit.rgb,
                                                     metallic_hit, roughness_hit, g_Scene,
                                                     g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse,
-                                                    lightRngSample, true) * throughput;
+                                                    lightRngSample) * throughput;
                 indirectRadianceAccum += ndl;
 
                 // Sample next bounce

@@ -23,6 +23,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
     Reservoir res = g_ReservoirFinal[pixelIdx];
 
+    RNG rng;
+    seed_rng(rng, launchIndex, g_Frame.frameIndex);
+
     float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
     float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
 
@@ -40,10 +43,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         
         float3 V = normalize(g_Frame.cameraPosition.xyz - worldPos);
 
-        // --- Direct Lighting: brute force all lights on primary surface ---
-        accumulatedColor += GetDirectLightingMultiLights(
+        // --- Direct Lighting: dispatch based on lightSamplingMode ---
+        // 0=Uniform (1 shadow ray), 1=ImportancePDF (1 shadow ray), 2=BruteForce (all lights)
+        accumulatedColor += GetDirectLightingHybrid(
             worldPos, N, V, albedo, metallic, roughness,
-            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false);
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false,
+            float2(next_float(rng), next_float(rng)));
 
         // --- Indirect Lighting from Reservoir ---
         if (res.w_sum > 0) {

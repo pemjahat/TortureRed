@@ -537,11 +537,11 @@ float3 GetDirectLightingRIS(
     return L_winner * W;
 }
 
-// Hybrid: Primary hits always evaluate all lights.
-// Indirect bounces dispatch based on frame.lightSamplingMode:
-//   0 = Uniform     : stochastic, equal probability per light
-//   1 = Importance  : stochastic, LUT-weighted by intensity
-//   2 = Brute Force : evaluate all lights (no stochastic approximation)
+// Direct lighting dispatch based on frame.lightSamplingMode.
+// Applied uniformly to both primary and indirect hits:
+//   0 = Uniform     : 1 shadow ray,  equal probability per light
+//   1 = ImportancePDF: 1 shadow ray,  LUT-weighted by light intensity
+//   2 = Brute Force : N shadow rays, evaluates every light
 float3 GetDirectLightingHybrid(
     float3 P, float3 N, float3 V,
     float3 albedo, float metallic, float roughness,
@@ -550,10 +550,9 @@ float3 GetDirectLightingHybrid(
     uint numLights,
     FrameConstants frame,
     bool isDiffuse,
-    float2 rngSample,    // Only used for stochastic modes
-    bool isIndirect) {   // true for indirect bounces
+    float2 rngSample) { // Only used for stochastic modes (mode 0 or 1)) {
     
-    if (isIndirect && numLights > 1 && frame.lightSamplingMode != 2) {
+    if (numLights > 1 && frame.lightSamplingMode != 2) {
         // Stochastic light sampling (Uniform or Importance CDF)
         return GetDirectLightingStochastic(P, N, V, albedo, metallic, roughness,
                                           scene, lights, numLights, frame,

@@ -32,16 +32,21 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     RTXDI_GIReservoir res = RTXDI_LoadGIReservoir(reservoirParams, launchIndex, 0);
 
+    RNG rng;
+    seed_rng(rng, launchIndex, g_Frame.frameIndex);
+
     float3 accumulatedColor = 0;
 
     if (!surface.valid) {
         accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
     } else {
-        // --- Direct Lighting: brute force all lights on primary surface ---
-        accumulatedColor += GetDirectLightingMultiLights(
+        // --- Direct Lighting: dispatch based on lightSamplingMode ---
+        // 0=Uniform (1 shadow ray), 1=ImportancePDF (1 shadow ray), 2=BruteForce (all lights)
+        accumulatedColor += GetDirectLightingHybrid(
             surface.worldPos, surface.normal, surface.viewDir,
             surface.albedo, surface.metallic, surface.roughness,
-            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false);
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false,
+            float2(next_float(rng), next_float(rng)));
 
         // --- Indirect Lighting from Reservoir ---
         if (res.weightSum > 0) {
