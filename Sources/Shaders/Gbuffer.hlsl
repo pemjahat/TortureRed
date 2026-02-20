@@ -47,10 +47,10 @@ GBufferOutput PSMain(PSInput input) {
     if (material.baseColorTextureIndex >= 0) {
         float4 sampled = textures[material.baseColorTextureIndex].Sample(pointSampler, input.texCoord);
         albedo *= sampled;
-        
-        // Simple alpha test for Masked geometry
-        // Note: For a more robust implementation, only discard for AlphaMode::Mask
-        if (sampled.a < 0.5f) discard;
+    }
+    
+    if (material.alphaMode == 1 && albedo.a < material.alphaCutoff) {
+        discard;
     }
     
     output.albedo = albedo;

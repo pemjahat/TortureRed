@@ -13,15 +13,12 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-Texture2D g_Textures[] : register(t0, space0);
 
 RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);  // Temporal output (ping-pong with Previous)
 RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3); // Previous frame's temporal output
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-
-SamplerState g_LinearSampler : register(s0);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -80,9 +77,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             ray.Origin = rayPos; ray.Direction = rayDir;
             ray.TMin = 0.001f; ray.TMax = 10000.0f;
 
-            RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+            RayQuery<RAY_FLAG_NONE> q;
             q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-            q.Proceed();
+            while (q.Proceed()) {
+                PROCESS_ALPHA_MASK(q);
+            }
 
             if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
                 uint instanceIdx = q.CommittedInstanceID();

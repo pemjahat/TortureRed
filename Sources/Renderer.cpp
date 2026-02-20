@@ -775,7 +775,15 @@ void Renderer::BuildAccelerationStructures(Model* model)
         info.geom.Triangles.IndexBuffer = model->GetGlobalIndexBufferAddress() + (prim->globalIndexOffset * sizeof(uint32_t));
         info.geom.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         info.geom.Triangles.IndexCount = static_cast<UINT>(prim->indices.size());
-        info.geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        
+        if (prim->alphaMode == AlphaMode::Mask || prim->alphaMode == AlphaMode::Blend)
+        {
+            info.geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        }
+        else
+        {
+            info.geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        }
 
         info.inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         info.inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;

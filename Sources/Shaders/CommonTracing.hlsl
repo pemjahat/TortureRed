@@ -5,12 +5,42 @@
 #include "PBR.hlsl"
 
 // Global Raytracing Resources (Space 1)
+Texture2D g_Textures[] : register(t0, space0);
 RaytracingAccelerationStructure g_Scene : register(t2, space1);
 StructuredBuffer<DrawNodeData> g_DrawNodeBuffer : register(t1, space1);
 StructuredBuffer<MaterialConstants> g_Materials : register(t0, space1);
 StructuredBuffer<GLTFVertex> g_GlobalVertices : register(t4, space1);
 StructuredBuffer<uint> g_GlobalIndices : register(t3, space1);
 ByteAddressBuffer g_LightLUT : register(t1, space2);
+
+SamplerState g_LinearSampler : register(s0);
+
+#define PROCESS_ALPHA_MASK(q) \
+    if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) { \
+        uint instanceIdx = q.CandidateInstanceID(); \
+        uint triIdx = q.CandidatePrimitiveIndex(); \
+        float2 barys = q.CandidateTriangleBarycentrics(); \
+        DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx]; \
+        MaterialConstants mat = g_Materials[nodeData.materialID]; \
+        if (mat.alphaMode == 1) { \
+            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0]; \
+            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1]; \
+            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2]; \
+            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0]; \
+            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1]; \
+            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2]; \
+            float2 hitUv = v0.texCoord * (1.0f - barys.x - barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y; \
+            float alpha = mat.baseColorFactor.a; \
+            if (mat.baseColorTextureIndex >= 0) { \
+                alpha *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0).a; \
+            } \
+            if (alpha >= mat.alphaCutoff) { \
+                q.CommitNonOpaqueTriangleHit(); \
+            } \
+        } else { \
+            q.CommitNonOpaqueTriangleHit(); \
+        } \
+    }
 
 float Luminance(float3 c) {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
@@ -126,9 +156,11 @@ float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float meta
         shadowRay.Origin = P + N * 0.001f;
         shadowRay.Direction = L_light;
         shadowRay.TMin = 0.001f; shadowRay.TMax = 10000.0f;
-        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-        sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-        sq.Proceed();
+        RayQuery<RAY_FLAG_NONE> sq;
+        sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
+        while (sq.Proceed()) {
+            PROCESS_ALPHA_MASK(sq);
+        }
 
         if (sq.CommittedStatus() == COMMITTED_NOTHING) {
             float3 d, s;
@@ -168,9 +200,11 @@ float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float met
     shadowRay.TMin = 0.001f;
     shadowRay.TMax = dist - 0.002f;
     
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-    sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-    sq.Proceed();
+    RayQuery<RAY_FLAG_NONE> sq;
+    sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
+    while (sq.Proceed()) {
+        PROCESS_ALPHA_MASK(sq);
+    }
     
     if (sq.CommittedStatus() != COMMITTED_NOTHING) return 0.0;
     
@@ -193,7 +227,7 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
         LightConstants light = lights[i];
         
         // Determine light type: position.w == 0 for directional, > 0.5 for point/spot
-        if (light.position.w < 0.5f) {
+        if (light.direction.w < 0.5f) {
             // Directional light - use existing single light logic
             // But we need to handle it carefully since GetDirectLighting expects a single light
             float3 L_light = -normalize(light.direction.xyz);
@@ -204,9 +238,11 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
                 shadowRay.Direction = L_light;
                 shadowRay.TMin = 0.001f; 
                 shadowRay.TMax = 10000.0f;
-                RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-                sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-                sq.Proceed();
+                RayQuery<RAY_FLAG_NONE> sq;
+                sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
+                while (sq.Proceed()) {
+                    PROCESS_ALPHA_MASK(sq);
+                }
 
                 if (sq.CommittedStatus() == COMMITTED_NOTHING) {
                     float3 d, s;
@@ -235,9 +271,11 @@ bool CheckVisibility(float3 P, float3 N, float3 samplePos) {
     ray.TMin = 0.001f;
     ray.TMax = dist - 0.002f;
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> q;
-    q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-    q.Proceed();
+    RayQuery<RAY_FLAG_NONE> q;
+    q.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+    while (q.Proceed()) {
+        PROCESS_ALPHA_MASK(q);
+    }
 
     return q.CommittedStatus() == COMMITTED_NOTHING;
 }
@@ -344,7 +382,7 @@ float3 EvaluateSingleLightWithMIS(
     float3 result = 0.0f;
     
     // Directional lights (position.w < 0.5) are handled specially
-    if (light.position.w < 0.5f) {
+    if (light.direction.w < 0.5f) {
         float3 L_light = -normalize(light.direction.xyz);
         float ndotl = max(0.0001f, dot(N, L_light));
         
@@ -355,10 +393,12 @@ float3 EvaluateSingleLightWithMIS(
             shadowRay.TMin = 0.001f;
             shadowRay.TMax = 10000.0f;
             
-            RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-            sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-            sq.Proceed();
-            
+            RayQuery<RAY_FLAG_NONE> sq;
+            sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
+            while (sq.Proceed()) {
+                PROCESS_ALPHA_MASK(sq);
+            }
+
             if (sq.CommittedStatus() == COMMITTED_NOTHING) {
                 float3 d, s;
                 EvaluateBSDF(N, V, L_light, albedo, metallic, roughness, d, s);
@@ -514,9 +554,11 @@ float3 GetDirectLightingRIS(
         sr.Direction = L;
         sr.TMin = 0.001f;
         sr.TMax = 10000.0f;
-        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> sq;
-        sq.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, sr);
-        sq.Proceed();
+        RayQuery<RAY_FLAG_NONE> sq;
+        sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, sr);
+        while (sq.Proceed()) {
+            PROCESS_ALPHA_MASK(sq);
+        }
         if (sq.CommittedStatus() == COMMITTED_NOTHING)
         {
             float3 d, s;

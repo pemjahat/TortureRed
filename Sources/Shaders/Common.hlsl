@@ -61,7 +61,8 @@ struct MaterialConstants {
     int baseColorTextureIndex;
     int normalTextureIndex;
     int metallicRoughnessTextureIndex;
-    uint padding[1];
+    int alphaMode;
+    float alphaCutoff;
 };
 
 struct DrawNodeData {

@@ -6,9 +6,6 @@ RWStructuredBuffer<Reservoir> g_ReservoirTemporalInput : register(u3); // Tempor
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 
-Texture2D g_Textures[] : register(t0, space0);
-SamplerState g_LinearSampler : register(s0);
-
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {

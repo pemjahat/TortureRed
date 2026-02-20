@@ -3,7 +3,6 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-Texture2D g_Textures[] : register(t0, space0);
 
 RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
 RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirHistory : register(u3);
@@ -11,7 +10,6 @@ Buffer<float2> g_NeighborOffsets : register(t5, space1);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_ALLOWED_BIAS_CORRECTION RTXDI_BIAS_CORRECTION_BASIC
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirHistory
@@ -66,9 +64,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         ray.Origin = rayPos; ray.Direction = rayDir;
         ray.TMin = 0.001f; ray.TMax = 10000.0f;
 
-        RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+        RayQuery<RAY_FLAG_NONE> q;
         q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-        q.Proceed();
+        while (q.Proceed()) {
+            PROCESS_ALPHA_MASK(q);
+        }
 
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
             uint instanceIdx = q.CommittedInstanceID();

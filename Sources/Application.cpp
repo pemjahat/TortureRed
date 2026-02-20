@@ -420,6 +420,12 @@ void Application::Render()
             // Transition backbuffer to RTV
             m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
 
+            // Need this binding for shadow ray in pixel shader
+            cmdList->SetGraphicsRootShaderResourceView(1, m_Model.GetMaterialBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
+
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 

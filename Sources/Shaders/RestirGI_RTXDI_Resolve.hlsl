@@ -3,12 +3,10 @@
 
 RWTexture2D<float4> g_AccumulationBuffer : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
-Texture2D g_Textures[] : register(t0, space0);
 RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-SamplerState g_LinearSampler : register(s0);
 
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirBuffer
 

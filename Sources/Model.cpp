@@ -448,6 +448,15 @@ void Model::LoadMaterials()
         mc.baseColorTextureIndex = -1;
         mc.normalTextureIndex = -1;
         mc.metallicRoughnessTextureIndex = -1;
+        mc.alphaMode = 0; // Opaque
+        mc.alphaCutoff = 0.5f;
+
+        if (material->alpha_mode == cgltf_alpha_mode_mask)
+            mc.alphaMode = 1;
+        else if (material->alpha_mode == cgltf_alpha_mode_blend)
+            mc.alphaMode = 2;
+
+        mc.alphaCutoff = material->alpha_cutoff;
 
         if (material->has_pbr_metallic_roughness)
         {
@@ -509,6 +518,8 @@ void Model::LoadMaterials()
         mc.baseColorTextureIndex = -1;
         mc.normalTextureIndex = -1;
         mc.metallicRoughnessTextureIndex = -1;
+        mc.alphaMode = 0;
+        mc.alphaCutoff = 0.5f;
         m_MaterialConstants.push_back(mc);
     }
 }

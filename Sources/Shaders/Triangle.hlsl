@@ -26,7 +26,6 @@ ConstantBuffer<NodeData> NodeCB : register(b2);
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
 
-
 // Textures
 Texture2D textures[] : register(t0);
 SamplerState samplerState : register(s0);
@@ -60,6 +59,10 @@ PSOutput PSMain(PSInput input)
     {
         albedo *= textures[material.baseColorTextureIndex].Sample(samplerState, input.texCoord);
     }    
+
+    if (material.alphaMode == 1 && albedo.a < material.alphaCutoff) {
+        discard;
+    }
 
     // Apply lighting to baseColorFactor
     float lighting = dot(input.normal, normalize(float3(1.0f, 1.0f, 1.0f))) * 0.5f + 0.5f;

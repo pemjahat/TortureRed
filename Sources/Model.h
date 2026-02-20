@@ -15,7 +15,8 @@ struct MaterialConstants
     int baseColorTextureIndex;
     int normalTextureIndex;
     int metallicRoughnessTextureIndex;
-    uint32_t padding[1]; // Padding to maintain 16-byte alignment if needed, or just for future-proofing
+    int alphaMode;
+    float alphaCutoff;
 };
 
 struct DrawNodeData

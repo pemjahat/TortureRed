@@ -30,17 +30,13 @@ VSOutput VSMain(uint vertexID : SV_VertexID)
     return output;
 }
 
-Texture2D textures[] : register(t0, space0);
-
-SamplerState pointSampler : register(s0);
-
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    float depth = textures[FrameCB.depthIndex].Sample(pointSampler, input.uv).r;
-    float3 normal = textures[FrameCB.normalIndex].Sample(pointSampler, input.uv).rgb * 2.0f - 1.0f;
+    float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.uv).r;
+    float3 normal = g_Textures[FrameCB.normalIndex].Sample(g_LinearSampler, input.uv).rgb * 2.0f - 1.0f;
     
     // Early exit for sky pixels
     if (depth == 0.0f) {
@@ -69,9 +65,11 @@ float4 PSMain(VSOutput input) : SV_Target
         shadowRay.TMin = 0.001f;
         shadowRay.TMax = 10000.0f;  // Large value for directional light
         
-        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> shadowQuery;
-        shadowQuery.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, shadowRay);
-        shadowQuery.Proceed();
+        RayQuery<RAY_FLAG_NONE> shadowQuery;
+        shadowQuery.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
+        while (shadowQuery.Proceed()) {
+            PROCESS_ALPHA_MASK(shadowQuery);
+        }
         
         // Check if ray hit anything (shadowed) or missed (lit)
         shadowFactor = (shadowQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
