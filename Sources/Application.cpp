@@ -602,6 +602,49 @@ void Application::RenderImGui()
                 DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
                 changed = true;
             }
+
+            // Draw wireframe sphere around selected light
+            ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+            
+            auto Project = [&](const DirectX::XMVECTOR& pos3D) -> ImVec2 {
+                DirectX::XMVECTOR pos2D = DirectX::XMVector3Project(pos3D, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0.0f, 1.0f, m_Camera.GetProjMatrix(), m_Camera.GetViewMatrix(), DirectX::XMMatrixIdentity());
+                return ImVec2(DirectX::XMVectorGetX(pos2D), DirectX::XMVectorGetY(pos2D));
+            };
+
+            float radius = 0.5f;
+            ImU32 color = IM_COL32(255, 255, 0, 255); // Yellow
+            int segments = 16;
+
+            for (int plane = 0; plane < 3; ++plane)
+            {
+                ImVec2 prevPoint;
+                bool prevValid = false;
+                for (int i = 0; i <= segments; ++i)
+                {
+                    float angle = (float)i / segments * DirectX::XM_2PI;
+                    float c = cosf(angle) * radius;
+                    float s = sinf(angle) * radius;
+                    
+                    DirectX::XMVECTOR point3D;
+                    if (plane == 0) point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y + s, selectedLight.position.z, 1.0f);
+                    else if (plane == 1) point3D = DirectX::XMVectorSet(selectedLight.position.x, selectedLight.position.y + c, selectedLight.position.z + s, 1.0f);
+                    else point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y, selectedLight.position.z + s, 1.0f);
+                    
+                    DirectX::XMVECTOR viewPos = DirectX::XMVector3Transform(point3D, m_Camera.GetViewMatrix());
+                    bool valid = DirectX::XMVectorGetZ(viewPos) >= 0.1f;
+
+                    if (valid)
+                    {
+                        ImVec2 p = Project(point3D);
+                        if (i > 0 && prevValid)
+                        {
+                            drawList->AddLine(prevPoint, p, color, 2.0f);
+                        }
+                        prevPoint = p;
+                    }
+                    prevValid = valid;
+                }
+            }
         }
 
         if (changed)
