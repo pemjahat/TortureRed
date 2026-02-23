@@ -1073,7 +1073,7 @@ bool Renderer::CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UIN
     return true;
 }
 
-bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels)
+bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize)
 {
     D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
     
@@ -1082,7 +1082,7 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
     desc.Alignment = 0;
     desc.Width = width;
     desc.Height = height;
-    desc.DepthOrArraySize = 1;
+    desc.DepthOrArraySize = static_cast<UINT16>(arraySize);
     desc.MipLevels = static_cast<UINT16>(mipLevels);
     desc.Format = format;
     desc.SampleDesc.Count = 1;
@@ -1129,8 +1129,20 @@ bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_
             srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         else
             srvDesc.Format = format;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = mipLevels;
+        
+        if (arraySize > 1)
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            srvDesc.Texture2DArray.MipLevels = mipLevels;
+            srvDesc.Texture2DArray.ArraySize = arraySize;
+            srvDesc.Texture2DArray.FirstArraySlice = 0;
+            srvDesc.Texture2DArray.MostDetailedMip = 0;
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = mipLevels;
+        }
 
         m_Device->CreateShaderResourceView(texture.resource.Get(), &srvDesc, srvHandle);
     }

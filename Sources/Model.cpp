@@ -372,10 +372,49 @@ void Model::LoadTextures(Renderer* renderer)
 {
     // First load images
     m_GltfModel.images.resize(m_GltfModel.data->images_count);
-    for (size_t i = 0; i < m_GltfModel.data->images_count; ++i)
+    
+    // Now map textures to images
+    m_GltfModel.textures.resize(m_GltfModel.data->textures_count);
+    for (size_t i = 0; i < m_GltfModel.data->textures_count; ++i)
     {
-        cgltf_image* img = &m_GltfModel.data->images[i];
-        GLTFImage& gltfImg = m_GltfModel.images[i];
+        cgltf_texture* tex = &m_GltfModel.data->textures[i];
+        cgltf_image* img = tex->image;
+
+        // Check for MSFT_texture_dds extension
+        for (size_t j = 0; j < tex->extensions_count; ++j)
+        {
+            if (strcmp(tex->extensions[j].name, "MSFT_texture_dds") == 0)
+            {
+                // Parse the JSON string to find the "source" index
+                // The JSON looks like: {"source": 1}
+                const char* json = tex->extensions[j].data;
+                const char* sourceStr = strstr(json, "\"source\"");
+                if (sourceStr)
+                {
+                    const char* colon = strchr(sourceStr, ':');
+                    if (colon)
+                    {
+                        int sourceIndex = atoi(colon + 1);
+                        if (sourceIndex >= 0 && sourceIndex < m_GltfModel.data->images_count)
+                        {
+                            img = &m_GltfModel.data->images[sourceIndex];
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        if (!img)
+            continue;
+
+        size_t imageIndex = img - m_GltfModel.data->images;
+        GLTFImage& gltfImg = m_GltfModel.images[imageIndex];
+        m_GltfModel.textures[i].source = &gltfImg;
+
+        // If image is already loaded, skip
+        if (gltfImg.image != nullptr)
+            continue;
 
         DirectX::ScratchImage image;
         if (img->uri)
@@ -385,7 +424,27 @@ void Model::LoadTextures(Renderer* renderer)
             std::string dirStr(this->fileDirectory.begin(), this->fileDirectory.end());
             std::string fullPath = dirStr + uri;
             std::wstring wuri(fullPath.begin(), fullPath.end());
-            CHECK_HR(DirectX::LoadFromWICFile(wuri.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, image), "Load external image failed");
+
+            // Check if the file is a DDS texture
+            bool isDDS = false;
+            if (uri.length() >= 4)
+            {
+                std::string ext = uri.substr(uri.length() - 4);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".dds")
+                {
+                    isDDS = true;
+                }
+            }
+
+            if (isDDS)
+            {
+                CHECK_HR(DirectX::LoadFromDDSFile(wuri.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image), "Load external DDS image failed");
+            }
+            else
+            {
+                CHECK_HR(DirectX::LoadFromWICFile(wuri.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, image), "Load external image failed");
+            }
             gltfImg.image = new DirectX::ScratchImage(std::move(image));
         }
         else if (img->buffer_view)
@@ -394,7 +453,26 @@ void Model::LoadTextures(Renderer* renderer)
             cgltf_buffer_view* bv = img->buffer_view;
             unsigned char* data = (unsigned char*)bv->buffer->data + bv->offset;
             size_t size = bv->size;
-            CHECK_HR(DirectX::LoadFromWICMemory(data, size, DirectX::WIC_FLAGS_NONE, nullptr, image), "Load embedded image failed");
+
+            // Check for DDS magic number
+            bool isDDS = false;
+            if (size >= 4)
+            {
+                uint32_t magic = *reinterpret_cast<uint32_t*>(data);
+                if (magic == 0x20534444) // 'DDS '
+                {
+                    isDDS = true;
+                }
+            }
+
+            if (isDDS)
+            {
+                CHECK_HR(DirectX::LoadFromDDSMemory(data, size, DirectX::DDS_FLAGS_NONE, nullptr, image), "Load embedded DDS image failed");
+            }
+            else
+            {
+                CHECK_HR(DirectX::LoadFromWICMemory(data, size, DirectX::WIC_FLAGS_NONE, nullptr, image), "Load embedded image failed");
+            }
             gltfImg.image = new DirectX::ScratchImage(std::move(image));
         }
         else
@@ -412,7 +490,8 @@ void Model::LoadTextures(Renderer* renderer)
             D3D12_RESOURCE_FLAG_NONE,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr, // clearColor
-            UINT(metaData.mipLevels)))
+            UINT(metaData.mipLevels),
+            UINT(metaData.arraySize)))
         {
             std::cerr << "Failed to create texture resource for image: " << i << std::endl;
             continue;
