@@ -83,7 +83,7 @@ void Application::Initialize()
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -327,6 +327,7 @@ void Application::Render()
 
     auto cmdList = m_Renderer.GetCommandList();
     auto& gbuffer = m_Renderer.GetGBuffer();
+    const bool usePathTracingFrame = m_UsePathTracer && m_Renderer.IsRayTracingSupported();
 
     // Reset viewport and scissor for main pass
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
@@ -345,54 +346,7 @@ void Application::Render()
     // Transform frustum to world space (inverse view matrix)
     DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
     frustum.Transform(frustum, invView);
-
-    // 1. Depth Pre-Pass
-    if (m_EnableDepthPrePass)
-    {
-        m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
-
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
-        cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
-    }
-
-    // 2. G-Buffer Pass
-    {
-        // Transition G-Buffer targets to RTV state
-        m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-        float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
-        cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearColor, 0, nullptr);
-        cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearColor, 0, nullptr);
-
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[] = { gbuffer.albedo.rtvHandle, gbuffer.normal.rtvHandle, gbuffer.material.rtvHandle };
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-
-        // If pre-pass was skipped, we MUST clear the depth buffer here
-        if (!m_EnableDepthPrePass)
-        {
-            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        }
-
-        cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
-
-        if (m_EnableDepthPrePass)
-            cmdList->SetPipelineState(m_Renderer.GetGBufferPSO());
-        else
-            cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
-
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
-        m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
-    }
-
-    if (m_UsePathTracer && m_Renderer.IsRayTracingSupported())
+    if (usePathTracingFrame)
     {
         // Transition G-Buffer to NON_PIXEL_SHADER_RESOURCE for Path Tracer (Compute)
         m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -409,6 +363,49 @@ void Application::Render()
     }
     else
     {
+        // 1. Depth Pre-Pass
+        {
+            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
+
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+            cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
+            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+        }
+        // 2. G-Buffer Pass
+        {
+            // Transition G-Buffer targets to RTV state
+            m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearColor, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearColor, 0, nullptr);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[] = { gbuffer.albedo.rtvHandle, gbuffer.normal.rtvHandle, gbuffer.material.rtvHandle };
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+
+            // If pre-pass was skipped, we MUST clear the depth buffer here
+            if (!m_EnableDepthPrePass)
+            {
+                m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            }
+
+            cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
+
+            if (m_EnableDepthPrePass)
+                cmdList->SetPipelineState(m_Renderer.GetGBufferPSO());
+            else
+                cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
+
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
+            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
+        }
         // 3. Lighting Pass
         {
             // Transition G-Buffer targets to SRV state

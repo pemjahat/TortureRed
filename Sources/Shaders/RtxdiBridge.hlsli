@@ -97,30 +97,24 @@ RAB_Surface RAB_GetGBufferSurface(int2 pixelPosition, bool previousFrame) {
         return RAB_EmptySurface();
     }
 
-    float2 uv = ((float2)pixelPosition + 0.5f) / (float2)launchDims;
-    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
-    
-    if (depth >= 1.0f) return RAB_EmptySurface();
+    uint traceFrame = previousFrame ? ((g_Frame.frameIndex > 0) ? (g_Frame.frameIndex - 1) : 0) : g_Frame.frameIndex;
+    RNG rng;
+    seed_rng(rng, (uint2)pixelPosition, traceFrame + 911u);
+
+    Surface tracedSurface;
+    float rayT;
+    bool hit = TracePrimarySurface((uint2)pixelPosition, launchDims, g_Frame, rng, tracedSurface, rayT, previousFrame);
+    if (!hit) return RAB_EmptySurface();
 
     RAB_Surface s;
     s.valid = true;
-    s.linearDepth = depth;
-    
-    if (previousFrame) {
-        s.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInversePrevious);
-        s.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        s.viewDir = normalize(g_Frame.prevCameraPosition.xyz - s.worldPos);
-    } else {
-        s.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-        s.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        s.viewDir = normalize(g_Frame.cameraPosition.xyz - s.worldPos);
-    }
-    
-    s.albedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
-    float4 mat = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
-    s.roughness = max(0.01f, mat.r);
-    s.metallic = mat.g;
-    
+    s.worldPos = tracedSurface.worldPos;
+    s.normal = tracedSurface.normal;
+    s.linearDepth = rayT;
+    s.albedo = tracedSurface.albedo;
+    s.roughness = tracedSurface.roughness;
+    s.metallic = tracedSurface.metallic;
+    s.viewDir = tracedSurface.viewDir;
     return s;
 }
 

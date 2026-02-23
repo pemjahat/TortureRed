@@ -32,9 +32,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
-    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
-    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
-
     Reservoir res;
     res.hitPos = 0; res.hitNormal = 0; res.radiance = 0; res.targetPDF = 0;
     res.w_sum = 0; res.M = 0;
@@ -51,16 +48,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 firstBounceThroughput = 1.0f;
     bool isPathDiffuse = false;
 
-    if (depth < 1.0f) {
-        surface.worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-        surface.normal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        surface.viewDir = normalize(g_Frame.cameraPosition.xyz - surface.worldPos);
-        
-        hasPrimaryHit = true;
-        surface.albedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
-        float4 materialProps = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
-        surface.roughness = max(0.01f, materialProps.r);
-        surface.metallic = materialProps.g;
+    float primaryRayT;
+    hasPrimaryHit = TracePrimarySurface(launchIndex, launchDims, g_Frame, rng, surface, primaryRayT);
+
+    if (hasPrimaryHit) {
 
         // Generate first indirect bounce
         float3 nextRayDir;

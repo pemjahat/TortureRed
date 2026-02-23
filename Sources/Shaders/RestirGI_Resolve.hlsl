@@ -23,22 +23,21 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
-    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
-    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
-
     float3 accumulatedColor = 0;
 
-    if (depth >= 1.0f) {
+    Surface primarySurface;
+    float primaryRayT;
+    bool hasPrimaryHit = TracePrimarySurface(launchIndex, launchDims, g_Frame, rng, primarySurface, primaryRayT);
+
+    if (!hasPrimaryHit) {
         accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
     } else {
-        float3 N = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        float3 worldPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-        float3 albedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0).rgb;
-        float4 materialProps = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
-        float roughness = max(0.01f, materialProps.r);
-        float metallic = materialProps.g;
-        
-        float3 V = normalize(g_Frame.cameraPosition.xyz - worldPos);
+        float3 N = primarySurface.normal;
+        float3 worldPos = primarySurface.worldPos;
+        float3 albedo = primarySurface.albedo;
+        float roughness = primarySurface.roughness;
+        float metallic = primarySurface.metallic;
+        float3 V = primarySurface.viewDir;
 
         // --- Direct Lighting: dispatch based on lightSamplingMode ---
         // 0=Uniform (1 shadow ray), 1=ImportancePDF (1 shadow ray), 2=BruteForce (all lights)

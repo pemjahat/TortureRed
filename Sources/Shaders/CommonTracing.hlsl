@@ -111,6 +111,92 @@ void seed_rng(out RNG rng, uint2 screenPos, uint frameIndex) {
     rng.inc = 1;
 }
 
+float3 GetCameraRayDirection(float2 uv, float4x4 projectionInverse, float4x4 viewInverse, float3 cameraPos)
+{
+    float2 ndcXY = float2(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f);
+    float4 viewFar = mul(float4(ndcXY, 1.0f, 1.0f), projectionInverse);
+    viewFar /= max(abs(viewFar.w), 1e-6f);
+    float3 worldFar = mul(viewFar, viewInverse).xyz;
+    return normalize(worldFar - cameraPos);
+}
+
+bool TracePrimarySurface(
+    uint2 launchIndex,
+    uint2 launchDims,
+    FrameConstants frame,
+    inout RNG rng,
+    out Surface surface,
+    out float rayT,
+    bool usePreviousCamera = false)
+{
+    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
+
+    float4x4 activeViewInverse = usePreviousCamera ? frame.viewInversePrevious : frame.viewInverse;
+    float3 cameraPos = usePreviousCamera ? frame.prevCameraPosition.xyz : frame.cameraPosition.xyz;
+
+    RayDesc ray;
+    ray.Origin = cameraPos;
+    ray.Direction = GetCameraRayDirection(uv, frame.projectionInverse, activeViewInverse, cameraPos);
+    ray.TMin = 0.001f;
+    ray.TMax = 10000.0f;
+
+    RayQuery<RAY_FLAG_NONE> q;
+    q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+    while (q.Proceed()) {
+        PROCESS_ALPHA_MASK(q, rng);
+    }
+
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        surface.worldPos = 0;
+        surface.normal = 0;
+        surface.viewDir = 0;
+        surface.albedo = 0;
+        surface.metallic = 0;
+        surface.roughness = 0;
+        rayT = ray.TMax;
+        return false;
+    }
+
+    uint instanceIdx = q.CommittedInstanceID();
+    uint triIdx = q.CommittedPrimitiveIndex();
+    float2 barys = q.CommittedTriangleBarycentrics();
+    DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
+    MaterialConstants mat = g_Materials[nodeData.materialID];
+
+    uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+    uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+    uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+    GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+    GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+    GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+
+    float bary0 = 1.0f - barys.x - barys.y;
+    float2 hitUv = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
+    float3 worldNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
+
+    float4 albedo = mat.baseColorFactor;
+    if (mat.baseColorTextureIndex >= 0) {
+        albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+    }
+
+    float metallic = mat.metallicFactor;
+    float roughness = mat.roughnessFactor;
+    if (mat.metallicRoughnessTextureIndex >= 0) {
+        float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+        roughness *= mrSample.g;
+        metallic *= mrSample.b;
+    }
+
+    surface.worldPos = ray.Origin + ray.Direction * q.CommittedRayT();
+    surface.normal = worldNormal;
+    surface.viewDir = -ray.Direction;
+    surface.albedo = albedo.rgb;
+    surface.metallic = metallic;
+    surface.roughness = max(0.01f, roughness);
+    rayT = q.CommittedRayT();
+    return true;
+}
+
 // Sample an indirect ray based on surface properties
 // Throughput is cumulative weight ~ (BSDF * cos) / PDF
 void SampleIndirectRay(float3 N, float3 V, float3 baseColor, float metallic, float roughness, inout RNG rng, out float3 rayDir, out float3 throughput, out float pdf, out bool isDiffuse, bool enableSpecular = true) {

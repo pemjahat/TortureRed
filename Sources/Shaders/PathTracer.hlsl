@@ -20,29 +20,28 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
-    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
-    float depth = g_Textures[g_Frame.depthIndex].SampleLevel(g_LinearSampler, uv, 0).r;
-
     float3 accumulatedColor = 0;
     float3 indirectRadianceAccum = 0;
     float3 throughput = 1;
 
-    if (depth >= 1.0f) {
+    Surface primarySurface;
+    float primaryRayT;
+    bool hasPrimaryHit = TracePrimarySurface(launchIndex, launchDims, g_Frame, rng, primarySurface, primaryRayT);
+
+    if (!hasPrimaryHit) {
         accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
     } else {
-        float3 primaryHitPos = ReconstructWorldPos(uv, depth, g_Frame.projectionInverse, g_Frame.viewInverse);
-        float3 primaryNormal = normalize(g_Textures[g_Frame.normalIndex].SampleLevel(g_LinearSampler, uv, 0).xyz * 2.0f - 1.0f);
-        float4 primaryAlbedo = g_Textures[g_Frame.albedoIndex].SampleLevel(g_LinearSampler, uv, 0);
-        float4 primaryMaterial = g_Textures[g_Frame.materialIndex].SampleLevel(g_LinearSampler, uv, 0);
-        float primaryRoughness = max(0.01f, primaryMaterial.r);
-        float primaryMetallic = primaryMaterial.g;
-
-        float3 V = normalize(g_Frame.cameraPosition.xyz - primaryHitPos);
+        float3 primaryHitPos = primarySurface.worldPos;
+        float3 primaryNormal = primarySurface.normal;
+        float3 primaryAlbedo = primarySurface.albedo;
+        float primaryRoughness = primarySurface.roughness;
+        float primaryMetallic = primarySurface.metallic;
+        float3 V = primarySurface.viewDir;
         bool isPathDiffuse = false;
 
         // --- Step 1: Direct Lighting for Primary Hit ---
         // Dispatch based on lightSamplingMode: 0=Uniform, 1=ImportancePDF, 2=BruteForce
-        accumulatedColor = GetDirectLightingHybrid(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb,
+        accumulatedColor = GetDirectLightingHybrid(primaryHitPos, primaryNormal, V, primaryAlbedo,
                                                    primaryMetallic, primaryRoughness, g_Scene,
                                                    g_Lights, g_Frame.numLights, g_Frame, false, rng);
 
@@ -50,7 +49,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 rayDir;
         float3 firstThroughput;
         float firstPDF;
-        SampleIndirectRay(primaryNormal, V, primaryAlbedo.rgb, primaryMetallic, primaryRoughness, rng, rayDir, firstThroughput, firstPDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+        SampleIndirectRay(primaryNormal, V, primaryAlbedo, primaryMetallic, primaryRoughness, rng, rayDir, firstThroughput, firstPDF, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
         throughput *= firstThroughput;
         float3 rayPos = primaryHitPos + primaryNormal * 0.001f;
