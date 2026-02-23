@@ -83,7 +83,7 @@ void Application::Initialize()
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -310,8 +310,8 @@ void Application::Update(float deltaTime)
         
         DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&sun.direction);
         DirectX::XMVECTOR lightPos = DirectX::XMVectorScale(lightDir, -20.0f); // Position light back along direction
-        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToLH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
-        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(40.0f, 40.0f, 0.1f, 100.0f);
+        DirectX::XMMATRIX lightView = DirectX::XMMatrixLookToRH(lightPos, lightDir, DirectX::XMVectorSet(0, 1, 0, 0));
+        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicRH(40.0f, 40.0f, 0.1f, 100.0f);
         DirectX::XMMATRIX lightViewProj = lightView * lightProj;
         DirectX::XMStoreFloat4x4(&sun.viewProj, lightViewProj);
     }
@@ -340,7 +340,7 @@ void Application::Render()
 
     // Compute frustum for culling
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
-    DirectX::BoundingFrustum frustum(proj, false);
+    DirectX::BoundingFrustum frustum(proj, true);
 
     // Transform frustum to world space (inverse view matrix)
     DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();

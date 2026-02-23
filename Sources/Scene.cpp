@@ -267,8 +267,8 @@ static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* to
              float cosInner = cos(innerRad);
              memcpy(&light.padding[0], &cosInner, sizeof(float)); 
              
-             XMMATRIX lightView = XMMatrixLookAtLH(XMLoadFloat4(&light.position), XMLoadFloat4(&light.position) + dir, XMVectorSet(0, 1, 0, 0));
-             XMMATRIX lightProj = XMMatrixPerspectiveFovLH(XMConvertToRadians(outerAngle * 2.0f), 1.0f, 0.1f, 100.0f);
+             XMMATRIX lightView = XMMatrixLookAtRH(XMLoadFloat4(&light.position), XMLoadFloat4(&light.position) + dir, XMVectorSet(0, 1, 0, 0));
+             XMMATRIX lightProj = XMMatrixPerspectiveFovRH(XMConvertToRadians(outerAngle * 2.0f), 1.0f, 0.1f, 100.0f);
              XMStoreFloat4x4(&light.viewProj, XMMatrixTranspose(lightView * lightProj));
         }
         

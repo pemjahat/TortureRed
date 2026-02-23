@@ -443,6 +443,7 @@ void Renderer::CreatePipelineState()
         D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
         desc.pRootSignature = m_RootSignature.Get();
         desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        desc.RasterizerState.FrontCounterClockwise = TRUE;
         desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         desc.SampleMask = UINT_MAX;
@@ -840,7 +841,7 @@ void Renderer::BuildAccelerationStructures(Model* model)
         inst.InstanceID = static_cast<UINT>(i);
         inst.InstanceMask = 0xFF;
         inst.InstanceContributionToHitGroupIndex = 0;
-        inst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        inst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE;
         inst.AccelerationStructure = m_BlasPool[nodePrims[i]].gpuAddress;
         instanceDescs.push_back(inst);
     }

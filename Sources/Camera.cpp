@@ -4,10 +4,10 @@
 
 // Camera implementation
 Camera::Camera()
-    : m_Position(0.0f, 0.0f, -10.0f)
+    : m_Position(0.0f, 0.0f, 10.0f)
     , m_Yaw(0.0f)
     , m_Pitch(0.0f)
-    , m_LookDirection(0.0f, 0.0f, 1.0f)
+    , m_LookDirection(0.0f, 0.0f, -1.0f)
     , m_UpDirection(0.0f, 1.0f, 0.0f)
     , m_MoveSpeed(15.0f)
     , m_RotationSpeed(0.0005f)
@@ -31,8 +31,8 @@ void Camera::Update(float deltaTime)
 
     if (m_Keys[0]) movement += forward; // W - forward
     if (m_Keys[1]) movement -= forward; // S - backward
-    if (m_Keys[2]) movement += right;   // A - left
-    if (m_Keys[3]) movement -= right;   // D - right
+    if (m_Keys[2]) movement -= right;   // A - left
+    if (m_Keys[3]) movement += right;   // D - right
 
     if (XMVector3LengthSq(movement).m128_f32[0] > 0.0f)
     {
@@ -49,8 +49,8 @@ void Camera::ProcessMouseMovement(float deltaX, float deltaY)
 {
     if (!m_CameraModeActive) return;
 
-    m_Yaw += deltaX * m_RotationSpeed;
-    m_Pitch += deltaY * m_RotationSpeed;
+    m_Yaw -= deltaX * m_RotationSpeed;
+    m_Pitch -= deltaY * m_RotationSpeed;
 
     // Clamp pitch to avoid gimbal lock
     m_Pitch = std::max(-XM_PIDIV2 + 0.01f, std::min(XM_PIDIV2 - 0.01f, m_Pitch));
@@ -60,7 +60,7 @@ void Camera::ProcessMouseMovement(float deltaX, float deltaY)
     XMMATRIX rotationX = XMMatrixRotationX(m_Pitch);
     XMMATRIX rotation = XMMatrixMultiply(rotationX, rotationY);
 
-    XMVECTOR look = XMVector3TransformNormal(XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), rotation);
+    XMVECTOR look = XMVector3TransformNormal(XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f), rotation);
 
     XMStoreFloat3(&m_LookDirection, look);
     // m_UpDirection remains (0,1,0) for FPS-style camera
@@ -86,8 +86,8 @@ void Camera::ProcessKeyboard(bool w, bool s, bool a, bool d)
 
 DirectX::XMMATRIX Camera::GetViewMatrix() const
 {
-    // Use XMMatrixLookToLH like SimpleCamera
-    return XMMatrixLookToLH(XMLoadFloat3(&m_Position), XMLoadFloat3(&m_LookDirection), XMLoadFloat3(&m_UpDirection));
+    // Use XMMatrixLookToRH like SimpleCamera
+    return XMMatrixLookToRH(XMLoadFloat3(&m_Position), XMLoadFloat3(&m_LookDirection), XMLoadFloat3(&m_UpDirection));
 }
 
 DirectX::XMVECTOR Camera::GetForwardVector() const
@@ -113,7 +113,7 @@ void Camera::SetProjectionParameters(float fovY, float aspectRatio, float nearZ,
 
 DirectX::XMMATRIX Camera::GetProjMatrix() const
 {
-    return XMMatrixPerspectiveFovLH(m_FovY, m_AspectRatio, m_NearZ, m_FarZ);
+    return XMMatrixPerspectiveFovRH(m_FovY, m_AspectRatio, m_NearZ, m_FarZ);
 }
 
 DirectX::XMMATRIX Camera::GetInvViewMatrix() const

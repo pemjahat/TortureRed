@@ -1,0 +1,17 @@
+{
+  "models": ["Content/AlphaBlendModeTest/AlphaBlendModeTest.gltf"],
+  "graph": [
+    {
+      "name": "Lights",
+      "children": [
+        {
+          "name": "Sun",
+          "type": "DirectionalLight",
+          "color": [1.0, 0.9, 0.8],
+          "intensity": 5.0,
+          "direction": [0.0, -0.7, -0.6]
+        }
+      ]
+    }
+  ]
+}
