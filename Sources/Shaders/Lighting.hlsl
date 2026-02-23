@@ -42,6 +42,10 @@ float4 PSMain(PSInput input) : SV_Target {
 
     LightConstants mainLight = g_Lights[0];
 
+    RNG rng;
+    uint2 pixelCoord = uint2(input.position.xy);
+    seed_rng(rng, pixelCoord, FrameCB.frameIndex);
+
     // PBR setup
     float3 N = normalize(normal);
     float3 V = normalize(FrameCB.cameraPosition.xyz - worldPos.xyz);
@@ -65,7 +69,7 @@ float4 PSMain(PSInput input) : SV_Target {
         RayQuery<RAY_FLAG_NONE> shadowQuery;
         shadowQuery.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
         while (shadowQuery.Proceed()) {
-            PROCESS_ALPHA_MASK(shadowQuery);
+            PROCESS_ALPHA_MASK(shadowQuery, rng);
         }
         
         // Check if ray hit anything (shadowed) or missed (lit)

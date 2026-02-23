@@ -44,8 +44,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 0=Uniform (1 shadow ray), 1=ImportancePDF (1 shadow ray), 2=BruteForce (all lights)
         accumulatedColor += GetDirectLightingHybrid(
             worldPos, N, V, albedo, metallic, roughness,
-            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false,
-            float2(next_float(rng), next_float(rng)));
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false, rng);
 
         // --- Indirect Lighting from Reservoir ---
         if (res.w_sum > 0) {

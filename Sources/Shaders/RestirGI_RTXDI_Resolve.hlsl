@@ -43,8 +43,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         accumulatedColor += GetDirectLightingHybrid(
             surface.worldPos, surface.normal, surface.viewDir,
             surface.albedo, surface.metallic, surface.roughness,
-            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false,
-            float2(next_float(rng), next_float(rng)));
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, false, rng);
 
         // --- Indirect Lighting from Reservoir ---
         if (res.weightSum > 0) {

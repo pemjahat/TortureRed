@@ -447,9 +447,9 @@ void Application::Render()
 
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
-            if (m_Renderer.GetPipelineState())
+            if (m_Renderer.GetTransparentPSO())
             {
-                cmdList->SetPipelineState(m_Renderer.GetPipelineState());
+                cmdList->SetPipelineState(m_Renderer.GetTransparentPSO());
                 m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
             }
         }

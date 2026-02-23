@@ -44,8 +44,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // Dispatch based on lightSamplingMode: 0=Uniform, 1=ImportancePDF, 2=BruteForce
         accumulatedColor = GetDirectLightingHybrid(primaryHitPos, primaryNormal, V, primaryAlbedo.rgb,
                                                    primaryMetallic, primaryRoughness, g_Scene,
-                                                   g_Lights, g_Frame.numLights, g_Frame, false,
-                                                   float2(next_float(rng), next_float(rng)));
+                                                   g_Lights, g_Frame.numLights, g_Frame, false, rng);
 
         // --- Step 2: Sample First Indirect Ray from Primary Hit ---
         float3 rayDir;
@@ -70,7 +69,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             RayQuery<RAY_FLAG_NONE> q;
             q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
             while (q.Proceed()) {
-                PROCESS_ALPHA_MASK(q);
+                PROCESS_ALPHA_MASK(q, rng);
             }
 
             if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
@@ -107,13 +106,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float3 V_hit = -ray.Direction;
 
                 // NEE - Stochastic light sampling for indirect bounces (with MIS)
-                // Generate fresh random sample for light selection
-                float2 lightRngSample = float2(next_float(rng), next_float(rng));
-                
                 float3 ndl = GetDirectLightingHybrid(hitPos, worldNormal, V_hit, albedo_hit.rgb,
                                                     metallic_hit, roughness_hit, g_Scene,
-                                                    g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse,
-                                                    lightRngSample) * throughput;
+                                                    g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse, rng) * throughput;
                 indirectRadianceAccum += ndl;
 
                 // Sample next bounce

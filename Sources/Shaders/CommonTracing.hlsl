@@ -15,14 +15,14 @@ ByteAddressBuffer g_LightLUT : register(t1, space2);
 
 SamplerState g_LinearSampler : register(s0);
 
-#define PROCESS_ALPHA_MASK(q) \
+#define PROCESS_ALPHA_MASK(q, rng) \
     if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) { \
         uint instanceIdx = q.CandidateInstanceID(); \
         uint triIdx = q.CandidatePrimitiveIndex(); \
         float2 barys = q.CandidateTriangleBarycentrics(); \
         DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx]; \
         MaterialConstants mat = g_Materials[nodeData.materialID]; \
-        if (mat.alphaMode == 1) { \
+        if (mat.alphaMode > 0) { \
             uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0]; \
             uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1]; \
             uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2]; \
@@ -34,7 +34,8 @@ SamplerState g_LinearSampler : register(s0);
             if (mat.baseColorTextureIndex >= 0) { \
                 alpha *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0).a; \
             } \
-            if (alpha >= mat.alphaCutoff) { \
+            alpha = (mat.alphaMode == 1) ? ((alpha >= mat.alphaCutoff) ? 1.0f : 0.0f) : saturate(alpha); \
+            if (next_float(rng) < alpha) { \
                 q.CommitNonOpaqueTriangleHit(); \
             } \
         } else { \
@@ -148,7 +149,7 @@ void SampleIndirectRay(float3 N, float3 V, float3 baseColor, float metallic, flo
 
 float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float metallic, float roughness, 
                         RaytracingAccelerationStructure scene, LightConstants light, FrameConstants frame,
-                        bool isDiffuse = false) {
+                        inout RNG rng, bool isDiffuse = false) {
     float3 L_light = -normalize(light.direction.xyz);
     float ndotl = max(0.0001f, dot(N, L_light));
     if (ndotl > 0) {
@@ -159,7 +160,7 @@ float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float meta
         RayQuery<RAY_FLAG_NONE> sq;
         sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
         while (sq.Proceed()) {
-            PROCESS_ALPHA_MASK(sq);
+            PROCESS_ALPHA_MASK(sq, rng);
         }
 
         if (sq.CommittedStatus() == COMMITTED_NOTHING) {
@@ -175,7 +176,7 @@ float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float meta
 // Evaluate lighting from a single local light (point/spot)
 float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float metallic, float roughness,
                          LightConstants light, RaytracingAccelerationStructure scene, FrameConstants frame,
-                         bool isDiffuse) {
+                         inout RNG rng, bool isDiffuse) {
     float3 d = light.position.xyz - P;
     float dist = length(d);
     float3 L_light = normalize(d);
@@ -203,7 +204,7 @@ float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float met
     RayQuery<RAY_FLAG_NONE> sq;
     sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
     while (sq.Proceed()) {
-        PROCESS_ALPHA_MASK(sq);
+        PROCESS_ALPHA_MASK(sq, rng);
     }
     
     if (sq.CommittedStatus() != COMMITTED_NOTHING) return 0.0;
@@ -220,7 +221,7 @@ float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float met
 float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo, float metallic, float roughness,
                                    RaytracingAccelerationStructure scene, 
                                    StructuredBuffer<LightConstants> lights, uint numLights,
-                                   FrameConstants frame, bool isDiffuse = false) {
+                                   FrameConstants frame, inout RNG rng, bool isDiffuse = false) {
     float3 totalLighting = 0.0;
     
     for (uint i = 0; i < numLights; ++i) {
@@ -241,7 +242,7 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
                 RayQuery<RAY_FLAG_NONE> sq;
                 sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
                 while (sq.Proceed()) {
-                    PROCESS_ALPHA_MASK(sq);
+                    PROCESS_ALPHA_MASK(sq, rng);
                 }
 
                 if (sq.CommittedStatus() == COMMITTED_NOTHING) {
@@ -253,14 +254,14 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
             }
         } else {
             // Point/spot light
-            totalLighting += EvaluateLocalLight(P, N, V, albedo, metallic, roughness, light, scene, frame, isDiffuse);
+            totalLighting += EvaluateLocalLight(P, N, V, albedo, metallic, roughness, light, scene, frame, rng, isDiffuse);
         }
     }
     
     return totalLighting;
 }
 
-bool CheckVisibility(float3 P, float3 N, float3 samplePos) {
+bool CheckVisibility(float3 P, float3 N, float3 samplePos, inout RNG rng) {
     float3 L = samplePos - P;
     float dist = length(L);
     L /= dist;
@@ -274,7 +275,7 @@ bool CheckVisibility(float3 P, float3 N, float3 samplePos) {
     RayQuery<RAY_FLAG_NONE> q;
     q.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
     while (q.Proceed()) {
-        PROCESS_ALPHA_MASK(q);
+        PROCESS_ALPHA_MASK(q, rng);
     }
 
     return q.CommittedStatus() == COMMITTED_NOTHING;
@@ -303,7 +304,7 @@ struct LightSampleResult {
 
 // Sample a single light using LUT - O(1) lookup
 LightSampleResult SampleSingleLightLUT(
-    float2 rngSample,                       // Random sample in [0,1)^2
+    float rngSample,                       // Random sample in [0,1)
     StructuredBuffer<LightConstants> lights,
     ByteAddressBuffer lightLUTBuffer,       // LUT: uint[256] light indices
     uint numLights) {
@@ -315,7 +316,7 @@ LightSampleResult SampleSingleLightLUT(
         result.pdf = 1.0;
     } else {
         // Clamp and scale U to LUT resolution
-        float u = clamp(rngSample.x, 0.0f, 0.999999f);
+        float u = clamp(rngSample, 0.0f, 0.999999f);
         uint lutIndex = uint(u * float(LIGHT_LUT_RESOLUTION));
         lutIndex = min(lutIndex, LIGHT_LUT_RESOLUTION - 1);
         
@@ -337,7 +338,7 @@ LightSampleResult SampleSingleLightLUT(
 
 // Convenience wrapper using frame constants to get LUT buffer
 LightSampleResult SampleSingleLight(
-    float2 rngSample,
+    float rngSample,
     StructuredBuffer<LightConstants> lights,
     uint numLights,
     FrameConstants frame) {
@@ -376,6 +377,7 @@ float3 EvaluateSingleLightWithMIS(
     LightSampleResult lightSample,
     RaytracingAccelerationStructure scene,
     FrameConstants frame,
+    inout RNG rng,
     bool isDiffuse) {
     
     LightConstants light = lightSample.light;
@@ -396,7 +398,7 @@ float3 EvaluateSingleLightWithMIS(
             RayQuery<RAY_FLAG_NONE> sq;
             sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, shadowRay);
             while (sq.Proceed()) {
-                PROCESS_ALPHA_MASK(sq);
+                PROCESS_ALPHA_MASK(sq, rng);
             }
 
             if (sq.CommittedStatus() == COMMITTED_NOTHING) {
@@ -408,7 +410,7 @@ float3 EvaluateSingleLightWithMIS(
         }
     } else {
         // Point/spot light
-        result = EvaluateLocalLight(P, N, V, albedo, metallic, roughness, light, scene, frame, isDiffuse);
+        result = EvaluateLocalLight(P, N, V, albedo, metallic, roughness, light, scene, frame, rng, isDiffuse);
     }
     
     // Divide by PDF to get unbiased estimate: L / p
@@ -435,7 +437,7 @@ float3 GetDirectLightingStochastic(
     StructuredBuffer<LightConstants> lights,
     uint numLights,
     FrameConstants frame,
-    float2 rngSample,
+    inout RNG rng,
     bool isDiffuse) {
     
     if (numLights == 0) return 0.0f;
@@ -444,18 +446,18 @@ float3 GetDirectLightingStochastic(
     
     if (frame.lightSamplingMode == 0) {
         // Uniform sampling: pick any light with equal probability
-        lightSample = SampleSingleLightUniform(rngSample.x, lights, numLights);
+        lightSample = SampleSingleLightUniform(next_float(rng), lights, numLights);
     } else {
         // Importance (CDF) sampling: LUT-based, weighted by intensity
         // Requires a valid LUT buffer
         if (frame.lightLUTBufferIndex == 0xFFFFFFFF) return 0.0f;
-        lightSample = SampleSingleLight(rngSample, lights, numLights, frame);
+        lightSample = SampleSingleLight(next_float(rng), lights, numLights, frame);
     }
     
     // Evaluate the sampled light (result is already divided by PDF)
     return EvaluateSingleLightWithMIS(
         P, N, V, albedo, metallic, roughness,
-        lightSample, scene, frame, isDiffuse);
+        lightSample, scene, frame, rng, isDiffuse);
 }
 
 // ============================================================================
@@ -557,7 +559,7 @@ float3 GetDirectLightingRIS(
         RayQuery<RAY_FLAG_NONE> sq;
         sq.TraceRayInline(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, sr);
         while (sq.Proceed()) {
-            PROCESS_ALPHA_MASK(sq);
+            PROCESS_ALPHA_MASK(sq, rng);
         }
         if (sq.CommittedStatus() == COMMITTED_NOTHING)
         {
@@ -571,7 +573,7 @@ float3 GetDirectLightingRIS(
     {
         // Point / Spot — EvaluateLocalLight already traces the shadow ray
         L_winner = EvaluateLocalLight(P, N, V, albedo, metallic, roughness,
-                                      winner, scene, frame, isDiffuse);
+                                      winner, scene, frame, rng, isDiffuse);
     }
 
     // Unbiased RIS contribution weight: W = weightSum / (M * p̂(x*))
@@ -592,17 +594,17 @@ float3 GetDirectLightingHybrid(
     uint numLights,
     FrameConstants frame,
     bool isDiffuse,
-    float2 rngSample) { // Only used for stochastic modes (mode 0 or 1)) {
+    inout RNG rng) { // Only used for stochastic modes (mode 0 or 1)) {
     
     if (numLights > 1 && frame.lightSamplingMode != 2) {
         // Stochastic light sampling (Uniform or Importance CDF)
         return GetDirectLightingStochastic(P, N, V, albedo, metallic, roughness,
                                           scene, lights, numLights, frame,
-                                          rngSample, isDiffuse);
+                                          rng, isDiffuse);
     } else {
         // Brute force: evaluate every light (primary hit or mode 2)
         return GetDirectLightingMultiLights(P, N, V, albedo, metallic, roughness,
-                                           scene, lights, numLights, frame, isDiffuse);
+                                           scene, lights, numLights, frame, rng, isDiffuse);
     }
 }
 

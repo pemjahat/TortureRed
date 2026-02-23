@@ -80,7 +80,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             RayQuery<RAY_FLAG_NONE> q;
             q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
             while (q.Proceed()) {
-                PROCESS_ALPHA_MASK(q);
+                PROCESS_ALPHA_MASK(q, rng);
             }
 
             if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {

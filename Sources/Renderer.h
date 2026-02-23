@@ -65,7 +65,7 @@ public:
     ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12CommandSignature* GetCommandSignature() const { return m_CommandSignature.Get(); }
-    ID3D12PipelineState* GetPipelineState() const { return m_PipelineState.Get(); }
+    ID3D12PipelineState* GetTransparentPSO() const { return m_TransparentPSO.Get(); }
     ID3D12PipelineState* GetDepthPrePassPSO() const { return m_DepthPrePassPSO.Get(); }
     ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
     ID3D12PipelineState* GetGBufferWritePSO() const { return m_GBufferWritePSO.Get(); }
@@ -133,7 +133,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
 
     // Pipeline States
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthPrePassPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;
