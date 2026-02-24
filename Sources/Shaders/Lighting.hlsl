@@ -22,6 +22,7 @@ PSInput VSMain(VSInput input) {
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
+Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
 
 float4 PSMain(PSInput input) : SV_Target {
     float4 albedo = g_Textures[FrameCB.albedoIndex].Sample(g_LinearSampler, input.texCoord);
@@ -114,6 +115,13 @@ float4 PSMain(PSInput input) : SV_Target {
 
     float3 ambient = 0.03f * albedo.rgb;
     float3 finalColor = ambient + totalDirectLighting;
+    
+    if (FrameCB.enableRasterIndirectGI)
+    {
+        // Sample the indirect lighting texture
+        float3 indirectLighting = g_IndirectLightingTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+        finalColor += indirectLighting;
+    }
     
     // Basic Tone Mapping
     float3 exposedColor = finalColor * FrameCB.exposure;

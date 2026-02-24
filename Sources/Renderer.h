@@ -27,6 +27,7 @@ public:
 
     void BuildAccelerationStructures(class Model* model);
     void DispatchRays(class Model* model, const FrameConstants& frame, const LightConstants& light);
+    void DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame);
     void CopyTextureToBackBuffer(const GPUTexture& texture);
 
     // Resource creation
@@ -34,6 +35,8 @@ public:
     void CreatePipelineState();
     void CreateRayTracingPipeline();
     void CreateShaderBindingTable();
+    void CreateRasterIndirectGIResources();
+    void CreateRasterIndirectGIPipelines();
 
     // GBuffer management
     void CreateGBuffer();
@@ -45,6 +48,7 @@ public:
     bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false);
     bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState);
     bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor = nullptr, UINT mipLevels = 1, UINT arraySize = 1);
+    bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels = 1);
 
     void TransitionResource(GPUTexture& texture, D3D12_RESOURCE_STATES newState);
     void TransitionResource(GPUBuffer& buffer, D3D12_RESOURCE_STATES newState);
@@ -105,6 +109,7 @@ public:
     GBuffer& GetGBuffer() { return m_GBuffer; }
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
     GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
+    GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
 
     // Lights
     void CreateLightsBuffer();
@@ -174,6 +179,16 @@ private:
     GPUBuffer m_RtxdiNeighborOffsetsBuffer;
     
     int m_CurrentReservoirIndex = 0;
+
+    // Rasterizer Indirect GI
+    GPUTexture m_IrCache[2];
+    GPUBuffer m_RasterReservoirs;
+    GPUBuffer m_RasterReservoirIntermediate;
+    GPUTexture m_RasterIndirectLightingTex;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
 
     // Descriptor Heaps
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;

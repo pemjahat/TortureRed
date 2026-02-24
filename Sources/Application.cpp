@@ -83,7 +83,7 @@ void Application::Initialize()
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -120,6 +120,10 @@ void Application::Initialize()
     }
     
     m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
+
+    // Initialize Rasterizer Indirect GI Resources
+    m_Renderer.CreateRasterIndirectGIResources();
+    m_Renderer.CreateRasterIndirectGIPipelines();
 
     m_LastViewMatrix = m_Camera.GetViewMatrix();
 
@@ -406,6 +410,10 @@ void Application::Render()
             m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
             m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
         }
+        
+        // 2.5 Rasterizer Indirect GI Passes
+        m_Renderer.DispatchRasterIndirectGI(&m_Model, m_FrameConstants);
+
         // 3. Lighting Pass
         {
             // Transition G-Buffer targets to SRV state
@@ -413,6 +421,11 @@ void Application::Render()
             m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            
+            if (m_FrameConstants.enableRasterIndirectGI)
+            {
+                m_Renderer.TransitionResource(m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
 
             // Transition backbuffer to RTV
             m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -422,6 +435,10 @@ void Application::Render()
             cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
+            if (m_FrameConstants.enableRasterIndirectGI)
+            {
+                cmdList->SetGraphicsRootDescriptorTable(14, m_Renderer.GetGPUDescriptorHandle(m_Renderer.GetRasterIndirectLightingTex().srvIndex));
+            }
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
@@ -535,6 +552,15 @@ void Application::RenderImGui()
     else
     {
         ImGui::TextDisabled("Path Tracer (DXR not supported)");
+    }
+
+    if (!m_UsePathTracer)
+    {
+        bool enableRasterIndirectGI = (m_FrameConstants.enableRasterIndirectGI != 0);
+        if (ImGui::Checkbox("Enable Raster Indirect GI", &enableRasterIndirectGI))
+        {
+            m_FrameConstants.enableRasterIndirectGI = enableRasterIndirectGI ? 1 : 0;
+        }
     }
 
     ImGui::Separator();

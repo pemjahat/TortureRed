@@ -20,6 +20,40 @@ Renderer::~Renderer()
     Shutdown();
 }
 
+void Renderer::CreateRasterIndirectGIResources()
+{
+    CreateTexture3D(m_IrCache[0], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture3D(m_IrCache[1], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    
+    CreateStructuredBuffer(m_RasterReservoirs, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);    
+    CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    
+    CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void Renderer::CreateRasterIndirectGIPipelines()
+{
+    auto irCacheUpdateCS = CompileShader("Shaders/IrCache_Update.hlsl", "main", "cs_6_6");
+    auto restirTemporalCS = CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
+    auto restirSpatialCS = CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl", "main", "cs_6_6");
+    auto restirResolveCS = CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl", "main", "cs_6_6");
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+    computeDesc.pRootSignature = m_RootSignature.Get();
+    
+    computeDesc.CS = { irCacheUpdateCS.data(), irCacheUpdateCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_IrCacheUpdatePSO));
+    
+    computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
+    
+    computeDesc.CS = { restirSpatialCS.data(), restirSpatialCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterSpatialPSO));
+    
+    computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+}
+
 bool Renderer::Initialize(HWND hwnd)
 {
     UINT dxgiFactoryFlags = 0;
@@ -366,7 +400,6 @@ void Renderer::CreateRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE srvRanges[2];
     srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 0); // t0 space0: Bindless textures
-    //srvRanges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 2); // t0 space2: Bindless buffers
 
     CD3DX12_DESCRIPTOR_RANGE uavRange0;
     uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Accumulation Buffer
@@ -383,7 +416,10 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
-    CD3DX12_ROOT_PARAMETER rootParameters[14];
+    CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3;
+    srvRangeSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 3); // t0-t1 space3: ReSTIR GI SRVs
+
+    CD3DX12_ROOT_PARAMETER rootParameters[15];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -391,13 +427,14 @@ void Renderer::CreateRootSignature()
     rootParameters[4].InitAsShaderResourceView(2, 1); // t2 space1: TLAS
     rootParameters[5].InitAsShaderResourceView(3, 1); // t3 space1: Indices
     rootParameters[6].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
-    rootParameters[7].InitAsDescriptorTable(1, &uavRange0); // u0
-    rootParameters[8].InitAsDescriptorTable(1, &uavRange1); // u1
-    rootParameters[9].InitAsDescriptorTable(1, &uavRange2); // u2
-    rootParameters[10].InitAsDescriptorTable(1, &uavRange3); // u3
+    rootParameters[7].InitAsDescriptorTable(1, &uavRange0); // u0 : PathTracer accumulation buffer
+    rootParameters[8].InitAsDescriptorTable(1, &uavRange1); // u1 : PathTracer output buffer
+    rootParameters[9].InitAsDescriptorTable(1, &uavRange2); // u2 : Restir ping pong buffer
+    rootParameters[10].InitAsDescriptorTable(1, &uavRange3); // u3 : Restir ping pong buffer
     rootParameters[11].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
     rootParameters[12].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
     rootParameters[13].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
+    rootParameters[14].InitAsDescriptorTable(1, &srvRangeSpace3); // t0-t1 space3: ReSTIR GI SRVs
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -753,6 +790,73 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
     // Transition for blitting/Imgui
     TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
+}
+
+void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
+{
+    if (!frame.enableRasterIndirectGI)
+        return;
+
+    // Transition G-Buffer targets to SRV state for compute
+    TransitionResource(m_GBuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_GBuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
+    m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+
+    // Bind common resources
+    m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
+    m_CommandList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
+    m_CommandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(0)); // Bindless
+    m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
+    m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
+    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RasterIndirectLightingTex.uavIndex));
+    m_CommandList->SetComputeRootShaderResourceView(12, m_LightsBuffer.gpuAddress); // Lights Buffer
+    m_CommandList->SetComputeRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
+
+    int currentReservoir = m_CurrentReservoirIndex;
+    int previousReservoir = 1 - currentReservoir;
+
+    // IrCache Update
+    // writes to IrCache[current], reads history from IrCache[previous]
+    TransitionResource(m_IrCache[currentReservoir], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_IrCache[previousReservoir], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_CommandList->SetPipelineState(m_IrCacheUpdatePSO.Get());
+    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_IrCache[previousReservoir].srvIndex));
+    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_IrCache[currentReservoir].uavIndex));
+    m_CommandList->Dispatch(64 / 8, 32 / 8, 64 / 8);
+
+    // Restir Temporal
+    // writes to ReservoirBuffer[current], reads history from IrCache[current]
+    TransitionResource(m_RasterReservoirs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_IrCache[0], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
+    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_IrCache[currentReservoir].srvIndex)); // t0-t1 space3
+    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirs.uavIndex)); // u0 space0
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    // Restir Spatial
+    // writes to Intermediate, reads temporal from ReservoirBuffer[current]
+    TransitionResource(m_RasterReservoirs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_CommandList->SetPipelineState(m_RestirGIRasterSpatialPSO.Get());
+    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirs.srvIndex)); // t0 space3
+    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex)); // u0 space0
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    // Restir Resolve
+    // reads spatial output from Intermediate
+    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_CommandList->SetPipelineState(m_RestirGIRasterResolvePSO.Get());
+    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.srvIndex)); // t0 space3
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 }
 
 void Renderer::CopyTextureToBackBuffer(const GPUTexture& texture)
@@ -1249,6 +1353,72 @@ void Renderer::TransitionResource(GPUBuffer& buffer, D3D12_RESOURCE_STATES newSt
     );
     m_CommandList->ResourceBarrier(1, &barrier);
     buffer.state = newState;
+}
+
+bool Renderer::CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels)
+{
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    desc.Alignment = 0;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = static_cast<UINT16>(depth);
+    desc.MipLevels = static_cast<UINT16>(mipLevels);
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = flags;
+
+    D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+
+    HRESULT hr = m_Device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        initialState,
+        nullptr,
+        IID_PPV_ARGS(&texture.resource)
+    );
+
+    if (FAILED(hr)) return false;
+
+    texture.state = initialState;
+    texture.format = format;
+
+    // Create SRV if not a depth stencil
+    if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        srvDesc.Texture3D.MipLevels = mipLevels;
+        srvDesc.Texture3D.MostDetailedMip = 0;
+
+        texture.srvIndex = AllocateDescriptor();
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
+        srvHandle.ptr += texture.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        m_Device->CreateShaderResourceView(texture.resource.Get(), &srvDesc, srvHandle);
+    }
+
+    // Create UAV if requested
+    if (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = format;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        uavDesc.Texture3D.MipSlice = 0;
+        uavDesc.Texture3D.FirstWSlice = 0;
+        uavDesc.Texture3D.WSize = depth;
+
+        texture.uavIndex = AllocateDescriptor();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
+        uavHandle.ptr += texture.uavIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        m_Device->CreateUnorderedAccessView(texture.resource.Get(), nullptr, &uavDesc, uavHandle);
+    }
+
+    return true;
 }
 
 void Renderer::TransitionResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES& currentState, D3D12_RESOURCE_STATES newState)

@@ -20,6 +20,7 @@ struct FrameConstants {
     uint enableRestir;
     uint enableAvoidCaustics;
     uint enableIndirectSpecular;
+    uint enableRasterIndirectGI;
     uint useRTXDI;
     uint numLights;
     uint lightSamplingMode; // 0=uniform, 1=importance sampling (indirect only)

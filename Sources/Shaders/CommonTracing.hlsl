@@ -612,9 +612,8 @@ float3 GetDirectLightingRIS(
     float weightSum     = 0.0f;
 
     for (uint i = 0; i < numCandidates; ++i)
-    {
-        float2 u = float2(next_float(rng), next_float(rng));
-        LightSampleResult lsr = SampleSingleLight(u, lights, numLights, frame);
+    {        
+        LightSampleResult lsr = SampleSingleLight(next_float(rng), lights, numLights, frame);
 
         float targetPDF = RIS_TargetPDF(P, N, V, albedo, metallic, roughness, lsr.light);
         float risWeight = targetPDF / max(lsr.pdf, 1e-6f);

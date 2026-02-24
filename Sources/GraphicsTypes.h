@@ -71,6 +71,7 @@ struct FrameConstants
     uint32_t enableRestir;
     uint32_t enableAvoidCaustics;
     uint32_t enableIndirectSpecular;
+    uint32_t enableRasterIndirectGI;
     uint32_t useRTXDI; // Kept but maybe unused
     uint32_t numLights;
     uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
