@@ -28,35 +28,23 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, screenPos, g_Frame.frameIndex);
 
-    // Read G-Buffer
-    float depth = g_Textures[g_Frame.depthIndex].Sample(g_LinearSampler, screenPos).r;
-    if (depth == 1.0f) {
+    Surface surface;
+    float primaryRayT;
+    bool hasPrimaryHit = TracePrimarySurface(screenPos, launchDims, g_Frame, rng, surface, primaryRayT);
+    if (!hasPrimaryHit) {
         g_CurrReservoirs[pixelIndex] = (Reservoir)0;
         return;
     }
-
-    float2 uv = ((float2)screenPos + 0.5f) / (float2)launchDims;
-    float4 ndc = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);
-    float4 worldPos4 = mul(ndc, g_Frame.projectionInverse);
-    worldPos4 /= worldPos4.w;
-    float3 worldPos = mul(worldPos4, g_Frame.viewInverse).xyz;
-
-    float3 normal = g_Textures[g_Frame.normalIndex].Sample(g_LinearSampler, screenPos).rgb * 2.0f - 1.0f;
-    float3 albedo = g_Textures[g_Frame.albedoIndex].Sample(g_LinearSampler, screenPos).rgb;
-    float4 material = g_Textures[g_Frame.materialIndex].Sample(g_LinearSampler, screenPos);
-    float metallic = material.r;
-    float roughness = max(0.01f, material.g);
-    float3 viewDir = normalize(g_Frame.cameraPosition.xyz - worldPos);
 
     // 1. Trace Single Indirect Bounce
     float3 rayDir;
     float3 throughput;
     float pdf;
     bool isDiffuse;
-    SampleIndirectRay(normal, viewDir, albedo, metallic, roughness, rng, rayDir, throughput, pdf, isDiffuse, g_Frame.enableIndirectSpecular);
+    SampleIndirectRay(surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, rng, rayDir, throughput, pdf, isDiffuse, g_Frame.enableIndirectSpecular != 0);
 
     RayDesc ray;
-    ray.Origin = worldPos + normal * 0.001f;
+    ray.Origin = surface.worldPos + surface.normal * 0.001f;
     ray.Direction = rayDir;
     ray.TMin = 0.01f;
     ray.TMax = 1000.0f;
@@ -111,7 +99,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         // Multi-bounce: Sample Current IrCache
         float3 hitUVW = WorldToIrCacheUVW(hitPos);
-        float3 indirectLighting = g_CurrIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
+        float4 irCacheSample = g_CurrIrCache.SampleLevel(g_LinearSampler, hitUVW, 0);
+        float irCacheConfidence = saturate(irCacheSample.a / 64.0f);
+        float3 indirectLighting = irCacheSample.rgb * irCacheConfidence;
         
         sampleRadiance = (directLighting + indirectLighting) * hitAlbedo.rgb;
     }
@@ -123,12 +113,12 @@ void main(uint3 DTid : SV_DispatchThreadID)
     r.w_sum = 0; r.W = 0; r.M = 0;
 
     Surface s;
-    s.worldPos = worldPos;
-    s.normal = normal;
-    s.viewDir = viewDir;
-    s.albedo = albedo;
-    s.metallic = metallic;
-    s.roughness = roughness;
+    s.worldPos = surface.worldPos;
+    s.normal = surface.normal;
+    s.viewDir = surface.viewDir;
+    s.albedo = surface.albedo;
+    s.metallic = surface.metallic;
+    s.roughness = surface.roughness;
 
     float selectedPDF = 0.f;
     float targetPDF = GetTargetPDF(s, hitPos, sampleRadiance);
@@ -138,7 +128,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     }
 
     // 3. Temporal Reuse
-    float4 prevClipPos = mul(float4(worldPos, 1.0f), g_Frame.viewProjPrevious);
+    float4 prevClipPos = mul(float4(surface.worldPos, 1.0f), g_Frame.viewProjPrevious);
     prevClipPos /= prevClipPos.w;
     float2 prevUV = prevClipPos.xy * float2(0.5f, -0.5f) + 0.5f;
     

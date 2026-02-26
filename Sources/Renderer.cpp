@@ -781,7 +781,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 3: Resolve — reads spatial output from Intermediate
         m_CommandList->SetPipelineState(m_RestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
     else
