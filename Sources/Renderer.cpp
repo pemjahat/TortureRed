@@ -23,9 +23,10 @@ Renderer::~Renderer()
 void Renderer::CreateRasterIndirectGIResources()
 {
     CreateTexture3D(m_IrCache[0], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture3D(m_IrCache[1], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    CreateTexture3D(m_IrCache[1], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
-    CreateStructuredBuffer(m_RasterReservoirs, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);    
+    CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_RasterReservoirs[1], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
     CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -417,9 +418,12 @@ void Renderer::CreateRootSignature()
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
     CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3;
-    srvRangeSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 3); // t0-t1 space3: ReSTIR GI SRVs
+    srvRangeSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 3); // t0 space3: ReSTIR GI SRVs
 
-    CD3DX12_ROOT_PARAMETER rootParameters[15];
+    CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3_2;
+    srvRangeSpace3_2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 3); // t1 space3: IrCache Debug
+
+    CD3DX12_ROOT_PARAMETER rootParameters[16];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -434,7 +438,8 @@ void Renderer::CreateRootSignature()
     rootParameters[11].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
     rootParameters[12].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
     rootParameters[13].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
-    rootParameters[14].InitAsDescriptorTable(1, &srvRangeSpace3); // t0-t1 space3: ReSTIR GI SRVs
+    rootParameters[14].InitAsDescriptorTable(1, &srvRangeSpace3); // t0 space3: ReSTIR GI SRVs
+    rootParameters[15].InitAsDescriptorTable(1, &srvRangeSpace3_2); // t1 space3: IrCache Debug
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -803,6 +808,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     TransitionResource(m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     TransitionResource(m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
@@ -833,27 +841,36 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
 
     // Restir Temporal
     // writes to ReservoirBuffer[current], reads history from IrCache[current]
-    TransitionResource(m_RasterReservoirs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    
     TransitionResource(m_IrCache[0], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
     m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_IrCache[currentReservoir].srvIndex)); // t0-t1 space3
-    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirs.uavIndex)); // u0 space0
+    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirs[currentReservoir].uavIndex));
+    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RasterReservoirs[previousReservoir].uavIndex));
+    //->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirs.uavIndex)); // u0 space0
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirs[currentReservoir].resource.Get());
+    m_CommandList->ResourceBarrier(1, &barrier1);
 
     // Restir Spatial
     // writes to Intermediate, reads temporal from ReservoirBuffer[current]
-    TransitionResource(m_RasterReservoirs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_CommandList->SetPipelineState(m_RestirGIRasterSpatialPSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirs.srvIndex)); // t0 space3
-    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex)); // u0 space0
+    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex));
+    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RasterReservoirs[currentReservoir].uavIndex));
+    //m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirs.srvIndex)); // t0 space3
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirIntermediate.resource.Get());
+    m_CommandList->ResourceBarrier(1, &barrier2);
 
     // Restir Resolve
     // reads spatial output from Intermediate
-    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    //TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_CommandList->SetPipelineState(m_RestirGIRasterResolvePSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.srvIndex)); // t0 space3
+    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex));
+    //m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.srvIndex)); // t0 space3
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame

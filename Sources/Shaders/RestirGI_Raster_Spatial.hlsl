@@ -2,12 +2,11 @@
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 
-// Inputs
-StructuredBuffer<Reservoir> g_CurrReservoirs : register(t0, space3);
-
 // Outputs
-RWStructuredBuffer<Reservoir> g_ResolvedReservoirs : register(u0);
 RWTexture2D<float4> g_IndirectLightingTex : register(u1);
+
+RWStructuredBuffer<Reservoir> g_ReservoirOutput : register(u2);      // Spatial output (goes to Resolve)
+RWStructuredBuffer<Reservoir> g_ReservoirTemporalInput : register(u3); // Temporal output for this frame
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
@@ -27,7 +26,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // Read G-Buffer
     float depth = g_Textures[g_Frame.depthIndex].Sample(g_LinearSampler, screenPos).r;
     if (depth == 1.0f) {
-        g_ResolvedReservoirs[pixelIndex] = (Reservoir)0;
+        g_ReservoirOutput[pixelIndex] = (Reservoir)0;
         return;
     }
 
@@ -52,8 +51,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.metallic = metallic;
     s.roughness = roughness;
 
-    Reservoir r = g_CurrReservoirs[pixelIndex];
-    
+    Reservoir r = g_ReservoirTemporalInput[pixelIndex];
+    float selectedPDF = 0.f;
+
     // Spatial Reuse
     int numNeighbors = 3;
     float radius = 20.0f;
@@ -70,36 +70,39 @@ void main(uint3 DTid : SV_DispatchThreadID)
             // Geometric consistency check
             float dotNormal = dot(normal, neighborNormal);
 
-            Reservoir neighborR = g_CurrReservoirs[neighborIndex];
+            Reservoir neighborR = g_ReservoirTemporalInput[neighborIndex];
             if (neighborR.M > 0.0f && dotNormal > 0.95f) {
                 // Re-evaluate target PDF for neighbor sample at current surface
                 float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance);
                 
                 if (neighborTargetPDF > 0.0f) {
-                    neighborR.targetPDF = neighborTargetPDF;
-                    
-                    // Merge reservoirs
-                    r.M += neighborR.M;
-                    r.w_sum += neighborR.w_sum * neighborR.targetPDF;
-                    
-                    float weight = (neighborR.w_sum * neighborR.targetPDF) / max(r.w_sum, 1e-6f);
-                    if (next_float(rng) < weight) {
-                        r.hitPos = neighborR.hitPos;
-                        r.hitNormal = neighborR.hitNormal;
-                        r.radiance = neighborR.radiance;
-                        r.targetPDF = neighborR.targetPDF;
+                    if (mergeReservoirs(r, neighborR, neighborTargetPDF, next_float(rng))) {
+                        selectedPDF = neighborTargetPDF;
                     }
+                    // neighborR.targetPDF = neighborTargetPDF;
+                    
+                    // // Merge reservoirs
+                    // r.M += neighborR.M;
+                    // r.w_sum += neighborR.w_sum * neighborR.targetPDF;
+                    
+                    // float weight = (neighborR.w_sum * neighborR.targetPDF) / max(r.w_sum, 1e-6f);
+                    // if (next_float(rng) < weight) {
+                    //     r.hitPos = neighborR.hitPos;
+                    //     r.hitNormal = neighborR.hitNormal;
+                    //     r.radiance = neighborR.radiance;
+                    //     r.targetPDF = neighborR.targetPDF;
+                    // }
                 }
             }
         }
     }
 
     // Normalize reservoir weight
-    if (r.M > 0.0f && r.targetPDF > 0.0f) {
-        r.w_sum = r.w_sum / (r.M * r.targetPDF);
+    if (r.M > 0.0f && selectedPDF > 0.0f) {
+        r.w_sum = r.w_sum / (r.M * selectedPDF);
     } else {
         r.w_sum = 0.0f;
     }
 
-    g_ResolvedReservoirs[pixelIndex] = r;
+    g_ReservoirOutput[pixelIndex] = r;
 }

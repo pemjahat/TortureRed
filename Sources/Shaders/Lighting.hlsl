@@ -1,6 +1,7 @@
 #include "Common.hlsl"
 #include "PBR.hlsl"
 #include "CommonTracing.hlsl"
+#include "IrCache_Common.hlsl"
 
 struct VSInput {
     uint vertexID : SV_VertexID;
@@ -23,6 +24,7 @@ PSInput VSMain(VSInput input) {
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
+Texture3D<float4> g_IrCacheTex : register(t1, space3);
 
 float4 PSMain(PSInput input) : SV_Target {
     float4 albedo = g_Textures[FrameCB.albedoIndex].Sample(g_LinearSampler, input.texCoord);
@@ -121,6 +123,13 @@ float4 PSMain(PSInput input) : SV_Target {
         // Sample the indirect lighting texture
         float3 indirectLighting = g_IndirectLightingTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
         finalColor += indirectLighting;
+    }
+    
+    if (FrameCB.debugIrCache)
+    {
+        float3 uvw = WorldToIrCacheUVW(worldPos.xyz);
+        float4 irCacheVal = g_IrCacheTex.SampleLevel(g_LinearSampler, uvw, 0);
+        finalColor = irCacheVal.rgb;
     }
     
     // Basic Tone Mapping

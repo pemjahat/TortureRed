@@ -110,6 +110,7 @@ public:
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
     GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
+    UINT GetIrCacheSRVIndex() const { return m_IrCache[m_CurrentReservoirIndex].srvIndex; }
 
     // Lights
     void CreateLightsBuffer();
@@ -182,7 +183,7 @@ private:
 
     // Rasterizer Indirect GI
     GPUTexture m_IrCache[2];
-    GPUBuffer m_RasterReservoirs;
+    GPUBuffer m_RasterReservoirs[2];
     GPUBuffer m_RasterReservoirIntermediate;
     GPUTexture m_RasterIndirectLightingTex;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;

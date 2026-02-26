@@ -25,6 +25,7 @@ struct FrameConstants {
     uint numLights;
     uint lightSamplingMode; // 0=uniform, 1=importance sampling (indirect only)
     uint lightLUTBufferIndex; // Index into light LUT buffer
+    uint debugIrCache;
 };
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {

@@ -76,6 +76,7 @@ struct FrameConstants
     uint32_t numLights;
     uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
     uint32_t lightLUTBufferIndex; // Index into the light LUT buffer for O(1) importance sampling
+    uint32_t debugIrCache;
 };
 
 struct LightConstants

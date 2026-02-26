@@ -2,11 +2,9 @@
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
-// Inputs
-StructuredBuffer<Reservoir> g_ResolvedReservoirs : register(t0, space3);
-
 // Outputs
 RWTexture2D<float4> g_IndirectLightingTex : register(u1);
+RWStructuredBuffer<Reservoir> g_ReservoirFinal : register(u2);  // Spatial output (final reservoir)
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
@@ -39,7 +37,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float roughness = max(0.01f, material.g);
     float3 viewDir = normalize(FrameCB.cameraPosition.xyz - worldPos);
 
-    Reservoir r = g_ResolvedReservoirs[pixelIndex];
+    Reservoir r = g_ReservoirFinal[pixelIndex];
     
     float3 indirectLighting = 0.0f;
 

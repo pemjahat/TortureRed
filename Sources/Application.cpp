@@ -439,6 +439,11 @@ void Application::Render()
             {
                 cmdList->SetGraphicsRootDescriptorTable(14, m_Renderer.GetGPUDescriptorHandle(m_Renderer.GetRasterIndirectLightingTex().srvIndex));
             }
+            if (m_FrameConstants.debugIrCache)
+            {
+                // Bind IrCache to t1, space3 (which is the second descriptor in the space3 range)
+                cmdList->SetGraphicsRootDescriptorTable(15, m_Renderer.GetGPUDescriptorHandle(m_Renderer.GetIrCacheSRVIndex()));
+            }
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
@@ -560,6 +565,12 @@ void Application::RenderImGui()
         if (ImGui::Checkbox("Enable Raster Indirect GI", &enableRasterIndirectGI))
         {
             m_FrameConstants.enableRasterIndirectGI = enableRasterIndirectGI ? 1 : 0;
+        }
+
+        bool debugIrCache = (m_FrameConstants.debugIrCache != 0);
+        if (ImGui::Checkbox("Debug Irradiance Cache", &debugIrCache))
+        {
+            m_FrameConstants.debugIrCache = debugIrCache ? 1 : 0;
         }
     }
 

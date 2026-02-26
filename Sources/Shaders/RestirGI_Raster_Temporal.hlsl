@@ -5,12 +5,13 @@ ConstantBuffer<FrameConstants> g_Frame : register(b0);
 
 // Inputs
 Texture3D<float4> g_CurrIrCache : register(t0, space3);
-StructuredBuffer<Reservoir> g_PrevReservoirs : register(t1, space3);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 // Outputs
-RWStructuredBuffer<Reservoir> g_CurrReservoirs : register(u0);
 RWTexture2D<float4> g_IndirectLightingTex : register(u1);
+
+RWStructuredBuffer<Reservoir> g_CurrReservoirs : register(u2);  // Temporal output (ping-pong with Previous)
+RWStructuredBuffer<Reservoir> g_PrevReservoirs : register(u3); // Previous frame's temporal output
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
@@ -116,7 +117,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
     }
 
     // 2. Create Initial Reservoir
-    Reservoir r = (Reservoir)0;
+    //Reservoir r = (Reservoir)0;
+    Reservoir r;
+    r.hitPos = 0; r.hitNormal = 0; r.radiance = 0; r.targetPDF = 0;
+    r.w_sum = 0; r.M = 0;
+
     Surface s;
     s.worldPos = worldPos;
     s.normal = normal;
@@ -125,16 +130,20 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.metallic = metallic;
     s.roughness = roughness;
 
+    float selectedPDF = 0.f;
     float targetPDF = GetTargetPDF(s, hitPos, sampleRadiance);
-    
-    if (targetPDF > 0.0f) {
-        r.hitPos = hitPos;
-        r.hitNormal = hitNormal;
-        r.radiance = sampleRadiance;
-        r.targetPDF = targetPDF;
-        r.w_sum = (1.0f / pdf) * targetPDF;
-        r.M = 1.0f;
+    if (updateReservoir(r, hitPos, hitNormal, sampleRadiance, targetPDF, pdf, next_float(rng))) {
+        selectedPDF = targetPDF;
     }
+
+    // if (targetPDF > 0.0f) {
+    //     r.hitPos = hitPos;
+    //     r.hitNormal = hitNormal;
+    //     r.radiance = sampleRadiance;
+    //     r.targetPDF = targetPDF;
+    //     r.w_sum = (1.0f / pdf) * targetPDF;
+    //     r.M = 1.0f;
+    // }
 
     // 3. Temporal Reuse
     float4 prevClipPos = mul(float4(worldPos, 1.0f), g_Frame.viewProjPrevious);
@@ -150,27 +159,36 @@ void main(uint3 DTid : SV_DispatchThreadID)
             float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance);
             
             if (historyTargetPDF > 0.0f) {
-                prevR.targetPDF = historyTargetPDF;
-                prevR.M = min(prevR.M, 20.0f); // Cap history length
-                
-                // Merge reservoirs
-                r.M += prevR.M;
-                r.w_sum += prevR.w_sum * prevR.targetPDF;
-                
-                float weight = (prevR.w_sum * prevR.targetPDF) / max(r.w_sum, 1e-6f);
-                if (next_float(rng) < weight) {
-                    r.hitPos = prevR.hitPos;
-                    r.hitNormal = prevR.hitNormal;
-                    r.radiance = prevR.radiance;
-                    r.targetPDF = prevR.targetPDF;
+
+                if (mergeReservoirs(r, prevR, historyTargetPDF, next_float(rng))) {
+                    selectedPDF = historyTargetPDF;
                 }
+
+                // prevR.targetPDF = historyTargetPDF;
+                // prevR.M = min(prevR.M, 20.0f); // Cap history length
+                
+                // // Merge reservoirs
+                // r.M += prevR.M;
+                // r.w_sum += prevR.w_sum * prevR.targetPDF;
+                
+                // float weight = (prevR.w_sum * prevR.targetPDF) / max(r.w_sum, 1e-6f);
+                // if (next_float(rng) < weight) {
+                //     r.hitPos = prevR.hitPos;
+                //     r.hitNormal = prevR.hitNormal;
+                //     r.radiance = prevR.radiance;
+                //     r.targetPDF = prevR.targetPDF;
+                // }
+            }
+            if (r.M > 30.0f) { 
+                r.w_sum *= (30.0f / r.M); 
+                r.M = 30.0f; 
             }
         }
     }
 
     // Normalize reservoir weight
-    if (r.M > 0.0f && r.targetPDF > 0.0f) {
-        r.w_sum = r.w_sum / (r.M * r.targetPDF);
+    if (r.M > 0.0f && selectedPDF > 0.0f) {
+        r.w_sum = r.w_sum / (r.M * selectedPDF);
     } else {
         r.w_sum = 0.0f;
     }
