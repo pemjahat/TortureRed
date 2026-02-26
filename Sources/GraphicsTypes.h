@@ -5,7 +5,6 @@ struct Reservoir
     DirectX::XMFLOAT3 hitPos;
     DirectX::XMFLOAT3 hitNormal;
     DirectX::XMFLOAT3 radiance;
-    float targetPDF;
     float w_sum;
     float M;
     float W;

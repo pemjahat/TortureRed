@@ -79,19 +79,6 @@ void main(uint3 DTid : SV_DispatchThreadID)
                     if (mergeReservoirs(r, neighborR, neighborTargetPDF, next_float(rng))) {
                         selectedPDF = neighborTargetPDF;
                     }
-                    // neighborR.targetPDF = neighborTargetPDF;
-                    
-                    // // Merge reservoirs
-                    // r.M += neighborR.M;
-                    // r.w_sum += neighborR.w_sum * neighborR.targetPDF;
-                    
-                    // float weight = (neighborR.w_sum * neighborR.targetPDF) / max(r.w_sum, 1e-6f);
-                    // if (next_float(rng) < weight) {
-                    //     r.hitPos = neighborR.hitPos;
-                    //     r.hitNormal = neighborR.hitNormal;
-                    //     r.radiance = neighborR.radiance;
-                    //     r.targetPDF = neighborR.targetPDF;
-                    // }
                 }
             }
         }
@@ -99,9 +86,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // Normalize reservoir weight
     if (r.M > 0.0f && selectedPDF > 0.0f) {
-        r.w_sum = r.w_sum / (r.M * selectedPDF);
+        r.W = r.w_sum / (r.M * selectedPDF);
     } else {
-        r.w_sum = 0.0f;
+        r.W = 0.0f;
     }
 
     g_ReservoirOutput[pixelIndex] = r;

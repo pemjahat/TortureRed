@@ -31,8 +31,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     spatialRes.hitPos = 0;
     spatialRes.hitNormal = 0;
     spatialRes.radiance = 0;
-    spatialRes.targetPDF = 0;
     spatialRes.w_sum = 0;
+    spatialRes.W = 0;
     spatialRes.M = 0;
 
     // 2. Merge the temporal reservoir as the first candidate
@@ -95,9 +95,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // Final Normalization: Re-evaluate target PDF for the winning sample
     if (selectedTargetPdf > 0 && spatialRes.M > 0) {
-        spatialRes.w_sum = spatialRes.w_sum / (spatialRes.M * selectedTargetPdf);
+        spatialRes.W = spatialRes.w_sum / (spatialRes.M * selectedTargetPdf);
     } else {
-        spatialRes.w_sum = 0;
+        spatialRes.W = 0;
     }
 
     g_ReservoirOutput[pixelIdx] = spatialRes;

@@ -41,7 +41,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     
     float3 indirectLighting = 0.0f;
 
-    if (r.w_sum > 0.0f) {
+    if (r.W > 0.0f) {
         float3 L = normalize(r.hitPos - worldPos);
         float NdotL = max(0.0f, dot(normal, L));
         
@@ -53,7 +53,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 specBRDF = 0.0f;
             }
             
-            indirectLighting = (diffBRDF + specBRDF) * r.radiance * r.w_sum * NdotL;
+            indirectLighting = (diffBRDF + specBRDF) * r.radiance * r.W * NdotL;
         }
     }
 

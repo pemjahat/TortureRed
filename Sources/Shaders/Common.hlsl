@@ -79,15 +79,14 @@ struct Reservoir {
     float3 hitPos;     // Position of the indirect light hit
     float3 hitNormal;  // Normal at the hit point
     float3 radiance;   // Folded radiance from the hit point (includes albedo)
-    float targetPDF;   // Demodulated target PDF for selection
-    float w_sum;       // Sum of weights and Normalization weight (at the end of spatial / temporal pass)
+    float w_sum;       // Sum of RIS weights
+    float W;           // Normalization weight used at resolve
     float M;           // Number of samples
 };
 
 // Weighted Reservoir Sampling helper
 // Returns true if the new sample was selected
-bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float targetPDF, float samplePDF, float rnd) {
-    float risWeight = (samplePDF > 0) ? (targetPDF / samplePDF) : 0;
+bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float risWeight, float rnd) {
     r.w_sum += risWeight;
     r.M += 1.0f;
 
@@ -102,8 +101,8 @@ bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 
 
 // Merge two reservoirs with a shifted target PDF
 // Returns true if the reservoir was updated with the new sample
-bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float targetPDF, float rnd) {
-    float risWeight = targetPDF * neighbourRes.w_sum * neighbourRes.M;
+bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float shiftedTargetPDF, float rnd) {
+    float risWeight = shiftedTargetPDF * neighbourRes.W * neighbourRes.M;
 
     curRes.w_sum += risWeight;
     curRes.M += neighbourRes.M;

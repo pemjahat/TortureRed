@@ -46,7 +46,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             g_Scene, g_Lights, g_Frame.numLights, g_Frame, false, rng);
 
         // --- Indirect Lighting from Reservoir ---
-        if (res.w_sum > 0) {
+        if (res.W > 0) {
             float3 L_res = normalize(res.hitPos - worldPos);
             float NdotL_res = max(0.0f, dot(N, L_res));
             
@@ -60,7 +60,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 // Final Unbiased ReSTIR GI Resolve:
                 // res.radiance is incident radiance (L_in).
                 // We multiply by the current BRDF and weight by normalization W.
-                float3 indirectRadiance = evalContrib * res.radiance * res.w_sum;
+                float3 indirectRadiance = evalContrib * res.radiance * res.W;
                 
                 // Clamp to prevent fireflies from extreme weights
                 accumulatedColor += min(indirectRadiance, 10.0f);

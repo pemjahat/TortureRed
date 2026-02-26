@@ -119,8 +119,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // 2. Create Initial Reservoir
     //Reservoir r = (Reservoir)0;
     Reservoir r;
-    r.hitPos = 0; r.hitNormal = 0; r.radiance = 0; r.targetPDF = 0;
-    r.w_sum = 0; r.M = 0;
+    r.hitPos = 0; r.hitNormal = 0; r.radiance = 0;
+    r.w_sum = 0; r.W = 0; r.M = 0;
 
     Surface s;
     s.worldPos = worldPos;
@@ -132,18 +132,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     float selectedPDF = 0.f;
     float targetPDF = GetTargetPDF(s, hitPos, sampleRadiance);
-    if (updateReservoir(r, hitPos, hitNormal, sampleRadiance, targetPDF, pdf, next_float(rng))) {
+    float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
+    if (updateReservoir(r, hitPos, hitNormal, sampleRadiance, risWeight, next_float(rng))) {
         selectedPDF = targetPDF;
     }
-
-    // if (targetPDF > 0.0f) {
-    //     r.hitPos = hitPos;
-    //     r.hitNormal = hitNormal;
-    //     r.radiance = sampleRadiance;
-    //     r.targetPDF = targetPDF;
-    //     r.w_sum = (1.0f / pdf) * targetPDF;
-    //     r.M = 1.0f;
-    // }
 
     // 3. Temporal Reuse
     float4 prevClipPos = mul(float4(worldPos, 1.0f), g_Frame.viewProjPrevious);
@@ -164,20 +156,6 @@ void main(uint3 DTid : SV_DispatchThreadID)
                     selectedPDF = historyTargetPDF;
                 }
 
-                // prevR.targetPDF = historyTargetPDF;
-                // prevR.M = min(prevR.M, 20.0f); // Cap history length
-                
-                // // Merge reservoirs
-                // r.M += prevR.M;
-                // r.w_sum += prevR.w_sum * prevR.targetPDF;
-                
-                // float weight = (prevR.w_sum * prevR.targetPDF) / max(r.w_sum, 1e-6f);
-                // if (next_float(rng) < weight) {
-                //     r.hitPos = prevR.hitPos;
-                //     r.hitNormal = prevR.hitNormal;
-                //     r.radiance = prevR.radiance;
-                //     r.targetPDF = prevR.targetPDF;
-                // }
             }
             if (r.M > 30.0f) { 
                 r.w_sum *= (30.0f / r.M); 
@@ -188,9 +166,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // Normalize reservoir weight
     if (r.M > 0.0f && selectedPDF > 0.0f) {
-        r.w_sum = r.w_sum / (r.M * selectedPDF);
+        r.W = r.w_sum / (r.M * selectedPDF);
     } else {
-        r.w_sum = 0.0f;
+        r.W = 0.0f;
     }
 
     g_CurrReservoirs[pixelIndex] = r;

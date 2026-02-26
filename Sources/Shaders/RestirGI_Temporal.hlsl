@@ -33,8 +33,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
 
     Reservoir res;
-    res.hitPos = 0; res.hitNormal = 0; res.radiance = 0; res.targetPDF = 0;
-    res.w_sum = 0; res.M = 0;
+    res.hitPos = 0; res.hitNormal = 0; res.radiance = 0;
+    res.w_sum = 0; res.W = 0; res.M = 0;
 
     float3 throughput = 1;
     float3 indirectRadianceAccum = 0;
@@ -156,7 +156,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             
             // Use GetTargetPDF to determine weight for initial sample
             float targetPDF = GetTargetPDF(surface, indirectHitPos, L_in);
-            if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, targetPDF, firstBouncePDF, next_float(rng))) {
+            float risWeight = (firstBouncePDF > 0.0f) ? (targetPDF / firstBouncePDF) : 0.0f;
+            if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, risWeight, next_float(rng))) {
                 selectedTargetPdf = targetPDF;
             }
         }
@@ -203,9 +204,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         // Final Normalization: Re-evaluate target PDF for the winning sample
          if (selectedTargetPdf > 0 && res.M > 0) {
-             res.w_sum = res.w_sum / (res.M * selectedTargetPdf);
+             res.W = res.w_sum / (res.M * selectedTargetPdf);
          } else {
-             res.w_sum = 0;
+             res.W = 0;
          }
     }
 
