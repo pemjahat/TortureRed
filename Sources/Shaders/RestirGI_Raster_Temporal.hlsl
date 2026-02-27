@@ -99,9 +99,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         // Multi-bounce: Sample Current IrCache
         float3 hitUVW = WorldToIrCacheUVW(hitPos);
-        float4 irCacheSample = g_CurrIrCache.SampleLevel(g_LinearSampler, hitUVW, 0);
-        float irCacheConfidence = saturate(irCacheSample.a / 64.0f);
-        float3 indirectLighting = irCacheSample.rgb * irCacheConfidence;
+        //float irCacheConfidence = saturate(irCacheSample.a / 64.0f);
+        //float3 indirectLighting = irCacheSample.rgb * irCacheConfidence;
+        float3 indirectLighting = g_CurrIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
         
         sampleRadiance = (directLighting + indirectLighting) * hitAlbedo.rgb;
     }

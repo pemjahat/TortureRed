@@ -10,6 +10,10 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 // Outputs
 RWTexture3D<float4> g_CurrIrCache : register(u0);
 
+static const float IRCACHE_HISTORY_DECAY = 0.995f;
+static const float IRCACHE_MAX_HISTORY_WEIGHT = 4096.0f;
+static const float IRCACHE_CONFIDENCE_RAYS = 64.0f;
+
 [numthreads(8, 8, 8)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
@@ -87,6 +91,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
             // 2. Multi-bounce: Sample previous IrCache
             float3 hitUVW = WorldToIrCacheUVW(hitPos);
+            //float4 prevIndirectSample = g_PrevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0);
+            //float historyConfidence = saturate(prevIndirectSample.a / IRCACHE_CONFIDENCE_RAYS);
+            //float3 indirectLighting = prevIndirectSample.rgb * historyConfidence;
             float3 indirectLighting = g_PrevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
             
             // Simple diffuse bounce approximation
@@ -99,16 +106,39 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     float3 newIrradiance = validRays > 0.0f ? (totalIrradiance / validRays) : 0.0f;
 
-    // Exponential moving average with previous frame
-    float3 prevIrradiance = g_PrevIrCache[DTid].rgb;
-    float blendFactor = 0.05f; // 5% new, 95% old
-    
-    // If this is the first frame or history is invalid, snap to new value
+    // Weighted temporal accumulation:
+    // rgb = temporal mean irradiance
+    // a   = effective history weight
+    float4 prev = g_PrevIrCache[DTid];
+    float3 prevIrradiance = prev.rgb;
+    // float prevWeight = prev.a;
+
+    // float newWeight = validRays;
+    // float3 finalIrradiance = 0.0f;
+    // float finalWeight = 0.0f;
+
+    // bool historyValid = (g_Frame.frameIndex > 0) && (prevWeight > 0.0f) && all(prevIrradiance == prevIrradiance);
+
+    // if (!historyValid) {
+    //     finalIrradiance = newIrradiance;
+    //     finalWeight = max(1.0f, newWeight);
+    // } else {
+    //     float historyWeight = prevWeight * IRCACHE_HISTORY_DECAY;
+
+    //     if (newWeight > 0.0f) {
+    //         float totalWeight = historyWeight + newWeight;
+    //         finalIrradiance = (prevIrradiance * historyWeight + newIrradiance * newWeight) / max(1e-5f, totalWeight);
+    //         finalWeight = min(totalWeight, IRCACHE_MAX_HISTORY_WEIGHT);
+    //     } else {
+    //         finalIrradiance = prevIrradiance;
+    //         finalWeight = max(1.0f, historyWeight);
+    //     }
+    // }
+
+    //g_CurrIrCache[DTid] = float4(finalIrradiance, finalWeight);
+    float blendFactor = 0.05f;
     if (g_Frame.frameIndex == 0) {
         blendFactor = 1.0f;
     }
-
-    float3 finalIrradiance = lerp(prevIrradiance, newIrradiance, blendFactor);
-    
-    g_CurrIrCache[DTid] = float4(finalIrradiance, 1.0f);
+    g_CurrIrCache[DTid] = float4(lerp(prevIrradiance, newIrradiance, blendFactor), 1.0f);
 }
