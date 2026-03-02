@@ -306,6 +306,8 @@ void Application::Update(float deltaTime)
     m_FrameConstants.exposure = m_Exposure;
     m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
     m_FrameConstants.lightLUTBufferIndex = m_Renderer.GetLightLUTDescriptorIndex();
+    m_FrameConstants.screenWidth = (uint32_t)WINDOW_WIDTH;
+    m_FrameConstants.screenHeight = (uint32_t)WINDOW_HEIGHT;
 
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
@@ -416,6 +418,8 @@ void Application::Render()
 
         // 3. Lighting Pass
         {
+            BindlessIndices indices;
+
             // Transition G-Buffer targets to SRV state
             m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -435,15 +439,16 @@ void Application::Render()
             cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
+
             if (m_FrameConstants.enableRasterIndirectGI)
             {
-                cmdList->SetGraphicsRootDescriptorTable(14, m_Renderer.GetGPUDescriptorHandle(m_Renderer.GetRasterIndirectLightingTex().srvIndex));
+                indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;    
             }
             if (m_FrameConstants.debugIrCache)
             {
-                // Bind IrCache to t1, space3 (which is the second descriptor in the space3 range)
-                cmdList->SetGraphicsRootDescriptorTable(15, m_Renderer.GetGPUDescriptorHandle(m_Renderer.GetIrCacheSRVIndex()));
+                indices.InputIdx1 = m_Renderer.GetIrCacheSRVIndex();
             }
+            cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);

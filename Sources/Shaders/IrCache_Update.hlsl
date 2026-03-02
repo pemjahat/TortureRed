@@ -2,13 +2,9 @@
 #include "CommonTracing.hlsl"
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
-// Inputs
-Texture3D<float4> g_PrevIrCache : register(t0, space3);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-
-// Outputs
-RWTexture3D<float4> g_CurrIrCache : register(u0);
 
 static const float IRCACHE_HISTORY_DECAY = 0.995f;
 static const float IRCACHE_MAX_HISTORY_WEIGHT = 4096.0f;
@@ -25,6 +21,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // Initialize RNG for this probe
     RNG rng;
     seed_rng(rng, DTid.xy + DTid.z * 100, g_Frame.frameIndex);
+
+    // Accessing texture bindless
+    Texture3D<float4> prevIrCache = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWTexture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
     float3 totalIrradiance = 0.0f;
     float validRays = 0.0f;
@@ -91,10 +91,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
             // 2. Multi-bounce: Sample previous IrCache
             float3 hitUVW = WorldToIrCacheUVW(hitPos);
+            
             //float4 prevIndirectSample = g_PrevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0);
             //float historyConfidence = saturate(prevIndirectSample.a / IRCACHE_CONFIDENCE_RAYS);
             //float3 indirectLighting = prevIndirectSample.rgb * historyConfidence;
-            float3 indirectLighting = g_PrevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
+            float3 indirectLighting = prevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
             
             // Simple diffuse bounce approximation
             float3 bounceRadiance = (directLighting + indirectLighting) * albedo.rgb;
@@ -109,7 +110,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // Weighted temporal accumulation:
     // rgb = temporal mean irradiance
     // a   = effective history weight
-    float4 prev = g_PrevIrCache[DTid];
+    float4 prev = prevIrCache[DTid];
     float3 prevIrradiance = prev.rgb;
     // float prevWeight = prev.a;
 
@@ -140,5 +141,5 @@ void main(uint3 DTid : SV_DispatchThreadID)
     if (g_Frame.frameIndex == 0) {
         blendFactor = 1.0f;
     }
-    g_CurrIrCache[DTid] = float4(lerp(prevIrradiance, newIrradiance, blendFactor), 1.0f);
+    currIrCache[DTid] = float4(lerp(prevIrradiance, newIrradiance, blendFactor), 1.0f);
 }

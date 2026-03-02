@@ -196,14 +196,14 @@ bool Renderer::Initialize(HWND hwnd)
         // Create ReSTIR Reservoirs
         for (int i = 0; i < 2; ++i)
         {
-            if (!CreateBuffer(m_ReservoirBuffer[i], WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(Reservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+            if (!CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
             {
                 std::cerr << "Failed to create ReSTIR reservoir buffer" << std::endl;
                 return false;
             }
         }
 
-        if (!CreateBuffer(m_ReservoirIntermediate, WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(Reservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+        if (!CreateStructuredBuffer(m_ReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
         {
             std::cerr << "Failed to create ReSTIR intermediate reservoir buffer" << std::endl;
             return false;
@@ -217,7 +217,7 @@ bool Renderer::Initialize(HWND hwnd)
 
         for (int i = 0; i < 2; ++i)
         {
-            if (!CreateBuffer(m_RtxdiReservoirBuffer[i], reservoirArrayPitch * sizeof(RTXDI_PackedGIReservoir), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false))
+            if (!CreateStructuredBuffer(m_RtxdiReservoirBuffer[i], sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
             {
                 std::cerr << "Failed to create RTXDI reservoir buffer " << i << std::endl;
                 return false;
@@ -342,9 +342,9 @@ void Renderer::BeginFrame()
     // Bind TLAS for ray-traced shadows in pixel shader
     m_CommandList->SetGraphicsRootShaderResourceView(4, m_TLAS.gpuAddress);
 
-    // Bind Lights Buffer (t0, space2) - root parameter 12
-    m_CommandList->SetGraphicsRootShaderResourceView(12, m_LightsBuffer.gpuAddress);
-    m_CommandList->SetGraphicsRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT (t1, space2)
+    // Bind Lights Buffer (t0, space2) - root parameter 10
+    m_CommandList->SetGraphicsRootShaderResourceView(10, m_LightsBuffer.gpuAddress);
+    m_CommandList->SetGraphicsRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT (t1, space2)
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -403,16 +403,10 @@ void Renderer::CreateRootSignature()
     srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 0); // t0 space0: Bindless textures
 
     CD3DX12_DESCRIPTOR_RANGE uavRange0;
-    uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Accumulation Buffer
+    uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Restir RTXDI ping pong buffer
 
     CD3DX12_DESCRIPTOR_RANGE uavRange1;
-    uavRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0); // u1 space0: Output Buffer
-
-    CD3DX12_DESCRIPTOR_RANGE uavRange2;
-    uavRange2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 2, 0); // u2 space0: Reservoir Current
-
-    CD3DX12_DESCRIPTOR_RANGE uavRange3;
-    uavRange3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 3, 0); // u3 space0: Reservoir Previous
+    uavRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0); // u1 space0: Restir RTXDI ping pong buffer
 
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
@@ -423,7 +417,7 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3_2;
     srvRangeSpace3_2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 3); // t1 space3: IrCache Debug
 
-    CD3DX12_ROOT_PARAMETER rootParameters[16];
+    CD3DX12_ROOT_PARAMETER rootParameters[13];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -431,15 +425,12 @@ void Renderer::CreateRootSignature()
     rootParameters[4].InitAsShaderResourceView(2, 1); // t2 space1: TLAS
     rootParameters[5].InitAsShaderResourceView(3, 1); // t3 space1: Indices
     rootParameters[6].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
-    rootParameters[7].InitAsDescriptorTable(1, &uavRange0); // u0 : PathTracer accumulation buffer
-    rootParameters[8].InitAsDescriptorTable(1, &uavRange1); // u1 : PathTracer output buffer
-    rootParameters[9].InitAsDescriptorTable(1, &uavRange2); // u2 : Restir ping pong buffer
-    rootParameters[10].InitAsDescriptorTable(1, &uavRange3); // u3 : Restir ping pong buffer
-    rootParameters[11].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
-    rootParameters[12].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
-    rootParameters[13].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
-    rootParameters[14].InitAsDescriptorTable(1, &srvRangeSpace3); // t0 space3: ReSTIR GI SRVs
-    rootParameters[15].InitAsDescriptorTable(1, &srvRangeSpace3_2); // t1 space3: IrCache Debug
+    rootParameters[7].InitAsDescriptorTable(1, &uavRange0); // u0 : Restir RTXDI ping pong buffer
+    rootParameters[8].InitAsDescriptorTable(1, &uavRange1); // u1 : Restir RTXDI ping pong buffer
+    rootParameters[9].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
+    rootParameters[10].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
+    rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
+    rootParameters[12].InitAsConstants(sizeof(BindlessIndices) / 4, 1, 0); // b1: Bindless indices
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -701,15 +692,13 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     TransitionResource(m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    D3D12_RESOURCE_BARRIER uavBarriers[7];
+    D3D12_RESOURCE_BARRIER uavBarriers[5];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
     uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
-    uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[0].resource.Get());
-    uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[1].resource.Get());
-    uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
-    uavBarriers[5] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[0].resource.Get());
-    uavBarriers[6] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
-    m_CommandList->ResourceBarrier(7, uavBarriers);
+    uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+    uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[0].resource.Get());
+    uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
+    m_CommandList->ResourceBarrier(5, uavBarriers);
 
     m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
@@ -721,10 +710,10 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
-    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_AccumulationBuffer.uavIndex));
-    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_PathTracerOutput.uavIndex));
-    m_CommandList->SetComputeRootShaderResourceView(12, m_LightsBuffer.gpuAddress); // Lights Buffer
-    m_CommandList->SetComputeRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
+    m_CommandList->SetComputeRootShaderResourceView(10, m_LightsBuffer.gpuAddress); // Lights Buffer
+    m_CommandList->SetComputeRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
+
+    BindlessIndices indices;
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
@@ -733,12 +722,12 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     {
         // NVIDIA RTXDI Path
         // Bind common RTXDI resources
-        m_CommandList->SetComputeRootDescriptorTable(11, GetGPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
+        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
 
         // Pass 1: Temporal Resampling
         m_CommandList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
@@ -746,8 +735,8 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 2: Spatial Resampling
         m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
@@ -755,7 +744,10 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 3: Resolve
         m_CommandList->SetPipelineState(m_RtxdiRestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
+        indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
     else if (frame.enableRestir)
@@ -763,8 +755,9 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         // Torture ReSTIR (Manual Implementation)
         // Pass 1: Temporal — writes to ReservoirBuffer[current], reads history from ReservoirBuffer[previous]
         m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[previousReservoir].uavIndex));
+        indices.InputIdx0 = m_ReservoirBuffer[previousReservoir].srvIndex;
+        indices.OutputIdx0 = m_ReservoirBuffer[currentReservoir].uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get());
@@ -772,8 +765,9 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 2: Spatial — writes to Intermediate, reads temporal from ReservoirBuffer[current]
         m_CommandList->SetPipelineState(m_RestirSpatialPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirBuffer[currentReservoir].uavIndex));
+        indices.InputIdx0 = m_ReservoirBuffer[currentReservoir].srvIndex;
+        indices.OutputIdx0 = m_ReservoirIntermediate.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
@@ -781,7 +775,10 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 3: Resolve — reads spatial output from Intermediate
         m_CommandList->SetPipelineState(m_RestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        indices.InputIdx0 = m_ReservoirIntermediate.srvIndex;
+        indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
+        indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
     else
@@ -823,9 +820,10 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
-    m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RasterIndirectLightingTex.uavIndex));
-    m_CommandList->SetComputeRootShaderResourceView(12, m_LightsBuffer.gpuAddress); // Lights Buffer
-    m_CommandList->SetComputeRootShaderResourceView(13, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
+    m_CommandList->SetComputeRootShaderResourceView(10, m_LightsBuffer.gpuAddress); // Lights Buffer
+    m_CommandList->SetComputeRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
+
+    BindlessIndices indices;
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
@@ -835,8 +833,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     TransitionResource(m_IrCache[currentReservoir], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TransitionResource(m_IrCache[previousReservoir], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     m_CommandList->SetPipelineState(m_IrCacheUpdatePSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_IrCache[previousReservoir].srvIndex));
-    m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_IrCache[currentReservoir].uavIndex));
+    indices.InputIdx0 = m_IrCache[previousReservoir].srvIndex;
+    indices.OutputIdx0 = m_IrCache[currentReservoir].uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch(64 / 8, 32 / 8, 64 / 8);
 
     // Restir Temporal
@@ -844,10 +843,10 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     
     TransitionResource(m_IrCache[0], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_IrCache[currentReservoir].srvIndex)); // t0-t1 space3
-    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirs[currentReservoir].uavIndex));
-    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RasterReservoirs[previousReservoir].uavIndex));
-    //->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RasterReservoirs.uavIndex)); // u0 space0
+    indices.InputIdx0 = m_IrCache[currentReservoir].srvIndex;
+    indices.InputIdx1 = m_RasterReservoirs[previousReservoir].srvIndex;
+    indices.OutputIdx0 = m_RasterReservoirs[currentReservoir].uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirs[currentReservoir].resource.Get());
@@ -856,9 +855,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     // Restir Spatial
     // writes to Intermediate, reads temporal from ReservoirBuffer[current]
     m_CommandList->SetPipelineState(m_RestirGIRasterSpatialPSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex));
-    m_CommandList->SetComputeRootDescriptorTable(10, GetGPUDescriptorHandle(m_RasterReservoirs[currentReservoir].uavIndex));
-    //m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirs.srvIndex)); // t0 space3
+    indices.InputIdx0 = m_RasterReservoirs[currentReservoir].srvIndex;
+    indices.OutputIdx0 = m_RasterReservoirIntermediate.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirIntermediate.resource.Get());
@@ -866,11 +865,11 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
 
     // Restir Resolve
     // reads spatial output from Intermediate
-    //TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_CommandList->SetPipelineState(m_RestirGIRasterResolvePSO.Get());
-    m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.uavIndex));
-    //m_CommandList->SetComputeRootDescriptorTable(14, GetGPUDescriptorHandle(m_RasterReservoirIntermediate.srvIndex)); // t0 space3
+    indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+    indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame

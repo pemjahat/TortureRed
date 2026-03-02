@@ -22,9 +22,11 @@ PSInput VSMain(VSInput input) {
 }
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
-Texture3D<float4> g_IrCacheTex : register(t1, space3);
+//Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
+//Texture3D<float4> g_IrCacheTex : register(t1, space3);
 
 float4 PSMain(PSInput input) : SV_Target {
     float4 albedo = g_Textures[FrameCB.albedoIndex].Sample(g_LinearSampler, input.texCoord);
@@ -121,14 +123,18 @@ float4 PSMain(PSInput input) : SV_Target {
     if (FrameCB.enableRasterIndirectGI)
     {
         // Sample the indirect lighting texture
-        float3 indirectLighting = g_IndirectLightingTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+        Texture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.InputIdx0];
+        
+        float3 indirectLighting = indirectIrradiance.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
         finalColor += indirectLighting;
     }
     
     if (FrameCB.debugIrCache)
     {
+        Texture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.InputIdx1];
+
         float3 uvw = WorldToIrCacheUVW(worldPos.xyz);
-        float4 irCacheVal = g_IrCacheTex.SampleLevel(g_LinearSampler, uvw, 0);
+        float4 irCacheVal = currIrCache.SampleLevel(g_LinearSampler, uvw, 0);
         finalColor = irCacheVal.rgb;
     }
     

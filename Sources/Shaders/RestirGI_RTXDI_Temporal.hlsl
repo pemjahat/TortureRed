@@ -1,11 +1,8 @@
 #include "Common.hlsl"
 #include "Rtxdi/GI/ReSTIRGIParameters.h"
 
-RWTexture2D<float4> g_AccumulationBuffer : register(u0);
-RWTexture2D<float4> g_Output : register(u1);
-
-RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
-RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirHistory : register(u3);
+RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u0);
+RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirHistory : register(u1);
 Buffer<float2> g_NeighborOffsets : register(t5, space1);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
@@ -24,8 +21,7 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint2 launchIndex = dispatchThreadID.xy;
-    uint2 launchDims;
-    g_AccumulationBuffer.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 

@@ -1,25 +1,25 @@
 #include "CommonTracing.hlsl"
 
-RWTexture2D<float4> g_Output : register(u1);
-RWStructuredBuffer<Reservoir> g_ReservoirOutput : register(u2);      // Spatial output (goes to Resolve)
-RWStructuredBuffer<Reservoir> g_ReservoirTemporalInput : register(u3); // Temporal output for this frame
-
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint2 launchIndex = dispatchThreadID.xy;
-    uint2 launchDims;
-    g_Output.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex + 1); // Avoid same RNG as temporal
 
+    // Accessing texture bindless
+    StructuredBuffer<Reservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWStructuredBuffer<Reservoir> tempReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
-    Reservoir temporalRes = g_ReservoirTemporalInput[pixelIdx];
+    Reservoir temporalRes = currReservoirs[pixelIdx];
     float selectedTargetPdf = 0;
 
     Surface centerSurface = (Surface)0;
@@ -51,7 +51,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 neighborIndex.y >= 0 && neighborIndex.y < (int)launchDims.y) {
                 
                 uint neighborPixelIdx = neighborIndex.y * launchDims.x + neighborIndex.x;
-                Reservoir neighborRes = g_ReservoirTemporalInput[neighborPixelIdx];
+                Reservoir neighborRes = currReservoirs[neighborPixelIdx];
 
                 RNG neighborRng;
                 seed_rng(neighborRng, (uint2)neighborIndex, g_Frame.frameIndex + 17u + (uint)i);
@@ -100,5 +100,5 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         spatialRes.W = 0;
     }
 
-    g_ReservoirOutput[pixelIdx] = spatialRes;
+    tempReservoirs[pixelIdx] = spatialRes;
 }

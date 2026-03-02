@@ -11,26 +11,25 @@
 // if you find one bright light in room full of bright light, w_sum will be large
 // even you pick same bright sample, final contribution differs because "density" light in that area differs, w_sum/M capture this density information
 
-RWTexture2D<float4> g_AccumulationBuffer : register(u0);
-RWTexture2D<float4> g_Output : register(u1);
-
-RWStructuredBuffer<Reservoir> g_ReservoirCurrent : register(u2);  // Temporal output (ping-pong with Previous)
-RWStructuredBuffer<Reservoir> g_ReservoirPrevious : register(u3); // Previous frame's temporal output
-
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint2 launchIndex = dispatchThreadID.xy;
-    uint2 launchDims;
-    g_AccumulationBuffer.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
+
+    // Accessing texture bindless
+    StructuredBuffer<Reservoir> prevReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWStructuredBuffer<Reservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
     Reservoir res;
     res.hitPos = 0; res.hitNormal = 0; res.radiance = 0;
@@ -167,7 +166,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             float2 prevUV = (clipPos.xy / clipPos.w) * 0.5f + 0.5f; prevUV.y = 1.0f - prevUV.y;
             if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
                 uint2 prevIndex = (uint2)(prevUV * (float2)launchDims);
-                Reservoir prevRes = g_ReservoirPrevious[prevIndex.y * launchDims.x + prevIndex.x];
+                Reservoir prevRes = prevReservoirs[prevIndex.y * launchDims.x + prevIndex.x];
                 
                 if (prevRes.M > 0) {
                     // Re-calculate target PDF of previous sample relative to CURRENT surface
@@ -210,5 +209,5 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
          }
     }
 
-    g_ReservoirCurrent[launchIndex.y * launchDims.x + launchIndex.x] = res;
+    currReservoirs[launchIndex.y * launchDims.x + launchIndex.x] = res;
 }

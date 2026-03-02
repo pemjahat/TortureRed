@@ -1,19 +1,13 @@
 #include "CommonTracing.hlsl"
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
-
-// Outputs
-RWTexture2D<float4> g_IndirectLightingTex : register(u1);
-
-RWStructuredBuffer<Reservoir> g_ReservoirOutput : register(u2);      // Spatial output (goes to Resolve)
-RWStructuredBuffer<Reservoir> g_ReservoirTemporalInput : register(u3); // Temporal output for this frame
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
     uint2 screenPos = DTid.xy;
-    uint2 launchDims;
-    g_IndirectLightingTex.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (screenPos.x >= launchDims.x || screenPos.y >= launchDims.y) return;
 
@@ -23,11 +17,14 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, screenPos, g_Frame.frameIndex + 1); // Offset seed for spatial
 
+    StructuredBuffer<Reservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWStructuredBuffer<Reservoir> tempReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+
     Surface centerSurface;
     float centerRayT;
     bool hasCenterHit = TracePrimarySurface(screenPos, launchDims, g_Frame, rng, centerSurface, centerRayT);
     if (!hasCenterHit) {
-        g_ReservoirOutput[pixelIndex] = (Reservoir)0;
+        tempReservoirs[pixelIndex] = (Reservoir)0;
         return;
     }
 
@@ -39,7 +36,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.metallic = centerSurface.metallic;
     s.roughness = centerSurface.roughness;
 
-    Reservoir r = g_ReservoirTemporalInput[pixelIndex];
+    Reservoir r = currReservoirs[pixelIndex];
     float selectedPDF = 0.f;
     if (r.M > 0.f) {
         selectedPDF = GetTargetPDF(s, r.hitPos, r.radiance);
@@ -62,7 +59,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 float neighborRayT;
                 bool hasNeighborHit = TracePrimarySurface((uint2)neighborPos, launchDims, g_Frame, neighborRng, neighborSurface, neighborRayT);
 
-            Reservoir neighborR = g_ReservoirTemporalInput[neighborIndex];
+            Reservoir neighborR = currReservoirs[neighborIndex];
                 if (hasNeighborHit && neighborR.M > 0.0f && dot(centerSurface.normal, neighborSurface.normal) > 0.95f) {
                 // Re-evaluate target PDF for neighbor sample at current surface
                 float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance);
@@ -83,5 +80,5 @@ void main(uint3 DTid : SV_DispatchThreadID)
         r.W = 0.0f;
     }
 
-    g_ReservoirOutput[pixelIndex] = r;
+    tempReservoirs[pixelIndex] = r;
 }

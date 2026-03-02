@@ -76,6 +76,8 @@ struct FrameConstants
     uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
     uint32_t lightLUTBufferIndex; // Index into the light LUT buffer for O(1) importance sampling
     uint32_t debugIrCache;
+    uint32_t screenWidth;
+    uint32_t screenHeight;
 };
 
 struct LightConstants
@@ -87,4 +89,12 @@ struct LightConstants
     float intensity;
     float selectionPDF;
     uint32_t padding[2];
+};
+
+struct BindlessIndices 
+{
+    uint32_t InputIdx0; // raster rister require 2 input: current IrCache and previous Restir reservoir
+    uint32_t InputIdx1;
+    uint32_t OutputIdx0; // Restir output accumulation and path trace output    
+    uint32_t OutputIdx1;
 };

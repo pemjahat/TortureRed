@@ -1,17 +1,13 @@
 #include "CommonTracing.hlsl"
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
-
-// Outputs
-RWTexture2D<float4> g_IndirectLightingTex : register(u1);
-RWStructuredBuffer<Reservoir> g_ReservoirFinal : register(u3);  // Spatial output (final reservoir)
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
     uint2 screenPos = DTid.xy;
-    uint2 launchDims;
-    g_IndirectLightingTex.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(FrameCB.screenWidth, FrameCB.screenHeight);
 
     if (screenPos.x >= launchDims.x || screenPos.y >= launchDims.y) return;
 
@@ -20,15 +16,19 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, screenPos, FrameCB.frameIndex);
 
+    // Accessing texture bindless
+    StructuredBuffer<Reservoir> tempReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWTexture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+    
     Surface surface;
     float primaryRayT;
     bool hasPrimaryHit = TracePrimarySurface(screenPos, launchDims, FrameCB, rng, surface, primaryRayT);
     if (!hasPrimaryHit) {
-        g_IndirectLightingTex[screenPos] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        indirectIrradiance[screenPos] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
-    Reservoir r = g_ReservoirFinal[pixelIndex];
+    Reservoir r = tempReservoirs[pixelIndex];
     
     float3 indirectLighting = 0.0f;
 
@@ -48,5 +48,5 @@ void main(uint3 DTid : SV_DispatchThreadID)
         }
     }
 
-    g_IndirectLightingTex[screenPos] = float4(indirectLighting, 1.0f);
+    indirectIrradiance[screenPos] = float4(indirectLighting, 1.0f);
 }

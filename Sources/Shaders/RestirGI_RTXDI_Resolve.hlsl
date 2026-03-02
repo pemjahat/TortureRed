@@ -1,11 +1,10 @@
 #include "Common.hlsl"
 #include "Rtxdi/GI/ReSTIRGIParameters.h"
 
-RWTexture2D<float4> g_AccumulationBuffer : register(u0);
-RWTexture2D<float4> g_Output : register(u1);
-RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u2);
+RWStructuredBuffer<RTXDI_PackedGIReservoir> g_ReservoirBuffer : register(u0);
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 #define RTXDI_GI_RESERVOIR_BUFFER g_ReservoirBuffer
@@ -17,8 +16,7 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint2 launchIndex = dispatchThreadID.xy;
-    uint2 launchDims;
-    g_Output.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (launchIndex.x >= launchDims.x || launchIndex.y >= launchDims.y) return;
 
@@ -32,6 +30,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     RNG rng;
     seed_rng(rng, launchIndex, g_Frame.frameIndex);
+
+    RWTexture2D<float4> AccumulationBuffer = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+    RWTexture2D<float4> OutputBuffer = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
     float3 accumulatedColor = 0;
 
@@ -65,15 +66,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- Temporal Post-Processing & Output ---
     if (g_Frame.frameIndex <= 1) {
-        g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
+        AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
     } else {
-        float3 prevColor = g_AccumulationBuffer[launchIndex].rgb;
+        float3 prevColor = AccumulationBuffer[launchIndex].rgb;
         float n = (float)g_Frame.frameIndex;
         float lerpFactor = min( (n - 1.0f) / min(n, 2000.0f), 1.0f );
         accumulatedColor = lerp(accumulatedColor, prevColor, lerpFactor);
-        g_AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
+        AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
     }
 
     float3 exposedColor = accumulatedColor * g_Frame.exposure;
-    g_Output[launchIndex] = float4(exposedColor / (exposedColor + 1.0f), 1.0f);
+    OutputBuffer[launchIndex] = float4(exposedColor / (exposedColor + 1.0f), 1.0f);
 }

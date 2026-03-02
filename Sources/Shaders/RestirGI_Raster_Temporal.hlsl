@@ -2,23 +2,15 @@
 #include "IrCache_Common.hlsl"
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
+ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
-// Inputs
-Texture3D<float4> g_CurrIrCache : register(t0, space3);
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
-
-// Outputs
-RWTexture2D<float4> g_IndirectLightingTex : register(u1);
-
-RWStructuredBuffer<Reservoir> g_CurrReservoirs : register(u2);  // Temporal output (ping-pong with Previous)
-RWStructuredBuffer<Reservoir> g_PrevReservoirs : register(u3); // Previous frame's temporal output
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
     uint2 screenPos = DTid.xy;
-    uint2 launchDims;
-    g_IndirectLightingTex.GetDimensions(launchDims.x, launchDims.y);
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
 
     if (screenPos.x >= launchDims.x || screenPos.y >= launchDims.y) return;
 
@@ -28,11 +20,16 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, screenPos, g_Frame.frameIndex);
 
+    // Accessing texture bindless
+    Texture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    StructuredBuffer<Reservoir> prevReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx1];
+    RWStructuredBuffer<Reservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+
     Surface surface;
     float primaryRayT;
     bool hasPrimaryHit = TracePrimarySurface(screenPos, launchDims, g_Frame, rng, surface, primaryRayT);
     if (!hasPrimaryHit) {
-        g_CurrReservoirs[pixelIndex] = (Reservoir)0;
+        currReservoirs[pixelIndex] = (Reservoir)0;
         return;
     }
 
@@ -101,7 +98,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         float3 hitUVW = WorldToIrCacheUVW(hitPos);
         //float irCacheConfidence = saturate(irCacheSample.a / 64.0f);
         //float3 indirectLighting = irCacheSample.rgb * irCacheConfidence;
-        float3 indirectLighting = g_CurrIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
+        float3 indirectLighting = currIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
         
         sampleRadiance = (directLighting + indirectLighting) * hitAlbedo.rgb;
     }
@@ -134,7 +131,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     
     if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
         uint2 prevScreenPos = (uint2)(prevUV * (float2)launchDims);
-        Reservoir prevR = g_PrevReservoirs[prevScreenPos.y * launchDims.x + prevScreenPos.x];
+        Reservoir prevR = prevReservoirs[prevScreenPos.y * launchDims.x + prevScreenPos.x];
         
         if (prevR.M > 0.0f) {
             // Re-evaluate target PDF for history sample at current surface
@@ -161,5 +158,5 @@ void main(uint3 DTid : SV_DispatchThreadID)
         r.W = 0.0f;
     }
 
-    g_CurrReservoirs[pixelIndex] = r;
+    currReservoirs[pixelIndex] = r;
 }
