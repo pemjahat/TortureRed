@@ -98,3 +98,16 @@ struct BindlessIndices
     uint32_t OutputIdx0; // Restir output accumulation and path trace output    
     uint32_t OutputIdx1;
 };
+
+// Mirror of IrCacheBindlessIndices in Common.hlsl — must stay in sync.
+struct IrCacheBindlessIndices
+{
+    uint32_t MetaBufIdx;
+    uint32_t PoolBufIdx;
+    uint32_t GridMetaBufIdx;
+    uint32_t EntryCellBufIdx;
+    uint32_t IrradianceBufIdx;
+    uint32_t LifeBufIdx;
+    uint32_t IndirectionBufIdx;
+    uint32_t TraceArgsBufIdx;
+};

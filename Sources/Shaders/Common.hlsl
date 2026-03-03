@@ -38,6 +38,37 @@ struct BindlessIndices
     uint OutputIdx1;
 };
 
+// Irradiance Cache buffer
+// WorldPos -> CellIndex = cascade * 32^3 + z * 32^2 + y * 32 + x
+
+// Meta - track global count (total, alive, queue for tracing, pool)
+// Pool - list index available entries, probe allocated - decrement pool top atomic, probe expired - push stack
+// GridMeta - map by cell index, give back entry index and flags (occupied, just allocated)
+// EntryCell - reverse map of GridMeta, map by entry index, give back cell index
+// Irradiance - actual storage of irradiance data (in: entry index)
+// Life - storage of aging (in: entry index), when is not lookup, age + 1
+// Indirection - list of live entries, rebuilt by Age pass, used by Update pass to iterate only valid probes
+// TraceArg - read live probe from Meta, IrCacheUpdate use this for indirect dispatch, each thread handle one probe
+
+// Irradiance Cache Pass
+// PoolInit (once)
+// PrepareAge - Age (indirect) - PrepareTrace - Update (indirect)
+
+// Bindless heap indices for all spatial irradiance cache buffers.
+// Bound as root constants at b2.  All indices refer to UAV descriptors so
+// shaders can freely read or write each resource via RW types.
+struct IrCacheBindlessIndices
+{
+    uint MetaBufIdx;        // RWByteAddressBuffer  — 4 × uint meta counters
+    uint PoolBufIdx;        // RWStructuredBuffer<uint> — free-entry pool
+    uint GridMetaBufIdx;    // RWByteAddressBuffer  — uint2 per cell (entry_idx, flags)
+    uint EntryCellBufIdx;   // RWStructuredBuffer<uint> — entry → cell back-link
+    uint IrradianceBufIdx;  // RWStructuredBuffer<float4> — irradiance per entry
+    uint LifeBufIdx;        // RWByteAddressBuffer  — life uint per entry
+    uint IndirectionBufIdx; // RWStructuredBuffer<uint> — compact live-entry list
+    uint TraceArgsBufIdx;   // RWByteAddressBuffer  — 3 × uint indirect dispatch args
+};
+
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {
     float4 ndc = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);
     float4 viewPos = mul(ndc, projectionInverse);

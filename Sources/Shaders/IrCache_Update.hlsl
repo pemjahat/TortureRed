@@ -1,145 +1,138 @@
+// IrCache_Update.hlsl
+// Indirect compute dispatch — one group per live probe, IRCACHE_RAYS_PER_PROBE threads/group.
+// Trace rays from each probe, accumulate radiance with groupshared reduction,
+// EMA-blend into the irradiance buffer.
+
 #include "IrCache_Common.hlsl"
+#include "IrCache_Lookup.hlsl"
 #include "CommonTracing.hlsl"
 
-ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+ConstantBuffer<FrameConstants>         g_Frame   : register(b0);
+ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
-static const float IRCACHE_HISTORY_DECAY = 0.995f;
-static const float IRCACHE_MAX_HISTORY_WEIGHT = 4096.0f;
-static const float IRCACHE_CONFIDENCE_RAYS = 64.0f;
+groupshared float3 gs_Radiance[IRCACHE_RAYS_PER_PROBE];
 
-[numthreads(8, 8, 8)]
-void main(uint3 DTid : SV_DispatchThreadID)
+[numthreads(IRCACHE_RAYS_PER_PROBE, 1, 1)]
+void main(uint3 GroupId   : SV_GroupID,
+          uint  GroupIdx  : SV_GroupIndex)
 {
-    if (DTid.x >= IRCACHE_GRID_SIZE_X || DTid.y >= IRCACHE_GRID_SIZE_Y || DTid.z >= IRCACHE_GRID_SIZE_Z)
-        return;
-
-    float3 probePos = GridIndexToWorld(DTid);
-    
-    // Initialize RNG for this probe
-    RNG rng;
-    seed_rng(rng, DTid.xy + DTid.z * 100, g_Frame.frameIndex);
-
-    // Accessing texture bindless
-    Texture3D<float4> prevIrCache = ResourceDescriptorHeap[g_Indices.InputIdx0];
-    RWTexture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.OutputIdx0];
-
-    float3 totalIrradiance = 0.0f;
-    float validRays = 0.0f;
-
-    // Trace rays spherically around the probe
-    for (int i = 0; i < IRCACHE_RAYS_PER_PROBE; ++i)
+    // ---- identify probe ----
+    RWByteAddressBuffer  meta = ResourceDescriptorHeap[g_IrCache.MetaBufIdx];
+    uint tracingCount = meta.Load(IRCACHE_META_TRACING_ALLOC_COUNT);
+    if (GroupId.x >= tracingCount)
     {
-        // Generate uniform spherical direction
-        float2 u = float2(next_float(rng), next_float(rng));
-        float z = 1.0f - 2.0f * u.x;
-        float r = sqrt(max(0.0f, 1.0f - z * z));
-        float phi = 2.0f * 3.14159265f * u.y;
-        float3 rayDir = float3(r * cos(phi), r * sin(phi), z);
+        gs_Radiance[GroupIdx] = float3(0, 0, 0);
+        return;
+    }
 
-        RayDesc ray;
-        ray.Origin = probePos;
-        ray.Direction = rayDir;
-        ray.TMin = 0.01f;
-        ray.TMax = 1000.0f;
+    RWStructuredBuffer<uint> indirection = ResourceDescriptorHeap[g_IrCache.IndirectionBufIdx];
+    uint entryIdx = indirection[GroupId.x];
 
-        RayQuery<RAY_FLAG_NONE> q;
-        q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-        while (q.Proceed()) {
-            PROCESS_ALPHA_MASK(q, rng);
-        }
+    RWStructuredBuffer<uint> entryCell = ResourceDescriptorHeap[g_IrCache.EntryCellBufIdx];
+    uint cellIdx = entryCell[entryIdx];
 
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    IrcacheCoord coord    = ircache_cell_idx_to_coord(cellIdx);
+    float3       probePos = ircache_coord_to_world_center(coord, g_Frame.cameraPosition.xyz);
+
+    // ---- trace one ray (this thread = ray GroupIdx) ----
+    RNG rng;
+    seed_rng(rng, uint2(entryIdx, GroupIdx), g_Frame.frameIndex);
+
+    // Uniform sphere direction
+    float2 u = float2(next_float(rng), next_float(rng));
+    float  z = 1.0f - 2.0f * u.x;
+    float  r = sqrt(max(0.0f, 1.0f - z * z));
+    float  phi = 6.28318530f * u.y;
+    float3 rayDir = float3(r * cos(phi), r * sin(phi), z);
+
+    RayDesc ray;
+    ray.Origin    = probePos;
+    ray.Direction = rayDir;
+    ray.TMin      = 0.01f;
+    ray.TMax      = 1000.0f;
+
+    RayQuery<RAY_FLAG_NONE> q;
+    q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+    while (q.Proceed()) { PROCESS_ALPHA_MASK(q, rng); }
+
+    float3 sampleRadiance = float3(0, 0, 0);
+
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        uint instanceIdx = q.CommittedInstanceID();
+        uint triIdx      = q.CommittedPrimitiveIndex();
+        float2 barys     = q.CommittedTriangleBarycentrics();
+        DrawNodeData      nodeData = g_DrawNodeBuffer[instanceIdx];
+        MaterialConstants mat     = g_Materials[nodeData.materialID];
+
+        uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+        uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+        uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+        GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+        GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+        GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+
+        float  bary0    = 1.0f - barys.x - barys.y;
+        float2 hitUv    = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
+        float3 hitNorm  = normalize(mul(
+            v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y,
+            (float3x3)nodeData.world));
+
+        float4 albedo    = mat.baseColorFactor;
+        float  metallic  = mat.metallicFactor;
+        float  roughness = mat.roughnessFactor;
+        if (mat.baseColorTextureIndex >= 0)
+            albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+        if (mat.metallicRoughnessTextureIndex >= 0)
         {
-            uint instanceIdx = q.CommittedInstanceID();
-            uint triIdx = q.CommittedPrimitiveIndex();
-            float2 barys = q.CommittedTriangleBarycentrics();
-            DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-            MaterialConstants mat = g_Materials[nodeData.materialID];
-
-            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-            float bary0 = 1.0f - barys.x - barys.y;
-            float2 hitUv = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
-            float3 worldNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-
-            float4 albedo = mat.baseColorFactor;
-            if (mat.baseColorTextureIndex >= 0) {
-                albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-            }
-
-            float metallic = mat.metallicFactor;
-            float roughness = mat.roughnessFactor;
-            if (mat.metallicRoughnessTextureIndex >= 0) {
-                float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-                roughness *= mrSample.g;
-                metallic *= mrSample.b;
-            }
-
-            float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
-            float3 viewDir = -ray.Direction;
-
-            // 1. Direct Lighting at hit point
-            float3 directLighting = GetDirectLightingHybrid(hitPos, worldNormal, viewDir, albedo.rgb, metallic, roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
-
-            // 2. Multi-bounce: Sample previous IrCache
-            float3 hitUVW = WorldToIrCacheUVW(hitPos);
-            
-            //float4 prevIndirectSample = g_PrevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0);
-            //float historyConfidence = saturate(prevIndirectSample.a / IRCACHE_CONFIDENCE_RAYS);
-            //float3 indirectLighting = prevIndirectSample.rgb * historyConfidence;
-            float3 indirectLighting = prevIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
-            
-            // Simple diffuse bounce approximation
-            float3 bounceRadiance = (directLighting + indirectLighting) * albedo.rgb;
-            
-            totalIrradiance += bounceRadiance;
-            validRays += 1.0f;
+            float4 mr = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+            roughness *= mr.g;
+            metallic  *= mr.b;
         }
+
+        float3 hitPos  = ray.Origin + ray.Direction * q.CommittedRayT();
+        float3 viewDir = -ray.Direction;
+
+        float3 direct   = GetDirectLightingHybrid(hitPos, hitNorm, viewDir, albedo.rgb,
+            metallic, roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
+        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
+
+        sampleRadiance = (direct + indirect) * albedo.rgb;
     }
 
-    float3 newIrradiance = validRays > 0.0f ? (totalIrradiance / validRays) : 0.0f;
+    gs_Radiance[GroupIdx] = sampleRadiance;
+    GroupMemoryBarrierWithGroupSync();
 
-    // Weighted temporal accumulation:
-    // rgb = temporal mean irradiance
-    // a   = effective history weight
-    float4 prev = prevIrCache[DTid];
-    float3 prevIrradiance = prev.rgb;
-    // float prevWeight = prev.a;
+    // ---- thread 0 reduces + writes irradiance ----
+    if (GroupIdx == 0)
+    {
+        float3 total = float3(0, 0, 0);
+        [unroll]
+        for (int k = 0; k < IRCACHE_RAYS_PER_PROBE; ++k)
+            total += gs_Radiance[k];
+        float3 newIrr = total / (float)IRCACHE_RAYS_PER_PROBE;
 
-    // float newWeight = validRays;
-    // float3 finalIrradiance = 0.0f;
-    // float finalWeight = 0.0f;
+        RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
+        float4 prev = irradiance[entryIdx];
 
-    // bool historyValid = (g_Frame.frameIndex > 0) && (prevWeight > 0.0f) && all(prevIrradiance == prevIrradiance);
+        RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
+        uint flags        = gridMeta.Load2(cellIdx * 8).y;
+        bool justAllocated = (flags & IRCACHE_ENTRY_META_JUST_ALLOCATED) != 0;
+        float blend = (justAllocated || g_Frame.frameIndex == 0) ? 1.0f : 0.05f;
 
-    // if (!historyValid) {
-    //     finalIrradiance = newIrradiance;
-    //     finalWeight = max(1.0f, newWeight);
-    // } else {
-    //     float historyWeight = prevWeight * IRCACHE_HISTORY_DECAY;
+        if (justAllocated)
+        {
+            uint dummy;
+            gridMeta.InterlockedAnd(cellIdx * 8 + 4, ~IRCACHE_ENTRY_META_JUST_ALLOCATED, dummy);
+        }
 
-    //     if (newWeight > 0.0f) {
-    //         float totalWeight = historyWeight + newWeight;
-    //         finalIrradiance = (prevIrradiance * historyWeight + newIrradiance * newWeight) / max(1e-5f, totalWeight);
-    //         finalWeight = min(totalWeight, IRCACHE_MAX_HISTORY_WEIGHT);
-    //     } else {
-    //         finalIrradiance = prevIrradiance;
-    //         finalWeight = max(1.0f, historyWeight);
-    //     }
-    // }
+        irradiance[entryIdx] = float4(lerp(prev.rgb, newIrr, blend), 1.0f);
 
-    //g_CurrIrCache[DTid] = float4(finalIrradiance, finalWeight);
-    float blendFactor = 0.05f;
-    if (g_Frame.frameIndex == 0) {
-        blendFactor = 1.0f;
+        // Reset life so the aging pass keeps this probe alive
+        RWByteAddressBuffer life = ResourceDescriptorHeap[g_IrCache.LifeBufIdx];
+        life.Store(entryIdx * 4, 0u);
     }
-    currIrCache[DTid] = float4(lerp(prevIrradiance, newIrradiance, blendFactor), 1.0f);
 }

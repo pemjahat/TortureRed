@@ -45,7 +45,7 @@ public:
     UINT AllocateDescriptor();
 
     // Resource helpers
-    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false);
+    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false, bool createUAV = false);
     bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState);
     bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor = nullptr, UINT mipLevels = 1, UINT arraySize = 1);
     bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels = 1);
@@ -110,7 +110,8 @@ public:
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
     GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
-    UINT GetIrCacheSRVIndex() const { return m_IrCache[m_CurrentReservoirIndex].srvIndex; }
+    UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
+    const IrCacheBindlessIndices& GetIrCacheBindlessIndices() const { return m_IrCacheIndices; }
 
     // Lights
     void CreateLightsBuffer();
@@ -182,11 +183,29 @@ private:
     int m_CurrentReservoirIndex = 0;
 
     // Rasterizer Indirect GI
-    GPUTexture m_IrCache[2];
+    // ------- spatial irradiance cache buffers -------
+    GPUBuffer m_IrCacheMetaBuf;          // 4 x uint meta counters
+    GPUBuffer m_IrCachePoolBuf;          // uint free-list  [MAX_ENTRIES]
+    GPUBuffer m_IrCacheGridMetaBuf;      // uint2 per cell  [TOTAL_CELLS]
+    GPUBuffer m_IrCacheEntryCellBuf;     // uint entry->cell [MAX_ENTRIES]
+    GPUBuffer m_IrCacheIrradianceBuf;    // float4 irradiance [MAX_ENTRIES]
+    GPUBuffer m_IrCacheLifeBuf;          // uint life       [MAX_ENTRIES]
+    GPUBuffer m_IrCacheIndirectionBuf;   // uint compact list [MAX_ENTRIES]
+    GPUBuffer m_IrCacheTraceArgsBuf;     // uint3 indirect dispatch args
+    bool      m_IrCacheInitialized = false;
+    IrCacheBindlessIndices m_IrCacheIndices = {};
+
     GPUBuffer m_RasterReservoirs[2];
     GPUBuffer m_RasterReservoirIntermediate;
     GPUTexture m_RasterIndirectLightingTex;
+
+    // ------- spatial ircache PSOs -------
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePoolInitPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePrepareAgePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheAgePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePrepareTracePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;

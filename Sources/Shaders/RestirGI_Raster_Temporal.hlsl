@@ -1,8 +1,9 @@
 #include "CommonTracing.hlsl"
-#include "IrCache_Common.hlsl"
+#include "IrCache_Lookup.hlsl"
 
-ConstantBuffer<FrameConstants> g_Frame : register(b0);
-ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+ConstantBuffer<FrameConstants>         g_Frame   : register(b0);
+ConstantBuffer<BindlessIndices>        g_Indices : register(b1);
+ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
@@ -20,10 +21,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RNG rng;
     seed_rng(rng, screenPos, g_Frame.frameIndex);
 
-    // Accessing texture bindless
-    Texture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.InputIdx0];
-    StructuredBuffer<Reservoir> prevReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx1];
-    RWStructuredBuffer<Reservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+    // Accessing reservoirs bindless
+    StructuredBuffer<Reservoir>    prevReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    RWStructuredBuffer<Reservoir>  currReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
     Surface surface;
     float primaryRayT;
@@ -94,11 +94,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
         // Direct Lighting at hit point
         float3 directLighting = GetDirectLightingHybrid(hitPos, hitNormal, hitViewDir, hitAlbedo.rgb, hitMetallic, hitRoughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
 
-        // Multi-bounce: Sample Current IrCache
-        float3 hitUVW = WorldToIrCacheUVW(hitPos);
-        //float irCacheConfidence = saturate(irCacheSample.a / 64.0f);
-        //float3 indirectLighting = irCacheSample.rgb * irCacheConfidence;
-        float3 indirectLighting = currIrCache.SampleLevel(g_LinearSampler, hitUVW, 0).rgb;
+        // Multi-bounce: sample spatial irradiance cache at hit point
+        float3 indirectLighting = SampleIrCache(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
+        // Demand-allocate a probe here so the cache populates on subsequent frames
+        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
         
         sampleRadiance = (directLighting + indirectLighting) * hitAlbedo.rgb;
     }

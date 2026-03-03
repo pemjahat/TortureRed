@@ -22,9 +22,37 @@ Renderer::~Renderer()
 
 void Renderer::CreateRasterIndirectGIResources()
 {
-    CreateTexture3D(m_IrCache[0], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture3D(m_IrCache[1], 64, 32, 64, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    
+    // -----------------------------------------------------------------------
+    // Spatial irradiance cache buffers
+    // -----------------------------------------------------------------------
+    constexpr UINT MAX_ENTRIES  = 32768;
+    constexpr UINT TOTAL_CELLS  = 262144;    // 32^3 * 8 cascades
+
+    // Helper lambdas for creating raw (ByteAddressBuffer) and structured UAV buffers
+
+    // Raw (RWByteAddressBuffer) — CreateBuffer default UAV is already RAW
+    CreateBuffer(m_IrCacheMetaBuf,     16ULL,               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+    CreateBuffer(m_IrCacheGridMetaBuf, TOTAL_CELLS * 8ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+    CreateBuffer(m_IrCacheLifeBuf,     MAX_ENTRIES * 4ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+    CreateBuffer(m_IrCacheTraceArgsBuf,12ULL,               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+
+    // Structured (RWStructuredBuffer<T>) — CreateStructuredBuffer now writes correct UAV
+    CreateStructuredBuffer(m_IrCachePoolBuf,       sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_IrCacheEntryCellBuf,  sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_IrCacheIrradianceBuf, sizeof(float) * 4, MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_IrCacheIndirectionBuf,sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Fill the IrCacheBindlessIndices struct (all UAV indices)
+    m_IrCacheIndices.MetaBufIdx        = (UINT)m_IrCacheMetaBuf.uavIndex;
+    m_IrCacheIndices.PoolBufIdx        = (UINT)m_IrCachePoolBuf.uavIndex;
+    m_IrCacheIndices.GridMetaBufIdx    = (UINT)m_IrCacheGridMetaBuf.uavIndex;
+    m_IrCacheIndices.EntryCellBufIdx   = (UINT)m_IrCacheEntryCellBuf.uavIndex;
+    m_IrCacheIndices.IrradianceBufIdx  = (UINT)m_IrCacheIrradianceBuf.uavIndex;
+    m_IrCacheIndices.LifeBufIdx        = (UINT)m_IrCacheLifeBuf.uavIndex;
+    m_IrCacheIndices.IndirectionBufIdx = (UINT)m_IrCacheIndirectionBuf.uavIndex;
+    m_IrCacheIndices.TraceArgsBufIdx   = (UINT)m_IrCacheTraceArgsBuf.uavIndex;
+
+    // ReSTIR reservoir buffers (unchanged)
     CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirs[1], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -34,26 +62,48 @@ void Renderer::CreateRasterIndirectGIResources()
 
 void Renderer::CreateRasterIndirectGIPipelines()
 {
-    auto irCacheUpdateCS = CompileShader("Shaders/IrCache_Update.hlsl", "main", "cs_6_6");
-    auto restirTemporalCS = CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
-    auto restirSpatialCS = CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl", "main", "cs_6_6");
-    auto restirResolveCS = CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl", "main", "cs_6_6");
-
     D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
     computeDesc.pRootSignature = m_RootSignature.Get();
-    
-    computeDesc.CS = { irCacheUpdateCS.data(), irCacheUpdateCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_IrCacheUpdatePSO));
-    
+
+    auto CompileAndCreate = [&](const char* file, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso)
+    {
+        auto cs = CompileShader(file, "main", "cs_6_6");
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&pso));
+        }
+    };
+
+    CompileAndCreate("Shaders/IrCache_Pool_Init.hlsl",      m_IrCachePoolInitPSO);
+    CompileAndCreate("Shaders/IrCache_Prepare_Age.hlsl",    m_IrCachePrepareAgePSO);
+    CompileAndCreate("Shaders/IrCache_Age.hlsl",            m_IrCacheAgePSO);
+    CompileAndCreate("Shaders/IrCache_Prepare_Trace.hlsl",  m_IrCachePrepareTracePSO);
+    CompileAndCreate("Shaders/IrCache_Update.hlsl",         m_IrCacheUpdatePSO);
+
+    auto restirTemporalCS = CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
+    auto restirSpatialCS  = CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
+    auto restirResolveCS  = CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
+
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
-    
+
     computeDesc.CS = { restirSpatialCS.data(), restirSpatialCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterSpatialPSO));
-    
+
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+
+    // Command signature for ExecuteIndirect dispatch (used by IrCache_Update indirect pass)
+    D3D12_INDIRECT_ARGUMENT_DESC dispatchArg = {};
+    dispatchArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC csSigDesc = {};
+    csSigDesc.ByteStride       = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    csSigDesc.NumArgumentDescs = 1;
+    csSigDesc.pArgumentDescs   = &dispatchArg;
+    m_Device->CreateCommandSignature(&csSigDesc, nullptr, IID_PPV_ARGS(&m_DispatchCommandSignature));
 }
+
 
 bool Renderer::Initialize(HWND hwnd)
 {
@@ -417,7 +467,7 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3_2;
     srvRangeSpace3_2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 3); // t1 space3: IrCache Debug
 
-    CD3DX12_ROOT_PARAMETER rootParameters[13];
+    CD3DX12_ROOT_PARAMETER rootParameters[14];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -431,6 +481,7 @@ void Renderer::CreateRootSignature()
     rootParameters[10].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
     rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
     rootParameters[12].InitAsConstants(sizeof(BindlessIndices) / 4, 1, 0); // b1: Bindless indices
+    rootParameters[13].InitAsConstants(sizeof(IrCacheBindlessIndices) / 4, 2, 0); // b2: IrCache bindless indices
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -828,25 +879,91 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
 
-    // IrCache Update
-    // writes to IrCache[current], reads history from IrCache[previous]
-    TransitionResource(m_IrCache[currentReservoir], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_IrCache[previousReservoir], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    m_CommandList->SetPipelineState(m_IrCacheUpdatePSO.Get());
-    indices.InputIdx0 = m_IrCache[previousReservoir].srvIndex;
-    indices.OutputIdx0 = m_IrCache[currentReservoir].uavIndex;
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-    m_CommandList->Dispatch(64 / 8, 32 / 8, 64 / 8);
+    // -----------------------------------------------------------------------
+    // Spatial IrCache Pipeline
+    // -----------------------------------------------------------------------
 
-    // Restir Temporal
-    // writes to ReservoirBuffer[current], reads history from IrCache[current]
-    
-    TransitionResource(m_IrCache[0], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // One-shot pool initialisation on the very first frame
+    if (!m_IrCacheInitialized)
+    {
+        m_IrCacheInitialized = true;
+
+        // Pool Init clears grid meta, pool, life, and meta counters in one pass.
+        // Dispatch over TOTAL_CELLS = 262144 (dominant sweep).
+        m_CommandList->SetPipelineState(m_IrCachePoolInitPSO.Get());
+        m_CommandList->SetComputeRoot32BitConstants(13, sizeof(IrCacheBindlessIndices) / 4, &m_IrCacheIndices, 0);
+        m_CommandList->Dispatch((262144 + 63) / 64, 1, 1);
+
+        D3D12_RESOURCE_BARRIER initBarriers[4] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePoolBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(4, initBarriers);
+    }
+
+    // Bind IrCache constants once for all IrCache passes
+    m_CommandList->SetComputeRoot32BitConstants(13, sizeof(IrCacheBindlessIndices) / 4, &m_IrCacheIndices, 0);
+
+    // --- Pass 1: Prepare Age (reset compact write idx) ---
+    m_CommandList->SetPipelineState(m_IrCachePrepareAgePSO.Get());
+    m_CommandList->Dispatch(1, 1, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+    }
+
+    // --- Pass 2: Age (expire old entries, build indirection) ---
+    m_CommandList->SetPipelineState(m_IrCacheAgePSO.Get());
+    m_CommandList->Dispatch((32768 + 63) / 64, 1, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barriers[4] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheIndirectionBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(4, barriers);
+    }
+
+    // --- Pass 3: Prepare Trace (snapshot live count → TraceArgs) ---
+    m_CommandList->SetPipelineState(m_IrCachePrepareTracePSO.Get());
+    m_CommandList->Dispatch(1, 1, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheTraceArgsBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
+
+    // --- Pass 4: Update probes (indirect, one group per probe) ---
+    m_CommandList->SetPipelineState(m_IrCacheUpdatePSO.Get());
+    m_CommandList->ExecuteIndirect(m_DispatchCommandSignature.Get(), 1,
+        m_IrCacheTraceArgsBuf.resource.Get(), 0, nullptr, 0);
+
+    {
+        D3D12_RESOURCE_BARRIER barriers[4] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheIrradianceBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePoolBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(4, barriers);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReSTIR passes  (temporal → spatial → resolve)
+    // -----------------------------------------------------------------------
+    // Restir Temporal — InputIdx0 no longer needed for IrCache; IrCache is at b2
     m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
-    indices.InputIdx0 = m_IrCache[currentReservoir].srvIndex;
-    indices.InputIdx1 = m_RasterReservoirs[previousReservoir].srvIndex;
+    indices.InputIdx0  = m_RasterReservoirs[previousReservoir].srvIndex;
     indices.OutputIdx0 = m_RasterReservoirs[currentReservoir].uavIndex;
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirs[currentReservoir].resource.Get());
@@ -1145,7 +1262,7 @@ void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
     memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
 }
 
-bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV)
+bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV, bool createUAV)
 {
     D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(heapType);
     D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(size);
@@ -1175,8 +1292,7 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
     if (createSRV)
     {
         buffer.srvIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += (UINT64)buffer.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GetCPUDescriptorHandle(buffer.srvIndex);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -1190,19 +1306,18 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
         m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
     }
 
-    if (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    if (createUAV && (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
     {
         buffer.uavIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        uavHandle.ptr += (UINT64)buffer.uavIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GetCPUDescriptorHandle(buffer.uavIndex);
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uavDesc.Buffer.FirstElement = 0;
-        uavDesc.Buffer.NumElements = (UINT)(size / sizeof(Reservoir)); // Assuming Reservoir buffers for now, could be more generic
-        uavDesc.Buffer.StructureByteStride = sizeof(Reservoir);
-        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+        uavDesc.Buffer.NumElements = (UINT)(size / 4);
+        uavDesc.Buffer.StructureByteStride = 0;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
 
         m_Device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
     }
@@ -1213,7 +1328,7 @@ bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heap
 bool Renderer::CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState)
 {
     UINT64 size = elementSize * elementCount;
-    if (!CreateBuffer(buffer, size, heapType, initialState, false)) return false;
+    if (!CreateBuffer(buffer, size, heapType, initialState, false, false)) return false;
 
     buffer.srvIndex = AllocateDescriptor();
     D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GetCPUDescriptorHandle(buffer.srvIndex);
@@ -1228,6 +1343,22 @@ bool Renderer::CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UIN
     srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
     m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
+
+    if (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        buffer.uavIndex = AllocateDescriptor();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GetCPUDescriptorHandle(buffer.uavIndex);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.FirstElement = 0;
+        uavDesc.Buffer.NumElements = (UINT)elementCount; // Assuming Reservoir buffers for now, could be more generic
+        uavDesc.Buffer.StructureByteStride = (UINT)elementSize;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        m_Device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
+    }
     return true;
 }
 

@@ -444,9 +444,10 @@ void Application::Render()
             {
                 indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;    
             }
-            if (m_FrameConstants.debugIrCache)
+            // Bind spatial IrCache indices at b2 (used by debug overlay in Lighting.hlsl)
             {
-                indices.InputIdx1 = m_Renderer.GetIrCacheSRVIndex();
+                const IrCacheBindlessIndices& ic = m_Renderer.GetIrCacheBindlessIndices();
+                cmdList->SetGraphicsRoot32BitConstants(13, sizeof(IrCacheBindlessIndices) / 4, &ic, 0);
             }
             cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 

@@ -1,7 +1,7 @@
 #include "Common.hlsl"
 #include "PBR.hlsl"
 #include "CommonTracing.hlsl"
-#include "IrCache_Common.hlsl"
+#include "IrCache_Lookup.hlsl"
 
 struct VSInput {
     uint vertexID : SV_VertexID;
@@ -21,8 +21,9 @@ PSInput VSMain(VSInput input) {
     return output;
 }
 
-ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+ConstantBuffer<FrameConstants>         FrameCB   : register(b0);
+ConstantBuffer<BindlessIndices>        g_Indices : register(b1);
+ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 //Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
@@ -131,11 +132,8 @@ float4 PSMain(PSInput input) : SV_Target {
     
     if (FrameCB.debugIrCache)
     {
-        Texture3D<float4> currIrCache = ResourceDescriptorHeap[g_Indices.InputIdx1];
-
-        float3 uvw = WorldToIrCacheUVW(worldPos.xyz);
-        float4 irCacheVal = currIrCache.SampleLevel(g_LinearSampler, uvw, 0);
-        finalColor = irCacheVal.rgb;
+        float3 irCacheVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.cameraPosition.xyz);
+        finalColor = irCacheVal;
     }
     
     // Basic Tone Mapping
