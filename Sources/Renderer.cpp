@@ -67,7 +67,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
 
     auto CompileAndCreate = [&](const char* file, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso)
     {
-        auto cs = CompileShader(file, "main", "cs_6_6");
+        auto cs = GraphicsHelper::CompileShader(file, "main", "cs_6_6");
         if (!cs.empty())
         {
             computeDesc.CS = { cs.data(), cs.size() };
@@ -81,9 +81,9 @@ void Renderer::CreateRasterIndirectGIPipelines()
     CompileAndCreate("Shaders/IrCache_Prepare_Trace.hlsl",  m_IrCachePrepareTracePSO);
     CompileAndCreate("Shaders/IrCache_Update.hlsl",         m_IrCacheUpdatePSO);
 
-    auto restirTemporalCS = CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
-    auto restirSpatialCS  = CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
-    auto restirResolveCS  = CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
+    auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
+    auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
+    auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
 
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
@@ -171,33 +171,13 @@ bool Renderer::Initialize(HWND hwnd)
 
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
 
-    // Create descriptor heap for render target views
-    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-    rtvHeapDesc.NumDescriptors = 16;
-    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
-    CHECK_HR(m_Device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_RTVHeap)), "CreateDescriptorHeap for RTV failed");
-
-    UINT rtvDescriptorSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    GraphicsHelper::Initialize(m_Device.Get());
 
     // Create render target view for each frame
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_RTVHeap->GetCPUDescriptorHandleForHeapStart());
     for (UINT n = 0; n < 2; n++)
     {
         CHECK_HR(m_SwapChain->GetBuffer(n, IID_PPV_ARGS(&m_RenderTargets[n])), "GetBuffer failed");
-        m_Device->CreateRenderTargetView(m_RenderTargets[n].Get(), nullptr, rtvHandle);
-        rtvHandle.ptr += rtvDescriptorSize;
-    }
-
-    // Create DSV descriptor heap
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-        dsvHeapDesc.NumDescriptors = 4;
-        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
-        CHECK_HR(m_Device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_DSVHeap)), "CreateDescriptorHeap for DSV failed");
+        m_Device->CreateRenderTargetView(m_RenderTargets[n].Get(), nullptr, GraphicsHelper::GetRTVCPUHandle(GraphicsHelper::AllocateRTV()));
     }
 
     // Create constant buffers
@@ -205,16 +185,6 @@ bool Renderer::Initialize(HWND hwnd)
     {
         std::cerr << "Failed to create frame constant buffer" << std::endl;
         return false;
-    }
-
-    // Create SRV descriptor heap for textures
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = 4096; // Increased from 1024
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-
-        CHECK_HR(m_Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_SRVHeap)), "CreateDescriptorHeap for SRV failed");
     }
 
     // Create GBuffer
@@ -287,7 +257,7 @@ bool Renderer::Initialize(HWND hwnd)
         memcpy(m_RtxdiNeighborOffsetsBuffer.cpuPtr, offsets.data(), offsets.size());
 
         // Create Typed SRV for Neighbor Offsets
-        m_RtxdiNeighborOffsetsBuffer.srvIndex = AllocateDescriptor();
+        m_RtxdiNeighborOffsetsBuffer.srvIndex = GraphicsHelper::AllocateSRV();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R8G8_SNORM;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -297,7 +267,7 @@ bool Renderer::Initialize(HWND hwnd)
         srvDesc.Buffer.StructureByteStride = 0;
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
-        m_Device->CreateShaderResourceView(m_RtxdiNeighborOffsetsBuffer.resource.Get(), &srvDesc, GetCPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
+        m_Device->CreateShaderResourceView(m_RtxdiNeighborOffsetsBuffer.resource.Get(), &srvDesc, GraphicsHelper::GetSRVCPUHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
     }
 
     // Create command allocator
@@ -348,6 +318,8 @@ void Renderer::Shutdown()
     // Wait for the GPU to be done with all resources
     WaitForPreviousFrame();
 
+    GraphicsHelper::Shutdown();
+
     // Cleanup constant buffers
     if (m_FrameCB.resource && m_FrameCB.cpuPtr)
     {
@@ -377,14 +349,14 @@ void Renderer::BeginFrame()
     CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
 
     // Set descriptor heaps
-    ID3D12DescriptorHeap* heaps[] = { m_SRVHeap.Get() };
+    ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
     // Set necessary state
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
 
     // Bind the global descriptor table (bindless)
-    m_CommandList->SetGraphicsRootDescriptorTable(3, m_SRVHeap->GetGPUDescriptorHandleForHeapStart());
+    m_CommandList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
@@ -407,7 +379,7 @@ void Renderer::BeginFrame()
 void Renderer::EndFrame()
 {
     // Transition back buffer to present state
-    TransitionResource(m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_PRESENT);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), (m_RenderTargets[m_FrameIndex].Get()), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_PRESENT);
 
     CHECK_HR(m_CommandList->Close(), "CommandList Close failed");
 
@@ -437,9 +409,7 @@ void Renderer::ExecuteCommandList()
 
 D3D12_CPU_DESCRIPTOR_HANDLE Renderer::GetCurrentBackBufferRTV() const
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE handle = m_RTVHeap->GetCPUDescriptorHandleForHeapStart();
-    handle.ptr += (UINT64)m_FrameIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    return handle;
+    return GraphicsHelper::GetRTVCPUHandle(m_FrameIndex);
 }
 
 ID3D12Resource* Renderer::GetCurrentBackBuffer() const
@@ -538,7 +508,7 @@ void Renderer::CreatePipelineState()
 
     // 1. Depth Pre-Pass PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
@@ -548,8 +518,8 @@ void Renderer::CreatePipelineState()
 
     // 2. G-Buffer PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -572,8 +542,8 @@ void Renderer::CreatePipelineState()
 
     // 3. Lighting PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -586,8 +556,8 @@ void Renderer::CreatePipelineState()
 
     // 3.5 Debug PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -600,7 +570,7 @@ void Renderer::CreatePipelineState()
 
     // 4. Shadow PSO
     {
-        std::vector<char> vs = CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.RasterizerState.DepthBias = 1000;
@@ -613,8 +583,8 @@ void Renderer::CreatePipelineState()
 
     // 5. Transparent PSO (Forward)
     {
-        std::vector<char> vs = CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -659,7 +629,7 @@ void Renderer::CreatePipelineState()
 void Renderer::CreateRayTracingPipeline()
 {
     // Load Path Tracer shader
-    auto pathTracerCode = CompileShader("Shaders/PathTracer.hlsl", "CSMain", "cs_6_6");
+    auto pathTracerCode = GraphicsHelper::CompileShader("Shaders/PathTracer.hlsl", "CSMain", "cs_6_6");
     if (!pathTracerCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -671,7 +641,7 @@ void Renderer::CreateRayTracingPipeline()
     }
 
     // Load ReSTIR Multi-pass shaders
-    auto restirTemporalCode = CompileShader("Shaders/RestirGI_Temporal.hlsl", "CSMain", "cs_6_6");
+    auto restirTemporalCode = GraphicsHelper::CompileShader("Shaders/RestirGI_Temporal.hlsl", "CSMain", "cs_6_6");
     if (!restirTemporalCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -680,7 +650,7 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirTemporalPSO)), "Failed to create ReSTIR Temporal PSO");
     }
 
-    auto restirSpatialCode = CompileShader("Shaders/RestirGI_Spatial.hlsl", "CSMain", "cs_6_6");
+    auto restirSpatialCode = GraphicsHelper::CompileShader("Shaders/RestirGI_Spatial.hlsl", "CSMain", "cs_6_6");
     if (!restirSpatialCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -689,7 +659,7 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirSpatialPSO)), "Failed to create ReSTIR Spatial PSO");
     }
 
-    auto restirResolveCode = CompileShader("Shaders/RestirGI_Resolve.hlsl", "CSMain", "cs_6_6");
+    auto restirResolveCode = GraphicsHelper::CompileShader("Shaders/RestirGI_Resolve.hlsl", "CSMain", "cs_6_6");
     if (!restirResolveCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -699,7 +669,7 @@ void Renderer::CreateRayTracingPipeline()
     }
 
     // RTXDI PSOs
-    auto rtxdiTemporalCode = CompileShader("Shaders/RestirGI_RTXDI_Temporal.hlsl", "CSMain", "cs_6_6");
+    auto rtxdiTemporalCode = GraphicsHelper::CompileShader("Shaders/RestirGI_RTXDI_Temporal.hlsl", "CSMain", "cs_6_6");
     if (!rtxdiTemporalCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -708,7 +678,7 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirTemporalPSO)), "Failed to create RTXDI Temporal PSO");
     }
 
-    auto rtxdiSpatialCode = CompileShader("Shaders/RestirGI_RTXDI_Spatial.hlsl", "CSMain", "cs_6_6");
+    auto rtxdiSpatialCode = GraphicsHelper::CompileShader("Shaders/RestirGI_RTXDI_Spatial.hlsl", "CSMain", "cs_6_6");
     if (!rtxdiSpatialCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -717,7 +687,7 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirSpatialPSO)), "Failed to create RTXDI Spatial PSO");
     }
 
-    auto rtxdiResolveCode = CompileShader("Shaders/RestirGI_RTXDI_Resolve.hlsl", "CSMain", "cs_6_6");
+    auto rtxdiResolveCode = GraphicsHelper::CompileShader("Shaders/RestirGI_RTXDI_Resolve.hlsl", "CSMain", "cs_6_6");
     if (!rtxdiResolveCode.empty())
     {
         D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -735,13 +705,13 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     memcpy(m_FrameCB.cpuPtr, &frame, sizeof(FrameConstants));
 
     // Transition UAVs
-    TransitionResource(m_AccumulationBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_AccumulationBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     D3D12_RESOURCE_BARRIER uavBarriers[5];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
@@ -751,13 +721,13 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
     m_CommandList->ResourceBarrier(5, uavBarriers);
 
-    m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
+    m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
 
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    m_CommandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(0)); // Bindless
+    m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
     m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
@@ -773,12 +743,12 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     {
         // NVIDIA RTXDI Path
         // Bind common RTXDI resources
-        m_CommandList->SetComputeRootDescriptorTable(9, GetGPUDescriptorHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
+        m_CommandList->SetComputeRootDescriptorTable(9, GraphicsHelper::GetSRVGPUHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
 
         // Pass 1: Temporal Resampling
         m_CommandList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
@@ -786,8 +756,8 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 2: Spatial Resampling
         m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
-        m_CommandList->SetComputeRootDescriptorTable(8, GetGPUDescriptorHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
@@ -795,7 +765,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 3: Resolve
         m_CommandList->SetPipelineState(m_RtxdiRestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(7, GetGPUDescriptorHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_ReservoirIntermediate.uavIndex));
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
@@ -835,6 +805,9 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     else
     {
         // Old Path Trace
+        indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
+        indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
     }
@@ -842,7 +815,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 
     // Transition for blitting/Imgui
-    TransitionResource(m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
 }
 
 void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
@@ -851,23 +824,23 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         return;
 
     // Transition G-Buffer targets to SRV state for compute
-    TransitionResource(m_GBuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(m_GBuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    m_CommandList->SetDescriptorHeaps(1, m_SRVHeap.GetAddressOf());
+    m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
 
     // Bind common resources
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    m_CommandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(0)); // Bindless
+    m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
     m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
     m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
     m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
@@ -982,7 +955,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
 
     // Restir Resolve
     // reads spatial output from Intermediate
-    TransitionResource(m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_CommandList->SetPipelineState(m_RestirGIRasterResolvePSO.Get());
     indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
@@ -995,15 +968,15 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
 void Renderer::CopyTextureToBackBuffer(const GPUTexture& texture)
 {
     // Ensure source texture is in COPY_SOURCE
-    TransitionResource(const_cast<GPUTexture&>(texture), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), const_cast<GPUTexture&>(texture), D3D12_RESOURCE_STATE_COPY_SOURCE);
 
     // Transition backbuffer to COPY_DEST
-    TransitionResource(m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_COPY_DEST);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_COPY_DEST);
 
     m_CommandList->CopyResource(m_RenderTargets[m_FrameIndex].Get(), texture.resource.Get());
 
     // Transition backbuffer to RTV for ImGui
-    TransitionResource(m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
 }
 
 void Renderer::BuildAccelerationStructures(Model* model)
@@ -1153,11 +1126,6 @@ void Renderer::BuildAccelerationStructures(Model* model)
     std::cout << "Built acceleration structures for " << instanceDescs.size() << " instances." << std::endl;
 }
 
-UINT Renderer::AllocateDescriptor()
-{
-    return m_SrvHeapIndex++;
-}
-
 void Renderer::CreateLightsBuffer()
 {
     // Create Structured Buffer directly on Upload Heap for easy per-frame updates without command list
@@ -1262,325 +1230,6 @@ void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
     memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
 }
 
-bool Renderer::CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV, bool createUAV)
-{
-    D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(heapType);
-    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(size);
-
-    if (initialState & (D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE))
-    {
-        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    }
-
-    CHECK_HR(m_Device->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &desc,
-        initialState,
-        nullptr,
-        IID_PPV_ARGS(&buffer.resource)), "CreateCommittedResource for Buffer failed");
-
-    buffer.size = size;
-    buffer.state = initialState;
-    buffer.gpuAddress = buffer.resource->GetGPUVirtualAddress();
-
-    if (heapType == D3D12_HEAP_TYPE_UPLOAD)
-    {
-        buffer.resource->Map(0, nullptr, &buffer.cpuPtr);
-    }
-
-    if (createSRV)
-    {
-        buffer.srvIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GetCPUDescriptorHandle(buffer.srvIndex);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Buffer.FirstElement = 0;
-        srvDesc.Buffer.NumElements = (UINT)(size / 4);
-        srvDesc.Buffer.StructureByteStride = 0;
-        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-
-        m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
-    }
-
-    if (createUAV && (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
-    {
-        buffer.uavIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GetCPUDescriptorHandle(buffer.uavIndex);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.FirstElement = 0;
-        uavDesc.Buffer.NumElements = (UINT)(size / 4);
-        uavDesc.Buffer.StructureByteStride = 0;
-        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-
-        m_Device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
-    }
-
-    return true;
-}
-
-bool Renderer::CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState)
-{
-    UINT64 size = elementSize * elementCount;
-    if (!CreateBuffer(buffer, size, heapType, initialState, false, false)) return false;
-
-    buffer.srvIndex = AllocateDescriptor();
-    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GetCPUDescriptorHandle(buffer.srvIndex);
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Buffer.FirstElement = 0;
-    srvDesc.Buffer.NumElements = (UINT)elementCount;
-    srvDesc.Buffer.StructureByteStride = (UINT)elementSize;
-    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-
-    m_Device->CreateShaderResourceView(buffer.resource.Get(), &srvDesc, srvHandle);
-
-    if (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-    {
-        buffer.uavIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GetCPUDescriptorHandle(buffer.uavIndex);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.FirstElement = 0;
-        uavDesc.Buffer.NumElements = (UINT)elementCount; // Assuming Reservoir buffers for now, could be more generic
-        uavDesc.Buffer.StructureByteStride = (UINT)elementSize;
-        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-
-        m_Device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
-    }
-    return true;
-}
-
-bool Renderer::CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize)
-{
-    D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-    
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Alignment = 0;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = static_cast<UINT16>(arraySize);
-    desc.MipLevels = static_cast<UINT16>(mipLevels);
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    desc.Flags = flags;
-
-    D3D12_CLEAR_VALUE clearVal = {};
-    clearVal.Format = format;
-    if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL && format == DXGI_FORMAT_R32_TYPELESS)
-    {
-        clearVal.Format = DXGI_FORMAT_D32_FLOAT;
-    }
-    if (flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
-    {
-        if (clearColor) memcpy(clearVal.Color, clearColor, sizeof(float) * 4);
-    }
-    else if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
-    {
-        clearVal.DepthStencil.Depth = 1.0f;
-    }
-
-    CHECK_HR(m_Device->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &desc,
-        initialState,
-        (flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) ? &clearVal : nullptr,
-        IID_PPV_ARGS(&texture.resource)), "CreateCommittedResource for Texture failed");
-
-    texture.state = initialState;
-    texture.format = format;
-
-    // Create SRV
-    if (!(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
-    {
-        texture.srvIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += (UINT64)texture.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (format == DXGI_FORMAT_D32_FLOAT || format == DXGI_FORMAT_R32_TYPELESS)
-            srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-        else
-            srvDesc.Format = format;
-        
-        if (arraySize > 1)
-        {
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-            srvDesc.Texture2DArray.MipLevels = mipLevels;
-            srvDesc.Texture2DArray.ArraySize = arraySize;
-            srvDesc.Texture2DArray.FirstArraySlice = 0;
-            srvDesc.Texture2DArray.MostDetailedMip = 0;
-        }
-        else
-        {
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = mipLevels;
-        }
-
-        m_Device->CreateShaderResourceView(texture.resource.Get(), &srvDesc, srvHandle);
-    }
-
-    // Create UAV
-    if (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-    {
-        texture.uavIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        uavHandle.ptr += (UINT64)texture.uavIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = (format == DXGI_FORMAT_D32_FLOAT || format == DXGI_FORMAT_R32_TYPELESS) ? DXGI_FORMAT_R32_FLOAT : format;
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        uavDesc.Texture2D.MipSlice = 0;
-        uavDesc.Texture2D.PlaneSlice = 0;
-
-        m_Device->CreateUnorderedAccessView(texture.resource.Get(), nullptr, &uavDesc, uavHandle);
-    }
-
-    // Create RTV or DSV
-    if (flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
-    {
-        static UINT rtvCount = 2; // Start after swap chain RTVs
-        texture.rtvHandle = m_RTVHeap->GetCPUDescriptorHandleForHeapStart();
-        texture.rtvHandle.ptr += (UINT64)rtvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        m_Device->CreateRenderTargetView(texture.resource.Get(), nullptr, texture.rtvHandle);
-    }
-    else if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
-    {
-        static UINT dsvCount = 0; // Unified allocation starting from 0
-        texture.dsvHandle = m_DSVHeap->GetCPUDescriptorHandleForHeapStart();
-        texture.dsvHandle.ptr += (UINT64)dsvCount++ * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        
-        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-        dsvDesc.Format = (format == DXGI_FORMAT_R32_TYPELESS) ? DXGI_FORMAT_D32_FLOAT : format;
-        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        
-        m_Device->CreateDepthStencilView(texture.resource.Get(), &dsvDesc, texture.dsvHandle);
-    }
-
-    return true;
-}
-
-void Renderer::TransitionResource(GPUTexture& texture, D3D12_RESOURCE_STATES newState)
-{
-    if (texture.state == newState) return;
-
-    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        texture.resource.Get(),
-        texture.state,
-        newState
-    );
-    m_CommandList->ResourceBarrier(1, &barrier);
-    texture.state = newState;
-}
-
-void Renderer::TransitionResource(GPUBuffer& buffer, D3D12_RESOURCE_STATES newState)
-{
-    if (buffer.state == newState) return;
-
-    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        buffer.resource.Get(),
-        buffer.state,
-        newState
-    );
-    m_CommandList->ResourceBarrier(1, &barrier);
-    buffer.state = newState;
-}
-
-bool Renderer::CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels)
-{
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    desc.Alignment = 0;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = static_cast<UINT16>(depth);
-    desc.MipLevels = static_cast<UINT16>(mipLevels);
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    desc.Flags = flags;
-
-    D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-
-    HRESULT hr = m_Device->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &desc,
-        initialState,
-        nullptr,
-        IID_PPV_ARGS(&texture.resource)
-    );
-
-    if (FAILED(hr)) return false;
-
-    texture.state = initialState;
-    texture.format = format;
-
-    // Create SRV if not a depth stencil
-    if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Format = format;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-        srvDesc.Texture3D.MipLevels = mipLevels;
-        srvDesc.Texture3D.MostDetailedMip = 0;
-
-        texture.srvIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += texture.srvIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        m_Device->CreateShaderResourceView(texture.resource.Get(), &srvDesc, srvHandle);
-    }
-
-    // Create UAV if requested
-    if (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = format;
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-        uavDesc.Texture3D.MipSlice = 0;
-        uavDesc.Texture3D.FirstWSlice = 0;
-        uavDesc.Texture3D.WSize = depth;
-
-        texture.uavIndex = AllocateDescriptor();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        uavHandle.ptr += texture.uavIndex * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        m_Device->CreateUnorderedAccessView(texture.resource.Get(), nullptr, &uavDesc, uavHandle);
-    }
-
-    return true;
-}
-
-void Renderer::TransitionResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES& currentState, D3D12_RESOURCE_STATES newState)
-{
-    if (currentState == newState) return;
-    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, currentState, newState);
-    m_CommandList->ResourceBarrier(1, &barrier);
-    currentState = newState;
-}
-
-void Renderer::TransitionBackBuffer(D3D12_RESOURCE_STATES newState)
-{
-    TransitionResource(m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], newState);
-}
-
 void Renderer::CreateGBuffer()
 {
     float blackClear[] = { 0, 0, 0, 0 };
@@ -1606,91 +1255,6 @@ std::vector<char> Renderer::LoadShader(const std::string& filename)
     file.read(buffer.data(), size);
 
     return buffer;
-}
-
-std::vector<char> Renderer::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target)
-{
-    // Load HLSL source
-    std::ifstream file(filename);
-    if (!file.is_open())
-    {
-        std::cerr << "Failed to open HLSL file: " << filename << std::endl;
-        return std::vector<char>();
-    }
-
-    std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-    // Create DXC compiler and utils
-    Microsoft::WRL::ComPtr<IDxcUtils> dxcUtils;
-    Microsoft::WRL::ComPtr<IDxcCompiler3> dxcCompiler;
-
-    CHECK_HR(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&dxcUtils)), "DxcCreateInstance for DxcUtils failed");
-    CHECK_HR(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxcCompiler)), "DxcCreateInstance for DxcCompiler failed");
-
-    // Create blob from source
-    Microsoft::WRL::ComPtr<IDxcBlobEncoding> sourceBlob;
-    CHECK_HR(dxcUtils->CreateBlob(source.c_str(), static_cast<UINT32>(source.size()), CP_UTF8, &sourceBlob), "CreateBlob failed");
-
-    // Compile shader
-    std::wstring entryPointW(entryPoint.begin(), entryPoint.end());
-    std::wstring targetW(target.begin(), target.end());
-
-    std::vector<LPCWSTR> arguments;
-    arguments.push_back(L"-E");
-    arguments.push_back(entryPointW.c_str());
-    arguments.push_back(L"-T");
-    arguments.push_back(targetW.c_str());
-    arguments.push_back(L"-HV");
-    arguments.push_back(L"2021");
-    arguments.push_back(L"-I");
-    arguments.push_back(L"Shaders");
-
-#ifdef RTXDI_INCLUDE_DIR
-    std::string rtxdiInclude = RTXDI_INCLUDE_DIR;
-    std::wstring rtxdiIncludeW(rtxdiInclude.begin(), rtxdiInclude.end());
-    arguments.push_back(L"-I");
-    arguments.push_back(rtxdiIncludeW.c_str());
-#endif
-
-    DxcBuffer sourceBuffer;
-    sourceBuffer.Ptr = sourceBlob->GetBufferPointer();
-    sourceBuffer.Size = sourceBlob->GetBufferSize();
-    sourceBuffer.Encoding = CP_UTF8;
-
-    Microsoft::WRL::ComPtr<IDxcIncludeHandler> includeHandler;
-    dxcUtils->CreateDefaultIncludeHandler(&includeHandler);
-
-    Microsoft::WRL::ComPtr<IDxcResult> result;
-    CHECK_HR(dxcCompiler->Compile(&sourceBuffer, arguments.data(), (UINT32)arguments.size(), includeHandler.Get(), IID_PPV_ARGS(&result)), "Compile failed");
-
-    // Check compilation result
-    HRESULT statusHr;
-    CHECK_HR(result->GetStatus(&statusHr), "GetStatus failed");
-
-    if (!SUCCEEDED(statusHr))
-    {
-        // Get error messages
-        Microsoft::WRL::ComPtr<IDxcBlobUtf8> errors;
-        if (SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr)) && errors && errors->GetStringLength() > 0)
-        {
-            std::cerr << "DXC Shader Compilation Errors for " << filename << " (" << entryPoint << " -> " << target << "):" << std::endl;
-            std::cerr << errors->GetStringPointer() << std::endl;
-        }
-        else
-        {
-            std::cerr << "Shader compilation failed for " << filename << " (" << entryPoint << " -> " << target << ") but no error details available." << std::endl;
-        }
-        return std::vector<char>();
-    }
-
-    // Get compiled shader
-    Microsoft::WRL::ComPtr<IDxcBlob> shaderBlob;
-    CHECK_HR(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shaderBlob), nullptr), "GetOutput failed");
-
-    std::vector<char> compiledShader(shaderBlob->GetBufferSize());
-    memcpy(compiledShader.data(), shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize());
-
-    return compiledShader;
 }
 
 void Renderer::UpdateFrameCB(const FrameConstants& frameConstants)
@@ -1743,4 +1307,9 @@ void Renderer::WaitForPreviousFrame()
     }
 
     m_FrameIndex = m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+void Renderer::TransitionBackBuffer(D3D12_RESOURCE_STATES newState)
+{
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], newState);
 }

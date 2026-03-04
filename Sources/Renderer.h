@@ -2,6 +2,7 @@
 
 #include <unordered_map>
 #include "GraphicsTypes.h"
+#include "GraphicsHelper.h"
 
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
@@ -41,23 +42,9 @@ public:
     // GBuffer management
     void CreateGBuffer();
 
-    // Descriptor management
-    UINT AllocateDescriptor();
-
-    // Resource helpers
-    bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false, bool createUAV = false);
-    bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState);
-    bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor = nullptr, UINT mipLevels = 1, UINT arraySize = 1);
-    bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels = 1);
-
-    void TransitionResource(GPUTexture& texture, D3D12_RESOURCE_STATES newState);
-    void TransitionResource(GPUBuffer& buffer, D3D12_RESOURCE_STATES newState);
-    void TransitionResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES& currentState, D3D12_RESOURCE_STATES newState);
-    void TransitionBackBuffer(D3D12_RESOURCE_STATES newState);
-
     // Shader compilation
+
     std::vector<char> LoadShader(const std::string& filename);
-    std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
 
     // Constant buffer management
     void UpdateFrameCB(const FrameConstants& frameConstants);
@@ -79,28 +66,14 @@ public:
     
     // Ray Tracing Getters
     bool IsRayTracingSupported() const { return m_RayTracingSupported; }
-
-    ID3D12DescriptorHeap* GetSRVHeap() const { return m_SRVHeap.Get(); }
-
-    D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
-
-    D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(UINT index) const {
-        D3D12_GPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetGPUDescriptorHandleForHeapStart();
-        handle.ptr += (UINT64)index * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        return handle;
-    }
-
-    D3D12_CPU_DESCRIPTOR_HANDLE GetCPUDescriptorHandle(UINT index) const {
-        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_SRVHeap->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += (UINT64)index * m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        return handle;
-    }
-
     void ExecuteCommandList();
 
     // Pass management
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentBackBufferRTV() const;
     ID3D12Resource* GetCurrentBackBuffer() const;
+
+    D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
+    void TransitionBackBuffer(D3D12_RESOURCE_STATES newState);
 
     // Background color
     float m_BackgroundColor[3] = { 0.098f, 0.098f, 0.439f }; // Default: Dark blue
@@ -209,13 +182,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
-
-    // Descriptor Heaps
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_DSVHeap;
-
-    // SRV Heap for textures (Global Unified Heap)
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_SRVHeap;
-    UINT m_SrvHeapIndex = 0;
 
     // GBuffer resources
     GBuffer m_GBuffer;

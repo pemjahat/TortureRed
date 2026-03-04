@@ -1,6 +1,8 @@
 #include "pch.h"
 
 #include "ResourceUploadBatch.h"
+#include "GraphicsHelper.h"
+#include "GraphicsTypes.h"
 #include "Renderer.h"
 #include "Utility.h"
 
@@ -27,7 +29,7 @@ void ResourceUploadBatch::Begin()
 void ResourceUploadBatch::Upload(GPUBuffer& dest, const void* data, UINT64 size)
 {
     GPUBuffer staging;
-    if (!m_Renderer->CreateBuffer(staging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+    if (!CreateBuffer(staging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
     {
         std::cerr << "ResourceUploadBatch: Failed to create staging buffer" << std::endl;
         return;

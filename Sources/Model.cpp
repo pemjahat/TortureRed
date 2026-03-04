@@ -8,6 +8,8 @@
 #include "ResourceUploadBatch.h"
 #include <cstdint>
 #include <algorithm>
+#include "GraphicsTypes.h"
+#include "GraphicsHelper.h"
 
 Model::Model()
 {
@@ -269,7 +271,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create global vertex buffer
     if (!m_GlobalVertices.empty())
     {
-        if (!renderer->CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global vertex buffer" << std::endl;
             return;
@@ -279,7 +281,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create global index buffer
     if (!m_GlobalIndices.empty())
     {
-        if (!renderer->CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create global index buffer" << std::endl;
             return;
@@ -325,7 +327,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create draw node buffer
     if (!m_DrawNodeData.empty())
     {
-        if (!renderer->CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        if (!CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
         {
             std::cerr << "Failed to create draw node buffer" << std::endl;
             return;
@@ -335,7 +337,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_OpaqueCommands.empty())
         {
             const UINT64 cmdSize = m_OpaqueCommands.size() * sizeof(IndirectDrawCommand);
-            if (!renderer->CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
+            if (!CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
             {
                 std::cerr << "Failed to create opaque indirect draw buffer" << std::endl;
                 return;
@@ -346,7 +348,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_TransparentCommands.empty())
         {
             const UINT64 cmdSize = m_TransparentCommands.size() * sizeof(IndirectDrawCommand);
-            if (!renderer->CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
+            if (!CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
             {
                 std::cerr << "Failed to create transparent indirect draw buffer" << std::endl;
                 return;
@@ -360,7 +362,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create material buffer
     if (!m_MaterialConstants.empty())
     {
-        if (!renderer->CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
         {
             std::cerr << "Failed to create material buffer" << std::endl;
             return;
@@ -483,7 +485,7 @@ void Model::LoadTextures(Renderer* renderer)
         const DirectX::TexMetadata& metaData = gltfImg.image->GetMetadata();
         DXGI_FORMAT format = metaData.format;
 
-        if (!renderer->CreateTexture(gltfImg.texture,
+        if (!CreateTexture(gltfImg.texture,
             UINT(metaData.width),
             UINT(metaData.height),
             format,

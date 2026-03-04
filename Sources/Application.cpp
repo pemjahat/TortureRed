@@ -355,10 +355,10 @@ void Application::Render()
     if (usePathTracingFrame)
     {
         // Transition G-Buffer to NON_PIXEL_SHADER_RESOURCE for Path Tracer (Compute)
-        m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
         m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
@@ -371,7 +371,7 @@ void Application::Render()
     {
         // 1. Depth Pre-Pass
         {
-            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
 
             D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
@@ -383,9 +383,9 @@ void Application::Render()
         // 2. G-Buffer Pass
         {
             // Transition G-Buffer targets to RTV state
-            m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
             float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearColor, 0, nullptr);
@@ -398,7 +398,7 @@ void Application::Render()
             // If pre-pass was skipped, we MUST clear the depth buffer here
             if (!m_EnableDepthPrePass)
             {
-                m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                 cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
             }
 
@@ -421,14 +421,14 @@ void Application::Render()
             BindlessIndices indices;
 
             // Transition G-Buffer targets to SRV state
-            m_Renderer.TransitionResource(gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            m_Renderer.TransitionResource(gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            m_Renderer.TransitionResource(gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             
             if (m_FrameConstants.enableRasterIndirectGI)
             {
-                m_Renderer.TransitionResource(m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
 
             // Transition backbuffer to RTV
@@ -468,7 +468,7 @@ void Application::Render()
             D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
 
             // Ensure depth is in read state for forward pass
-            m_Renderer.TransitionResource(gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
 
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
