@@ -162,7 +162,7 @@ private:
     // ------- spatial irradiance cache buffers -------
     GPUBuffer m_IrCacheMetaBuf;          // 4 x uint meta counters
     GPUBuffer m_IrCachePoolBuf;          // uint free-list  [MAX_ENTRIES]
-    GPUBuffer m_IrCacheGridMetaBuf;      // uint2 per cell  [TOTAL_CELLS]
+    GPUBuffer m_IrCacheGridMetaBuf;      // uint per cell (entryIdx<<3 | flags)  [TOTAL_CELLS]
     GPUBuffer m_IrCacheEntryCellBuf;     // uint entry->cell [MAX_ENTRIES]
     GPUBuffer m_IrCacheIrradianceBuf;    // float4 irradiance [MAX_ENTRIES]
     GPUBuffer m_IrCacheLifeBuf;          // uint life       [MAX_ENTRIES]

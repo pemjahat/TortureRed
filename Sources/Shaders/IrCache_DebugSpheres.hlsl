@@ -48,10 +48,10 @@ VSOutput VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     uint cellIdx = entryCell[entryIdx];
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
-    uint2 cellData = gridMeta.Load2(cellIdx * 8);
+    uint cellPacked = gridMeta.Load(cellIdx * 4);
 
     // Cull unoccupied entries — emit a degenerate position so every triangle clips
-    if (!(cellData.y & IRCACHE_ENTRY_META_OCCUPIED))
+    if (!(ircache_cell_flags(cellPacked) & IRCACHE_ENTRY_META_OCCUPIED))
     {
         output.position = DEGENERATE_POS;
         return output;

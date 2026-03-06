@@ -97,10 +97,13 @@ void main(uint3 GroupId   : SV_GroupID,
 
         float3 direct   = GetDirectLightingHybrid(hitPos, hitNorm, viewDir, albedo.rgb,
             metallic, roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+        // SampleIrCache returns pure incident irradiance (no albedo baked in).
+        // Apply albedo only to the indirect term; direct is already exitant radiance
+        // (BSDF * cos evaluated by GetDirectLightingHybrid).
         float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
         IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
 
-        sampleRadiance = (direct + indirect) * albedo.rgb;
+        sampleRadiance = direct + indirect * albedo.rgb;
     }
 
     gs_Radiance[GroupIdx] = sampleRadiance;
@@ -119,14 +122,16 @@ void main(uint3 GroupId   : SV_GroupID,
         float4 prev = irradiance[entryIdx];
 
         RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
-        uint flags        = gridMeta.Load2(cellIdx * 8).y;
-        bool justAllocated = (flags & IRCACHE_ENTRY_META_JUST_ALLOCATED) != 0;
-        float blend = (justAllocated || g_Frame.frameIndex == 0) ? 1.0f : 0.05f;
+        uint flags      = ircache_cell_flags(gridMeta.Load(cellIdx * 4));
+        bool firstTrace = !(flags & IRCACHE_ENTRY_META_TRACED);
+        float blend = (firstTrace || g_Frame.frameIndex == 0) ? 1.0f : 0.05f;
 
-        if (justAllocated)
+        if (firstTrace)
         {
+            // Mark irradiance as valid; SampleIrCache will now return real data.
+            // InterlockedOr only touches bit 2 (TRACED), leaving entryIdx in bits [31:3] intact.
             uint dummy;
-            gridMeta.InterlockedAnd(cellIdx * 8 + 4, ~IRCACHE_ENTRY_META_JUST_ALLOCATED, dummy);
+            gridMeta.InterlockedOr(cellIdx * 4, IRCACHE_ENTRY_META_TRACED, dummy);
         }
 
         irradiance[entryIdx] = float4(lerp(prev.rgb, newIrr, blend), 1.0f);

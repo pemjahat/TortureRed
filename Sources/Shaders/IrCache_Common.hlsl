@@ -22,11 +22,29 @@
 #define IRCACHE_TOTAL_CELLS         262144
 
 // ---------------------------------------------------------------------------
-// Entry lifecycle flags  (stored as uint in the life RWByteAddressBuffer)
+// GridMeta buffer layout — one uint32 per cell, stride: cellIdx * 4
+//
+//   bits [2:0]  = lifecycle flags
+//   bits [31:3] = entryIdx  (max 2^29, far exceeds IRCACHE_MAX_ENTRIES = 32768)
+//
+//   OCCUPIED  — cell has been claimed; bits [31:3] not yet valid.
+//   ALLOCATED — entryIdx committed atomically alongside this flag via a single
+//               InterlockedExchange — no DeviceMemoryBarrier required.
+//   TRACED    — IrCache_Update wrote at least one irradiance sample;
+//               EMA blend factor is 1.0 until this is set.
+//
+// Read-safe for SampleIrCache: OCCUPIED | ALLOCATED | TRACED all set.
 // ---------------------------------------------------------------------------
-static const uint IRCACHE_ENTRY_META_OCCUPIED       = 1u;
-static const uint IRCACHE_ENTRY_META_JUST_ALLOCATED = 2u;
-static const uint IRCACHE_ENTRY_LIFE_RECYCLED       = 0xFFFFFFFFu;
+static const uint IRCACHE_ENTRY_META_OCCUPIED         = 1u;
+static const uint IRCACHE_ENTRY_META_ALLOCATED        = 2u;   // entryIdx field is valid
+static const uint IRCACHE_ENTRY_META_TRACED           = 4u;   // irradiance written >= once
+static const uint IRCACHE_ENTRY_META_FLAG_MASK        = 7u;   // bits [2:0]
+static const uint IRCACHE_ENTRY_LIFE_RECYCLED         = 0xFFFFFFFFu;
+
+// Pack/unpack for the single GridMeta word
+uint ircache_pack_cell (uint entryIdx, uint flags) { return (entryIdx << 3) | (flags & IRCACHE_ENTRY_META_FLAG_MASK); }
+uint ircache_cell_flags(uint packed)               { return packed & IRCACHE_ENTRY_META_FLAG_MASK; }
+uint ircache_cell_entry(uint packed)               { return packed >> 3; }
 
 bool is_ircache_entry_valid(uint life) { return life < (uint)IRCACHE_ENTRY_LIFE_MAX; }
 

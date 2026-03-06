@@ -5,27 +5,31 @@
 
 // ---------------------------------------------------------------------------
 // SampleIrCache
-//   Read the stored mean irradiance for the probe that covers `worldPos`.
-//   Returns float3(0) if the cell has no allocated probe yet.
-//   Also resets the probe's life counter so the aging pass keeps it alive.
+//   Read the stored mean incident irradiance for the probe covering `worldPos`.
+//   Returns float3(0) unless all three flags are set:
+//     OCCUPIED  — cell is claimed
+//     ALLOCATED — entryIdx field is valid
+//     TRACED    — IrCache_Update has written at least one irradiance sample
+//   The irradiance buffer stores pure incident radiance — callers must multiply
+//   by surface albedo to obtain the reflected (exitant) contribution.
+//   Life management is owned exclusively by IrCache_Update; this function is read-only.
 // ---------------------------------------------------------------------------
+static const uint IRCACHE_FLAGS_READY =
+    IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED | IRCACHE_ENTRY_META_TRACED;
+
 float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos)
 {
     IrcacheCoord coord   = ws_pos_to_ircache_coord(worldPos, cameraPos);
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
-    uint2 cellData = gridMeta.Load2(cellIdx * 8);
-    uint  flags    = cellData.y;
+    uint packed = gridMeta.Load(cellIdx * 4);
 
-    if (!(flags & IRCACHE_ENTRY_META_OCCUPIED))
+    // Require all three positive assertions before touching entryIdx
+    if ((ircache_cell_flags(packed) & IRCACHE_FLAGS_READY) != IRCACHE_FLAGS_READY)
         return float3(0.0f, 0.0f, 0.0f);
 
-    uint entryIdx = cellData.x;
-
-    // Refresh life so the aging pass does not expire this probe
-    RWByteAddressBuffer life = ResourceDescriptorHeap[ircache.LifeBufIdx];
-    life.Store(entryIdx * 4, 0u);
+    uint entryIdx = ircache_cell_entry(packed);
 
     RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[ircache.IrradianceBufIdx];
     return irradiance[entryIdx].rgb;
@@ -43,17 +47,18 @@ void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
-    uint2 cellData = gridMeta.Load2(cellIdx * 8);
-    uint  flags    = cellData.y;
+    uint packed = gridMeta.Load(cellIdx * 4);
 
     // Already occupied by another probe — nothing to do
-    if (flags & IRCACHE_ENTRY_META_OCCUPIED)
+    if (ircache_cell_flags(packed) & IRCACHE_ENTRY_META_OCCUPIED)
         return;
 
-    // Race to own this cell (one winner per cell per frame)
-    uint prevFlags;
-    gridMeta.InterlockedOr(cellIdx * 8 + 4, IRCACHE_ENTRY_META_OCCUPIED, prevFlags);
-    if (prevFlags & IRCACHE_ENTRY_META_OCCUPIED)
+    // Race to own this cell (one winner per cell per frame).
+    // CAS from 0 → OCCUPIED only succeeds if the whole word is still zero,
+    // ensuring no stale entryIdx bits from a previous probe survive.
+    uint prev;
+    gridMeta.InterlockedCompareExchange(cellIdx * 4, 0u, IRCACHE_ENTRY_META_OCCUPIED, prev);
+    if (prev != 0u)
         return; // Another thread won
 
     // Pop a free entry from the pool
@@ -63,10 +68,11 @@ void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float
 
     if (oldAllocCount >= (uint)IRCACHE_MAX_ENTRIES)
     {
-        // Pool exhausted — revert the alloc count and release the cell claim
+        // Pool exhausted — revert the alloc count and release the cell claim.
+        // CAS back to 0: only OCCUPIED was written, so the word must still equal OCCUPIED.
         uint dummy;
         meta.InterlockedAdd(IRCACHE_META_ALLOC_COUNT, uint(-1), dummy);
-        gridMeta.InterlockedAnd(cellIdx * 8 + 4, ~IRCACHE_ENTRY_META_OCCUPIED, prevFlags);
+        gridMeta.InterlockedCompareExchange(cellIdx * 4, IRCACHE_ENTRY_META_OCCUPIED, 0u, dummy);
         return;
     }
 
@@ -81,12 +87,16 @@ void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float
     RWByteAddressBuffer life = ResourceDescriptorHeap[ircache.LifeBufIdx];
     life.Store(entryIdx * 4, 0u);
 
-    // Write entry index + JUST_ALLOCATED flag into cell (overwrite the bare OCCUPIED we set above)
-    gridMeta.Store2(cellIdx * 8, uint2(entryIdx,
-        IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_JUST_ALLOCATED));
+    // Atomically publish entryIdx + OCCUPIED + ALLOCATED in a single word.
+    // Any reader observing ALLOCATED=1 reads the correct entryIdx from this
+    // same atomic — no DeviceMemoryBarrier required.
+    // TRACED is still absent: SampleIrCache returns float3(0) until Update traces.
+    uint dummy;
+    gridMeta.InterlockedExchange(cellIdx * 4,
+        ircache_pack_cell(entryIdx, IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED),
+        dummy);
 
     // Extend entry_count high-watermark so the Age pass sweeps far enough
-    uint dummy;
     meta.InterlockedMax(IRCACHE_META_ENTRY_COUNT, oldAllocCount + 1u, dummy);
 }
 
@@ -101,11 +111,14 @@ float3 DebugIrCacheLife(float3 worldPos, IrCacheBindlessIndices ircache, float3 
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
-    uint2 cellData = gridMeta.Load2(cellIdx * 8);
-    if (!(cellData.y & IRCACHE_ENTRY_META_OCCUPIED))
-        return float3(0.05f, 0.05f, 0.05f);    // unoccupied — dark grey
+    uint packed = gridMeta.Load(cellIdx * 4);
+    uint flags  = ircache_cell_flags(packed);
+    // Require at least OCCUPIED|ALLOCATED before reading entryIdx
+    if ((flags & (IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED))
+            != (IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED))
+        return float3(0.05f, 0.05f, 0.05f);    // unoccupied or mid-allocation — dark grey
 
-    uint entryIdx = cellData.x;
+    uint entryIdx = ircache_cell_entry(packed);
 
     RWByteAddressBuffer life = ResourceDescriptorHeap[ircache.LifeBufIdx];
     uint lifeVal = life.Load(entryIdx * 4);
@@ -141,8 +154,8 @@ float3 DebugIrCacheCascade(float3 worldPos, IrCacheBindlessIndices ircache, floa
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
-    uint2 cellData = gridMeta.Load2(cellIdx * 8);
-    bool  occupied = (cellData.y & IRCACHE_ENTRY_META_OCCUPIED) != 0;
+    uint packed   = gridMeta.Load(cellIdx * 4);
+    bool occupied = (ircache_cell_flags(packed) & IRCACHE_ENTRY_META_OCCUPIED) != 0;
 
     float3 baseColor = cascadeColors[coord.cascade];
     return occupied ? baseColor : baseColor * 0.2f;

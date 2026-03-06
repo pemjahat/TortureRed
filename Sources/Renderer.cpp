@@ -32,7 +32,7 @@ void Renderer::CreateRasterIndirectGIResources()
 
     // Raw (RWByteAddressBuffer) — CreateBuffer default UAV is already RAW
     CreateBuffer(m_IrCacheMetaBuf,     16ULL,               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
-    CreateBuffer(m_IrCacheGridMetaBuf, TOTAL_CELLS * 8ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+    CreateBuffer(m_IrCacheGridMetaBuf, TOTAL_CELLS * 4ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
     CreateBuffer(m_IrCacheLifeBuf,     MAX_ENTRIES * 4ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
     CreateBuffer(m_IrCacheTraceArgsBuf,12ULL,               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
 

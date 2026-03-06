@@ -99,7 +99,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         // Demand-allocate a probe here so the cache populates on subsequent frames
         IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
         
-        sampleRadiance = (directLighting + indirectLighting) * hitAlbedo.rgb;
+        sampleRadiance = directLighting + indirectLighting * hitAlbedo.rgb;
     }
 
     // 2. Create Initial Reservoir

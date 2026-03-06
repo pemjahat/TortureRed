@@ -24,11 +24,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
         meta.Store4(0, uint4(0, 0, 0, 0));
     }
 
-    // Clear every grid cell's occupied flags (entry_idx, flag)
+    // Clear every grid cell (single packed uint: entryIdx<<3 | flags)
     if (idx < (uint)IRCACHE_TOTAL_CELLS)
     {
         RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
-        gridMeta.Store2(idx * 8, uint2(0u, 0u));
+        gridMeta.Store(idx * 4, 0u);
     }
 
     // Initialise free pool (available entry index) and mark entries (life value each entry)

@@ -34,11 +34,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
         // 1. Mark as recycled
         life.Store(entryIdx * 4, IRCACHE_ENTRY_LIFE_RECYCLED);
 
-        // 2. Clear the cell's occupied flags
+        // 2. Clear the cell (packed entryIdx + flags in one uint)
         RWStructuredBuffer<uint> entryCell = ResourceDescriptorHeap[g_IrCache.EntryCellBufIdx];
         uint cellIdx = entryCell[entryIdx];
         RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
-        gridMeta.Store2(cellIdx * 8, uint2(0u, 0u));
+        gridMeta.Store(cellIdx * 4, 0u);
 
         // 3. Clear stored irradiance
         RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
