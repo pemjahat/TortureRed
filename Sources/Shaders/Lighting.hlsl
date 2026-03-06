@@ -130,10 +130,16 @@ float4 PSMain(PSInput input) : SV_Target {
         finalColor += indirectLighting;
     }
     
-    if (FrameCB.debugIrCache)
+    if (FrameCB.debugIrCache != IRCACHE_DEBUG_OFF)
     {
-        float3 irCacheVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.cameraPosition.xyz);
-        finalColor = irCacheVal;
+        float3 debugVal = float3(0.0f, 0.0f, 0.0f);
+        if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
+            debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+        else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
+            debugVal = DebugIrCacheLife(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+        else if (FrameCB.debugIrCache == IRCACHE_DEBUG_CASCADE)
+            debugVal = DebugIrCacheCascade(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+        finalColor = debugVal;
     }
     
     // Basic Tone Mapping

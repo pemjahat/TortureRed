@@ -34,7 +34,7 @@ void main(uint3 GroupId   : SV_GroupID,
     uint cellIdx = entryCell[entryIdx];
 
     IrcacheCoord coord    = ircache_cell_idx_to_coord(cellIdx);
-    float3       probePos = ircache_coord_to_world_center(coord, g_Frame.cameraPosition.xyz);
+    float3       probePos = ircache_coord_to_world_center(coord, g_Frame.irCacheCameraPosition.xyz);
 
     // ---- trace one ray (this thread = ray GroupIdx) ----
     RNG rng;
@@ -97,8 +97,8 @@ void main(uint3 GroupId   : SV_GroupID,
 
         float3 direct   = GetDirectLightingHybrid(hitPos, hitNorm, viewDir, albedo.rgb,
             metallic, roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
-        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
-        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.cameraPosition.xyz);
+        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
+        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
 
         sampleRadiance = (direct + indirect) * albedo.rgb;
     }

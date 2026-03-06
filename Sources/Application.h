@@ -31,9 +31,12 @@ private:
     void RenderImGui();
 
     bool m_IsRunning;
-    bool m_EnableDepthPrePass = false;
-    bool m_DebugShadowMap = false;
-    bool m_UsePathTracer = false;
+    bool m_EnableDepthPrePass    = false;
+    bool m_DebugShadowMap        = false;
+    bool m_UsePathTracer          = false;
+    bool m_ShowProbeSpheresDebug  = false;
+    bool m_FreezeIrCacheCamera    = false;
+    DirectX::XMFLOAT4 m_FrozenIrCacheCameraPos = { 0.f, 0.f, 0.f, 1.f };
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 

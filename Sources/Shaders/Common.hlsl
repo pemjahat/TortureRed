@@ -11,6 +11,7 @@ struct FrameConstants {
     row_major float4x4 viewInversePrevious; // Added for ReSTIR/Temporal
     float4 cameraPosition;
     float4 prevCameraPosition;              // Added for ReSTIR/Temporal
+    float4 irCacheCameraPosition;           // frozen debug pos; == cameraPosition when not frozen
     uint frameIndex;
     int albedoIndex;    // RT GBuffer albedo indices
     int normalIndex;    // RT GBuffer normal indices
@@ -26,6 +27,7 @@ struct FrameConstants {
     uint lightSamplingMode; // 0=uniform, 1=importance sampling (indirect only)
     uint lightLUTBufferIndex; // Index into light LUT buffer
     uint debugIrCache;
+    int  debugIrCacheCascadeFilter; // -1 = all cascades, 0-7 = specific cascade
     uint screenWidth;
     uint screenHeight;
 };

@@ -61,6 +61,7 @@ struct FrameConstants
     DirectX::XMFLOAT4X4 viewInversePrevious;
     DirectX::XMFLOAT4 cameraPosition;
     DirectX::XMFLOAT4 prevCameraPosition;
+    DirectX::XMFLOAT4 irCacheCameraPosition; // frozen when m_FreezeIrCacheCamera, else == cameraPosition
     uint32_t frameIndex;
     int32_t albedoIndex;
     int32_t normalIndex;
@@ -76,6 +77,7 @@ struct FrameConstants
     uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
     uint32_t lightLUTBufferIndex; // Index into the light LUT buffer for O(1) importance sampling
     uint32_t debugIrCache;
+    int32_t  debugIrCacheCascadeFilter; // -1 = all cascades, 0-7 = specific cascade
     uint32_t screenWidth;
     uint32_t screenHeight;
 };

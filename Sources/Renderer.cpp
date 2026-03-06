@@ -102,6 +102,44 @@ void Renderer::CreateRasterIndirectGIPipelines()
     csSigDesc.NumArgumentDescs = 1;
     csSigDesc.pArgumentDescs   = &dispatchArg;
     m_Device->CreateCommandSignature(&csSigDesc, nullptr, IID_PPV_ARGS(&m_DispatchCommandSignature));
+
+    // Probe sphere debug PSO (graphics, depth-read-only, alpha blend)
+    {
+        auto vs = GraphicsHelper::CompileShader("Shaders/IrCache_DebugSpheres.hlsl", "VSMain", "vs_6_6");
+        auto ps = GraphicsHelper::CompileShader("Shaders/IrCache_DebugSpheres.hlsl", "PSMain", "ps_6_6");
+        if (!vs.empty() && !ps.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature                          = m_RootSignature.Get();
+            desc.VS                                      = { vs.data(), vs.size() };
+            desc.PS                                      = { ps.data(), ps.size() };
+            desc.RasterizerState                         = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            desc.RasterizerState.FrontCounterClockwise   = TRUE;
+            desc.RasterizerState.CullMode                = D3D12_CULL_MODE_BACK;
+            // Depth: test against scene geometry, never write
+            desc.DepthStencilState                       = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+            desc.DepthStencilState.DepthEnable           = TRUE;
+            desc.DepthStencilState.DepthWriteMask        = D3D12_DEPTH_WRITE_MASK_ZERO;
+            desc.DepthStencilState.DepthFunc             = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            // Alpha blend
+            desc.BlendState                              = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            desc.BlendState.RenderTarget[0].BlendEnable  = TRUE;
+            desc.BlendState.RenderTarget[0].SrcBlend     = D3D12_BLEND_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].DestBlend    = D3D12_BLEND_INV_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].BlendOp      = D3D12_BLEND_OP_ADD;
+            desc.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+            desc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+            desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            desc.SampleMask                              = UINT_MAX;
+            desc.PrimitiveTopologyType                   = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            desc.NumRenderTargets                        = 1;
+            desc.RTVFormats[0]                           = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.DSVFormat                               = DXGI_FORMAT_D32_FLOAT;
+            desc.SampleDesc.Count                        = 1;
+            m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_ProbeSphereDebugPSO));
+        }
+    }
 }
 
 
@@ -491,6 +529,18 @@ void Renderer::CreateRootSignature()
     CHECK_HR(m_Device->CreateCommandSignature(&commandSignatureDesc, nullptr, IID_PPV_ARGS(&m_CommandSignature)), "CreateCommandSignature failed");
 }
 
+void Renderer::DrawProbeSpheresDebug()
+{
+    auto* cmdList = m_CommandList.Get();
+    if (!m_ProbeSphereDebugPSO)
+        return;
+    cmdList->SetPipelineState(m_ProbeSphereDebugPSO.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // 8 stacks × 8 slices × 6 verts/quad = 384 verts per probe
+    // 32768 instances — VS culls unoccupied entries by emitting a degenerate clip position
+    cmdList->DrawInstanced(384, 32768, 0, 0);
+}
+
 void Renderer::CreatePipelineState()
 {
     auto GetDefaultPsoDesc = [&]() {
@@ -852,6 +902,11 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
 
+    // IrCache TODO:
+    // 1. Cascade scrollling one cell at time, only cell at edge reallocated
+    // 2. Repositioning probes toward nearest open space using ray (avoid probe inside wall)
+    // 3. Lazy trace - trace if probe recently allocated, or light changed
+    
     // -----------------------------------------------------------------------
     // Spatial IrCache Pipeline
     // -----------------------------------------------------------------------

@@ -63,6 +63,7 @@ public:
     ID3D12PipelineState* GetLightingPSO() const { return m_LightingPSO.Get(); }
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
     ID3D12PipelineState* GetShadowPSO() const { return m_ShadowPSO.Get(); }
+    ID3D12PipelineState* GetProbeSphereDebugPSO() const { return m_ProbeSphereDebugPSO.Get(); }
     
     // Ray Tracing Getters
     bool IsRayTracingSupported() const { return m_RayTracingSupported; }
@@ -85,6 +86,7 @@ public:
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
     const IrCacheBindlessIndices& GetIrCacheBindlessIndices() const { return m_IrCacheIndices; }
+    void DrawProbeSpheresDebug();
 
     // Lights
     void CreateLightsBuffer();
@@ -120,6 +122,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ProbeSphereDebugPSO;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_CommandSignature;

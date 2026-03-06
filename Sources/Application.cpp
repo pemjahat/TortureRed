@@ -81,6 +81,7 @@ void Application::Initialize()
     m_FrameConstants.enableAvoidCaustics = 1;
     m_FrameConstants.enableIndirectSpecular = 0;
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
+    m_FrameConstants.debugIrCacheCascadeFilter = -1; // -1 = show all cascades
 
     // Load Scene
     if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
@@ -309,6 +310,12 @@ void Application::Update(float deltaTime)
     m_FrameConstants.screenWidth = (uint32_t)WINDOW_WIDTH;
     m_FrameConstants.screenHeight = (uint32_t)WINDOW_HEIGHT;
 
+    // IrCache camera: use frozen position when requested, otherwise track live camera
+    if (m_FreezeIrCacheCamera)
+        m_FrameConstants.irCacheCameraPosition = m_FrozenIrCacheCameraPos;
+    else
+        m_FrameConstants.irCacheCameraPosition = m_FrameConstants.cameraPosition;
+
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
     {
@@ -462,6 +469,19 @@ void Application::Render()
             cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
         }
 
+        // 3.5. Probe Sphere Debug Pass
+        if (m_ShowProbeSpheresDebug && m_FrameConstants.enableRasterIndirectGI && m_FrameConstants.debugIrCache != 0)
+        {
+            // Transition depth from PIXEL_SHADER_RESOURCE → DEPTH_READ so it can serve as DSV
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+            cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+
+            m_Renderer.DrawProbeSpheresDebug();
+        }
+
         // 4. Transparency Pass (Forward)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
@@ -575,8 +595,31 @@ void Application::RenderImGui()
 
         bool debugIrCache = (m_FrameConstants.debugIrCache != 0);
         if (ImGui::Checkbox("Debug Irradiance Cache", &debugIrCache))
-        {
             m_FrameConstants.debugIrCache = debugIrCache ? 1 : 0;
+        if (debugIrCache)
+        {
+            ImGui::SameLine();
+            const char* irCacheModes[] = { "Irradiance", "Life Expiry", "Cascade Coverage" };
+            int comboIdx = (int)m_FrameConstants.debugIrCache - 1;
+            ImGui::SetNextItemWidth(160.f);
+            if (ImGui::Combo("##IrCacheVis", &comboIdx, irCacheModes, 3))
+                m_FrameConstants.debugIrCache = (uint32_t)(comboIdx + 1);
+
+            ImGui::Checkbox("Show Probe Spheres", &m_ShowProbeSpheresDebug);
+            if (m_ShowProbeSpheresDebug)
+            {
+                int cascadeFilter = m_FrameConstants.debugIrCacheCascadeFilter;
+                ImGui::SetNextItemWidth(200.f);
+                if (ImGui::SliderInt("Cascade Filter (-1=all)", &cascadeFilter, -1, 7))
+                    m_FrameConstants.debugIrCacheCascadeFilter = cascadeFilter;
+            }
+
+            // Freeze the camera position used by IrCache grid snapping
+            if (ImGui::Checkbox("Freeze IrCache Camera", &m_FreezeIrCacheCamera))
+            {
+                if (m_FreezeIrCacheCamera)
+                    m_FrozenIrCacheCameraPos = m_FrameConstants.cameraPosition; // snapshot now
+            }
         }
     }
 

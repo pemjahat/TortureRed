@@ -31,6 +31,14 @@ static const uint IRCACHE_ENTRY_LIFE_RECYCLED       = 0xFFFFFFFFu;
 bool is_ircache_entry_valid(uint life) { return life < (uint)IRCACHE_ENTRY_LIFE_MAX; }
 
 // ---------------------------------------------------------------------------
+// Debug visualization modes  (FrameConstants::debugIrCache)
+// ---------------------------------------------------------------------------
+#define IRCACHE_DEBUG_OFF        0
+#define IRCACHE_DEBUG_IRRADIANCE 1
+#define IRCACHE_DEBUG_LIFE       2
+#define IRCACHE_DEBUG_CASCADE    3
+
+// ---------------------------------------------------------------------------
 // Meta buffer byte offsets  (4 × uint32 = 16 bytes total)
 // ---------------------------------------------------------------------------
 #define IRCACHE_META_TRACING_ALLOC_COUNT    0   // snapshot used by current frame's Update dispatch
