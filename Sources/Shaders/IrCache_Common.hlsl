@@ -127,6 +127,41 @@ IrcacheCoord ws_pos_to_ircache_coord(float3 worldPos, float3 cameraPos)
     return IrcacheCoord::from_coord_cascade(gridI, c);
 }
 
+// Normal-biased cell selection (Kajiya technique).
+// Shifts the grid lookup by half a cell diameter along the surface normal so
+// that fragments on opposite sides of a thin wall map to different probe cells,
+// preventing irradiance from leaking through geometry.
+IrcacheCoord ws_pos_to_ircache_coord(float3 worldPos, float3 cameraPos, float3 normal)
+{
+    [unroll]
+    for (uint c = 0; c < IRCACHE_CASCADE_COUNT; ++c)
+    {
+        float  cell   = ircache_cascade_cell_diameter(c);
+        float3 origin = ircache_cascade_origin(c, cameraPos);
+        float3 gridF  = (worldPos - origin) / cell;
+        if (all(gridF >= 0.0f) && all(gridF < (float)IRCACHE_CASCADE_SIZE))
+        {
+            // Offset by half-cell in the normal direction, then re-quantise.
+            // The offset pushes the query outside any surface the probe would
+            // otherwise straddle, giving each face its own dedicated cell.
+            float3 offsetPos = worldPos + normal * (cell * 0.5f);
+            uint3  gridI     = (uint3)clamp((offsetPos - origin) / cell,
+                                            0.0f, (float)(IRCACHE_CASCADE_SIZE - 1));
+            return IrcacheCoord::from_coord_cascade(gridI, c);
+            //return IrcacheCoord::from_coord_cascade((uint3)gridF, c);
+        }
+    }
+
+    // Coarsest cascade fallback — apply the same normal offset
+    uint   c      = IRCACHE_CASCADE_COUNT - 1;
+    float  cell   = ircache_cascade_cell_diameter(c);
+    float3 origin = ircache_cascade_origin(c, cameraPos);
+    float3 offsetPos = worldPos + normal * (cell * 0.5f);
+    uint3  gridI  = (uint3)clamp((offsetPos - origin) / cell,
+                                 0.0f, (float)(IRCACHE_CASCADE_SIZE - 1));
+    return IrcacheCoord::from_coord_cascade(gridI, c);
+}
+
 // Reconstruct the world-space cell centre from a coord + live camera position
 float3 ircache_coord_to_world_center(IrcacheCoord coord, float3 cameraPos)
 {

@@ -95,9 +95,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
         float3 directLighting = GetDirectLightingHybrid(hitPos, hitNormal, hitViewDir, hitAlbedo.rgb, hitMetallic, hitRoughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
 
         // Multi-bounce: sample spatial irradiance cache at hit point
-        float3 indirectLighting = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
+        float3 indirectLighting = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNormal);
         // Demand-allocate a probe here so the cache populates on subsequent frames
-        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
+        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNormal);
         
         sampleRadiance = directLighting + indirectLighting * hitAlbedo.rgb;
     }

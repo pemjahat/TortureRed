@@ -100,8 +100,8 @@ void main(uint3 GroupId   : SV_GroupID,
         // SampleIrCache returns pure incident irradiance (no albedo baked in).
         // Apply albedo only to the indirect term; direct is already exitant radiance
         // (BSDF * cos evaluated by GetDirectLightingHybrid).
-        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
-        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz);
+        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
+        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
 
         sampleRadiance = direct + indirect * albedo.rgb;
     }

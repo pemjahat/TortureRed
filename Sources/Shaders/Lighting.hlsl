@@ -134,7 +134,7 @@ float4 PSMain(PSInput input) : SV_Target {
     {
         float3 debugVal = float3(0.0f, 0.0f, 0.0f);
         if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
-            debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+            debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz, N);
         else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
             debugVal = DebugIrCacheLife(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
         else if (FrameCB.debugIrCache == IRCACHE_DEBUG_CASCADE)

@@ -17,9 +17,9 @@
 static const uint IRCACHE_FLAGS_READY =
     IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED | IRCACHE_ENTRY_META_TRACED;
 
-float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos)
+float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos, float3 normal)
 {
-    IrcacheCoord coord   = ws_pos_to_ircache_coord(worldPos, cameraPos);
+    IrcacheCoord coord   = ws_pos_to_ircache_coord(worldPos, cameraPos, normal);
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
@@ -41,9 +41,9 @@ float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cam
 //   entry from the pool, writing the back-links into grid metadata.
 //   Safe to call from many threads simultaneously; only one wins per cell.
 // ---------------------------------------------------------------------------
-void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos)
+void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos, float3 normal)
 {
-    IrcacheCoord coord   = ws_pos_to_ircache_coord(worldPos, cameraPos);
+    IrcacheCoord coord   = ws_pos_to_ircache_coord(worldPos, cameraPos, normal);
     uint         cellIdx = coord.cell_idx();
 
     RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[ircache.GridMetaBufIdx];
