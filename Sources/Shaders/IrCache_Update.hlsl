@@ -33,7 +33,18 @@ void main(uint3 GroupId   : SV_GroupID,
     uint cellIdx = entryCell[entryIdx];
 
     IrcacheCoord coord    = ircache_cell_idx_to_coord(cellIdx);
-    float3       probePos = ircache_coord_to_world_center(coord, g_Frame.irCacheCameraPosition.xyz);
+
+#if IRCACHE_USE_POSITION_VOTING
+    // Use the voted position from the previous frame; fall back to the cell
+    // centre on the very first trace (w == 0 means not yet voted upon).
+    RWStructuredBuffer<float4> g_PosBuffer = ResourceDescriptorHeap[g_IrCache.PosBufIdx];
+    float4 storedPos = g_PosBuffer[entryIdx];
+    float3 probePos  = (storedPos.w != 0.0f)
+        ? storedPos.xyz
+        : ircache_coord_to_world_center(coord, g_Frame.irCacheCameraPosition.xyz);
+#else
+    float3 probePos = ircache_coord_to_world_center(coord, g_Frame.irCacheCameraPosition.xyz);
+#endif
 
     // ---- trace one ray (this thread = ray GroupIdx) ----
     RNG rng;
@@ -110,6 +121,46 @@ void main(uint3 GroupId   : SV_GroupID,
             updateReservoir(localR, hitPos, hitNorm, sampleRadiance, sampleWeight, 0.0f);
             localR.W = 1.0f;
         }
+
+#if IRCACHE_USE_POSITION_VOTING
+        // ---- Cast a position vote for the probe covering hitPos ----
+        // The probe at hitPos should migrate toward the visible surface.
+        {
+            IrcacheCoord hitCoord  = ws_pos_to_ircache_coord(hitPos, g_Frame.irCacheCameraPosition.xyz, hitNorm);
+            uint         hitCell   = hitCoord.cell_idx();
+            RWByteAddressBuffer hitGrid = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
+            uint hitPacked = hitGrid.Load(hitCell * 4);
+            uint hitFlags  = ircache_cell_flags(hitPacked);
+
+            if ((hitFlags & (IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED))
+                    == (IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED))
+            {
+                uint hitEntry = ircache_cell_entry(hitPacked);
+
+                // Read the probe's current applied position (may be cell centre on first trace)
+                float4 hitStoredPos = g_PosBuffer[hitEntry];
+                float3 hitProbePos  = (hitStoredPos.w != 0.0f)
+                    ? hitStoredPos.xyz
+                    : ircache_coord_to_world_center(hitCoord, g_Frame.irCacheCameraPosition.xyz);
+
+                float  cellDiam  = ircache_cascade_cell_diameter(hitCoord.cascade);
+                float3 proposal  = ircache_proposal_pos(hitProbePos, hitPos, cellDiam);
+
+                // Uniform reservoir sampling: accept with probability 1/(voteCount+1)
+                RWByteAddressBuffer countBuf = ResourceDescriptorHeap[g_IrCache.ReproposalCountBufIdx];
+                uint prevCount;
+                countBuf.InterlockedAdd(hitEntry * 4, 1u, prevCount);
+
+#if IRCACHE_USE_UNIFORM_VOTING
+                if (next_float(rng) <= 1.0f / (float)(prevCount + 1u))
+#endif
+                {
+                    RWStructuredBuffer<float4> repropBuf = ResourceDescriptorHeap[g_IrCache.RepropBufIdx];
+                    repropBuf[hitEntry] = float4(proposal, 1.0f);
+                }
+            }
+        }
+#endif
     }
 
     gs_Candidates[GroupIdx] = localR;
@@ -151,6 +202,16 @@ void main(uint3 GroupId   : SV_GroupID,
             // InterlockedOr only touches bit 2 (TRACED), leaving entryIdx in bits [31:3] intact.
             uint dummy;
             gridMeta.InterlockedOr(cellIdx * 4, IRCACHE_ENTRY_META_TRACED, dummy);
+
+#if IRCACHE_USE_POSITION_VOTING
+            // Seed reprop_buf with the first hit so the probe immediately has a
+            // plausible surface position for the next frame's Age pass to apply.
+            if (outR.M > 0.0f)
+            {
+                RWStructuredBuffer<float4> repropBuf = ResourceDescriptorHeap[g_IrCache.RepropBufIdx];
+                repropBuf[entryIdx] = float4(outR.hitPos, 1.0f);
+            }
+#endif
         }
 
         if (!firstTrace)

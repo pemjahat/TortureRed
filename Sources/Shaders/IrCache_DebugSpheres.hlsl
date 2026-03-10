@@ -76,6 +76,13 @@ VSOutput VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     }
 
     float3       probePos = ircache_coord_to_world_center(coord, FrameCB.irCacheCameraPosition.xyz);
+#if IRCACHE_USE_POSITION_VOTING
+    // Prefer the voted/applied probe position; fall back to cell centre if not yet set (w == 0).
+    RWStructuredBuffer<float4> posBuf = ResourceDescriptorHeap[g_IrCache.PosBufIdx];
+    float4 storedPos = posBuf[entryIdx];
+    if (storedPos.w != 0.0f)
+        probePos = storedPos.xyz;
+#endif
     float        radius   = ircache_cascade_cell_diameter(coord.cascade) * SPHERE_RADIUS_SCALE;
 
     // ---- Decode UV sphere vertex from SV_VertexID ----

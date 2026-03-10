@@ -61,14 +61,17 @@ struct BindlessIndices
 // shaders can freely read or write each resource via RW types.
 struct IrCacheBindlessIndices
 {
-    uint MetaBufIdx;        // RWByteAddressBuffer  — 4 × uint meta counters
-    uint PoolBufIdx;        // RWStructuredBuffer<uint> — free-entry pool
-    uint GridMetaBufIdx;    // RWByteAddressBuffer  — uint2 per cell (entry_idx, flags)
-    uint EntryCellBufIdx;   // RWStructuredBuffer<uint> — entry → cell back-link
-    uint IrradianceBufIdx;  // RWStructuredBuffer<Reservoir> — probe reservoir payload per entry
-    uint LifeBufIdx;        // RWByteAddressBuffer  — life uint per entry
-    uint IndirectionBufIdx; // RWStructuredBuffer<uint> — compact live-entry list
-    uint TraceArgsBufIdx;   // RWByteAddressBuffer  — 3 × uint indirect dispatch args
+    uint MetaBufIdx;              // RWByteAddressBuffer       — 4 × uint meta counters
+    uint PoolBufIdx;              // RWStructuredBuffer<uint>  — free-entry pool
+    uint GridMetaBufIdx;          // RWByteAddressBuffer       — uint per cell (entryIdx<<3 | flags)
+    uint EntryCellBufIdx;         // RWStructuredBuffer<uint>  — entry → cell back-link
+    uint IrradianceBufIdx;        // RWStructuredBuffer<Reservoir> — probe reservoir payload per entry
+    uint LifeBufIdx;              // RWByteAddressBuffer       — life uint per entry
+    uint IndirectionBufIdx;       // RWStructuredBuffer<uint>  — compact live-entry list
+    uint TraceArgsBufIdx;         // RWByteAddressBuffer       — 3 × uint indirect dispatch args
+    uint PosBufIdx;               // RWStructuredBuffer<float4> — applied probe positions (w=1 if valid)
+    uint RepropBufIdx;            // RWStructuredBuffer<float4> — voted proposal positions (written during Update)
+    uint ReproposalCountBufIdx;   // RWByteAddressBuffer       — per-entry vote counters
 };
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {

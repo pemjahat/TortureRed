@@ -168,6 +168,10 @@ private:
     GPUBuffer m_IrCacheLifeBuf;          // uint life       [MAX_ENTRIES]
     GPUBuffer m_IrCacheIndirectionBuf;   // uint compact list [MAX_ENTRIES]
     GPUBuffer m_IrCacheTraceArgsBuf;     // uint3 indirect dispatch args
+    // --- position voting buffers ---
+    GPUBuffer m_IrCachePosBuf;           // float4[MAX_ENTRIES] — applied probe positions (read by Update)
+    GPUBuffer m_IrCacheRepropBuf;        // float4[MAX_ENTRIES] — voted proposal positions (written by Update)
+    GPUBuffer m_IrCacheRepropCountBuf;   // uint[MAX_ENTRIES]   — vote counters (cleared by Age, inc'd by Update)
     bool      m_IrCacheInitialized = false;
     IrCacheBindlessIndices m_IrCacheIndices = {};
 

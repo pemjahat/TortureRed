@@ -22,6 +22,18 @@
 #define IRCACHE_TOTAL_CELLS         262144
 
 // ---------------------------------------------------------------------------
+// Position voting — probes migrate toward visible surfaces each frame.
+//
+//   Each ray hit in IrCache_Update casts a vote for the probe covering that
+//   hit point, proposing it move toward the hit position (clamped to one cell
+//   diameter).  The Age pass applies the winning vote and clears counters.
+//   Uniform reservoir sampling ensures every vote has an equal probability of
+//   being selected regardless of arrival order.
+// ---------------------------------------------------------------------------
+#define IRCACHE_USE_POSITION_VOTING     1
+#define IRCACHE_USE_UNIFORM_VOTING      1
+
+// ---------------------------------------------------------------------------
 // GridMeta buffer layout — one uint32 per cell, stride: cellIdx * 4
 //
 //   bits [2:0]  = lifecycle flags
@@ -181,6 +193,24 @@ IrcacheCoord ircache_cell_idx_to_coord(uint cellIdx)
     coord.y = (local / IRCACHE_CASCADE_SIZE) % IRCACHE_CASCADE_SIZE;
     coord.z =  local / (IRCACHE_CASCADE_SIZE * IRCACHE_CASCADE_SIZE);
     return IrcacheCoord::from_coord_cascade(coord, cascade);
+}
+
+// ---------------------------------------------------------------------------
+// ircache_proposal_pos
+//   Compute the voted proposal position for a probe at `probePos` given a
+//   surface hit at `hitPos`.  The offset is clamped so the probe moves at
+//   most half the distance to the hit point, with a hard cap at cellDiameter.
+//   Over multiple frames probes converge to rest near the densest hit cluster.
+// ---------------------------------------------------------------------------
+float3 ircache_proposal_pos(float3 probePos, float3 hitPos, float cellDiameter)
+{
+    float3 offset = hitPos - probePos;
+    float  dist   = length(offset);
+    // scale = cellDiameter / max(2 * cellDiameter, dist)
+    // → if dist >= 2*cellDiameter: move exactly cellDiameter
+    // → if dist <  2*cellDiameter: move half the distance
+    float scale = cellDiameter / max(2.0f * cellDiameter, dist);
+    return probePos + offset * scale;
 }
 
 #endif // IRCACHE_COMMON_HLSL

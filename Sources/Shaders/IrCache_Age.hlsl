@@ -44,7 +44,17 @@ void main(uint3 DTid : SV_DispatchThreadID)
         RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
         irradiance[entryIdx] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-        // 4. Return entry to the free pool
+#if IRCACHE_USE_POSITION_VOTING
+        // 4. Clear position voting state so recycled entries start fresh
+        RWStructuredBuffer<float4> posBuf    = ResourceDescriptorHeap[g_IrCache.PosBufIdx];
+        RWStructuredBuffer<float4> repropBuf = ResourceDescriptorHeap[g_IrCache.RepropBufIdx];
+        RWByteAddressBuffer countBuf         = ResourceDescriptorHeap[g_IrCache.ReproposalCountBufIdx];
+        posBuf[entryIdx]    = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        repropBuf[entryIdx] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        countBuf.Store(entryIdx * 4, 0u);
+#endif
+
+        // 5. Return entry to the free pool
         //    Decrement alloc_count first, then write entry_idx into that slot.
         RWByteAddressBuffer meta = ResourceDescriptorHeap[g_IrCache.MetaBufIdx];
         uint dummy;
@@ -60,6 +70,23 @@ void main(uint3 DTid : SV_DispatchThreadID)
     {
         // -------- still alive --------
         life.Store(entryIdx * 4, newLife);
+
+#if IRCACHE_USE_POSITION_VOTING
+        // Apply the winning proposal from this entry's votes last frame.
+        // If at least one vote was cast, overwrite the applied position buffer.
+        // Then clear the counter so Update can accumulate fresh votes this frame.
+        {
+            RWByteAddressBuffer countBuf         = ResourceDescriptorHeap[g_IrCache.ReproposalCountBufIdx];
+            uint voteCount = countBuf.Load(entryIdx * 4);
+            if (voteCount > 0u)
+            {
+                RWStructuredBuffer<float4> repropBuf = ResourceDescriptorHeap[g_IrCache.RepropBufIdx];
+                RWStructuredBuffer<float4> posBuf    = ResourceDescriptorHeap[g_IrCache.PosBufIdx];
+                posBuf[entryIdx] = repropBuf[entryIdx];
+            }
+            countBuf.Store(entryIdx * 4, 0u);
+        }
+#endif
 
         // Add this entry to the compact indirection list for this frame's Update pass
         RWByteAddressBuffer meta = ResourceDescriptorHeap[g_IrCache.MetaBufIdx];

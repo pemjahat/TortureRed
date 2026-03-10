@@ -107,6 +107,15 @@ void IrCacheMaybeAllocate(float3 worldPos, IrCacheBindlessIndices ircache, float
     RWByteAddressBuffer life = ResourceDescriptorHeap[ircache.LifeBufIdx];
     life.Store(entryIdx * 4, 0u);
 
+#if IRCACHE_USE_POSITION_VOTING
+    // Seed both position buffers with the allocation world position so the probe
+    // starts near the requesting surface immediately (w=1 signals a valid position).
+    RWStructuredBuffer<float4> posBuf   = ResourceDescriptorHeap[ircache.PosBufIdx];
+    RWStructuredBuffer<float4> repropBuf = ResourceDescriptorHeap[ircache.RepropBufIdx];
+    posBuf[entryIdx]    = float4(worldPos, 1.0f);
+    repropBuf[entryIdx] = float4(worldPos, 1.0f);
+#endif
+
     // Atomically publish entryIdx + OCCUPIED + ALLOCATED in a single word.
     // Any reader observing ALLOCATED=1 reads the correct entryIdx from this
     // same atomic — no DeviceMemoryBarrier required.

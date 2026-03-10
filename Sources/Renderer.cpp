@@ -42,15 +42,23 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateStructuredBuffer(m_IrCacheIrradianceBuf, sizeof(Reservoir), MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_IrCacheIndirectionBuf,sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // Position voting buffers
+    CreateStructuredBuffer(m_IrCachePosBuf,        sizeof(float) * 4, MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_IrCacheRepropBuf,      sizeof(float) * 4, MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateBuffer(m_IrCacheRepropCountBuf,           MAX_ENTRIES * 4ULL, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
+
     // Fill the IrCacheBindlessIndices struct (all UAV indices)
-    m_IrCacheIndices.MetaBufIdx        = (UINT)m_IrCacheMetaBuf.uavIndex;
-    m_IrCacheIndices.PoolBufIdx        = (UINT)m_IrCachePoolBuf.uavIndex;
-    m_IrCacheIndices.GridMetaBufIdx    = (UINT)m_IrCacheGridMetaBuf.uavIndex;
-    m_IrCacheIndices.EntryCellBufIdx   = (UINT)m_IrCacheEntryCellBuf.uavIndex;
-    m_IrCacheIndices.IrradianceBufIdx  = (UINT)m_IrCacheIrradianceBuf.uavIndex;
-    m_IrCacheIndices.LifeBufIdx        = (UINT)m_IrCacheLifeBuf.uavIndex;
-    m_IrCacheIndices.IndirectionBufIdx = (UINT)m_IrCacheIndirectionBuf.uavIndex;
-    m_IrCacheIndices.TraceArgsBufIdx   = (UINT)m_IrCacheTraceArgsBuf.uavIndex;
+    m_IrCacheIndices.MetaBufIdx             = (UINT)m_IrCacheMetaBuf.uavIndex;
+    m_IrCacheIndices.PoolBufIdx             = (UINT)m_IrCachePoolBuf.uavIndex;
+    m_IrCacheIndices.GridMetaBufIdx         = (UINT)m_IrCacheGridMetaBuf.uavIndex;
+    m_IrCacheIndices.EntryCellBufIdx        = (UINT)m_IrCacheEntryCellBuf.uavIndex;
+    m_IrCacheIndices.IrradianceBufIdx       = (UINT)m_IrCacheIrradianceBuf.uavIndex;
+    m_IrCacheIndices.LifeBufIdx             = (UINT)m_IrCacheLifeBuf.uavIndex;
+    m_IrCacheIndices.IndirectionBufIdx      = (UINT)m_IrCacheIndirectionBuf.uavIndex;
+    m_IrCacheIndices.TraceArgsBufIdx        = (UINT)m_IrCacheTraceArgsBuf.uavIndex;
+    m_IrCacheIndices.PosBufIdx             = (UINT)m_IrCachePosBuf.uavIndex;
+    m_IrCacheIndices.RepropBufIdx          = (UINT)m_IrCacheRepropBuf.uavIndex;
+    m_IrCacheIndices.ReproposalCountBufIdx = (UINT)m_IrCacheRepropCountBuf.uavIndex;
 
     // ReSTIR reservoir buffers (unchanged)
     CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -922,13 +930,16 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         m_CommandList->SetComputeRoot32BitConstants(13, sizeof(IrCacheBindlessIndices) / 4, &m_IrCacheIndices, 0);
         m_CommandList->Dispatch((262144 + 63) / 64, 1, 1);
 
-        D3D12_RESOURCE_BARRIER initBarriers[4] = {
+        D3D12_RESOURCE_BARRIER initBarriers[7] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePoolBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePosBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropCountBuf.resource.Get()),
         };
-        m_CommandList->ResourceBarrier(4, initBarriers);
+        m_CommandList->ResourceBarrier(7, initBarriers);
     }
 
     // Bind IrCache constants once for all IrCache passes
@@ -943,18 +954,20 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         m_CommandList->ResourceBarrier(1, &b);
     }
 
-    // --- Pass 2: Age (expire old entries, build indirection) ---
+    // --- Pass 2: Age (expire old entries, build indirection, apply+clear position votes) ---
     m_CommandList->SetPipelineState(m_IrCacheAgePSO.Get());
     m_CommandList->Dispatch((32768 + 63) / 64, 1, 1);
 
     {
-        D3D12_RESOURCE_BARRIER barriers[4] = {
+        D3D12_RESOURCE_BARRIER barriers[6] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheMetaBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheIndirectionBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePosBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropCountBuf.resource.Get()),
         };
-        m_CommandList->ResourceBarrier(4, barriers);
+        m_CommandList->ResourceBarrier(6, barriers);
     }
 
     // --- Pass 3: Prepare Trace (snapshot live count → TraceArgs) ---
@@ -975,13 +988,15 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         m_IrCacheTraceArgsBuf.resource.Get(), 0, nullptr, 0);
 
     {
-        D3D12_RESOURCE_BARRIER barriers[4] = {
+        D3D12_RESOURCE_BARRIER barriers[6] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheIrradianceBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheLifeBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheGridMetaBuf.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCachePoolBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropCountBuf.resource.Get()),
         };
-        m_CommandList->ResourceBarrier(4, barriers);
+        m_CommandList->ResourceBarrier(6, barriers);
     }
 
     // -----------------------------------------------------------------------

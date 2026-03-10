@@ -112,6 +112,9 @@ struct IrCacheBindlessIndices
     uint32_t LifeBufIdx;
     uint32_t IndirectionBufIdx;
     uint32_t TraceArgsBufIdx;
+    uint32_t PosBufIdx;              // float4[MAX_ENTRIES] — applied probe positions (read during Update)
+    uint32_t RepropBufIdx;           // float4[MAX_ENTRIES] — voted proposal positions  (written during Update)
+    uint32_t ReproposalCountBufIdx;  // uint[MAX_ENTRIES]   — vote counters (cleared by Age, incremented by Update)
 };
 
 bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false, bool createUAV = false);
