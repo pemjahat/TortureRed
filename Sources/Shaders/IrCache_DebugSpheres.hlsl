@@ -40,6 +40,14 @@ VSOutput VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     VSOutput output;
     output.color = float3(1.0f, 1.0f, 1.0f);
 
+    RWByteAddressBuffer meta = ResourceDescriptorHeap[g_IrCache.MetaBufIdx];
+    uint liveCount = meta.Load(IRCACHE_META_TRACING_ALLOC_COUNT);
+    if (instanceID >= liveCount)
+    {
+        output.position = DEGENERATE_POS;
+        return output;
+    }
+
     // ---- Resolve entry and cell from IndirectionBuf ----
     RWStructuredBuffer<uint> indirection = ResourceDescriptorHeap[g_IrCache.IndirectionBufIdx];
     uint entryIdx = indirection[instanceID];
@@ -115,8 +123,12 @@ VSOutput VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     [branch]
     if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
     {
-        RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
-        output.color = irradiance[entryIdx].rgb;
+        RWStructuredBuffer<Reservoir> probeReservoirs = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
+        Reservoir r = probeReservoirs[entryIdx];
+        float validity = (r.M > 0.0f && r.W > 0.0f) ? 1.0f : 0.0f;
+        float3 resolved = r.radiance * r.W;
+        //output.color = lerp(float3(0.05f, 0.05f, 0.05f), resolved, validity);
+        output.color = resolved;
     }
     else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
     {

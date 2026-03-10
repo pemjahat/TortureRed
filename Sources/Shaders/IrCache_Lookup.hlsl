@@ -5,17 +5,28 @@
 
 // ---------------------------------------------------------------------------
 // SampleIrCache
-//   Read the stored mean incident irradiance for the probe covering `worldPos`.
+//   Read the stored reservoir contribution for the probe covering `worldPos`.
 //   Returns float3(0) unless all three flags are set:
 //     OCCUPIED  — cell is claimed
 //     ALLOCATED — entryIdx field is valid
 //     TRACED    — IrCache_Update has written at least one irradiance sample
-//   The irradiance buffer stores pure incident radiance — callers must multiply
-//   by surface albedo to obtain the reflected (exitant) contribution.
+//   The probe payload stores a reservoir. We expose a conservative estimate of
+//   incident radiance as selected radiance scaled by reservoir normalization.
 //   Life management is owned exclusively by IrCache_Update; this function is read-only.
 // ---------------------------------------------------------------------------
 static const uint IRCACHE_FLAGS_READY =
     IRCACHE_ENTRY_META_OCCUPIED | IRCACHE_ENTRY_META_ALLOCATED | IRCACHE_ENTRY_META_TRACED;
+
+float ircache_shift_jacobian(float3 queryPos, float3 probePos, float3 sampleHitPos, float3 sampleHitNormal)
+{
+    float3 dQuery = sampleHitPos - queryPos;
+    float3 dProbe = sampleHitPos - probePos;
+    float distSqQuery = max(1e-4f, dot(dQuery, dQuery));
+    float distSqProbe = max(1e-4f, dot(dProbe, dProbe));
+    float cosQuery = max(1e-4f, abs(dot(sampleHitNormal, dQuery * rsqrt(distSqQuery))));
+    float cosProbe = max(1e-4f, abs(dot(sampleHitNormal, dProbe * rsqrt(distSqProbe))));
+    return (cosQuery * distSqProbe) / max(1e-5f, cosProbe * distSqQuery);
+}
 
 float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cameraPos, float3 normal)
 {
@@ -31,8 +42,17 @@ float3 SampleIrCache(float3 worldPos, IrCacheBindlessIndices ircache, float3 cam
 
     uint entryIdx = ircache_cell_entry(packed);
 
-    RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[ircache.IrradianceBufIdx];
-    return irradiance[entryIdx].rgb;
+    RWStructuredBuffer<Reservoir> probeReservoirs = ResourceDescriptorHeap[ircache.IrradianceBufIdx];
+    Reservoir r = probeReservoirs[entryIdx];
+    if (r.M <= 0.0f || r.W <= 0.0f)
+        return float3(0.0f, 0.0f, 0.0f);
+
+    //float3 probePos = ircache_coord_to_world_center(coord, cameraPos);
+    //float jacobian = ircache_shift_jacobian(worldPos, probePos, r.hitPos, r.hitNormal);
+    //jacobian = clamp(jacobian, 0.1f, 10.0f);
+
+    //return r.radiance * (r.W * jacobian);
+    return r.radiance * r.W;
 }
 
 // ---------------------------------------------------------------------------

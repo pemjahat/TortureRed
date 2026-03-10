@@ -65,7 +65,7 @@ struct IrCacheBindlessIndices
     uint PoolBufIdx;        // RWStructuredBuffer<uint> — free-entry pool
     uint GridMetaBufIdx;    // RWByteAddressBuffer  — uint2 per cell (entry_idx, flags)
     uint EntryCellBufIdx;   // RWStructuredBuffer<uint> — entry → cell back-link
-    uint IrradianceBufIdx;  // RWStructuredBuffer<float4> — irradiance per entry
+    uint IrradianceBufIdx;  // RWStructuredBuffer<Reservoir> — probe reservoir payload per entry
     uint LifeBufIdx;        // RWByteAddressBuffer  — life uint per entry
     uint IndirectionBufIdx; // RWStructuredBuffer<uint> — compact live-entry list
     uint TraceArgsBufIdx;   // RWByteAddressBuffer  — 3 × uint indirect dispatch args

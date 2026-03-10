@@ -44,7 +44,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // Spatial Reuse
     int numNeighbors = 3;
-    float radius = 20.0f;
+    float radius = 20.f;
+    float depthThreshold = 0.1f;
+    float normalThreshold = 0.95f;
 
     for (int i = 0; i < numNeighbors; ++i) {
         float2 offset = float2(next_float(rng) * 2.0f - 1.0f, next_float(rng) * 2.0f - 1.0f) * radius;
@@ -60,9 +62,14 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 bool hasNeighborHit = TracePrimarySurface((uint2)neighborPos, launchDims, g_Frame, neighborRng, neighborSurface, neighborRayT);
 
             Reservoir neighborR = currReservoirs[neighborIndex];
-                if (hasNeighborHit && neighborR.M > 0.0f && dot(centerSurface.normal, neighborSurface.normal) > 0.95f) {
+                bool normalsMatch = dot(centerSurface.normal, neighborSurface.normal) > normalThreshold;
+                bool depthMatch = abs(neighborRayT - centerRayT) <= (depthThreshold * max(1.0f, centerRayT));
+                if (hasNeighborHit && neighborR.M > 0.0f && normalsMatch && depthMatch) {
                 // Re-evaluate target PDF for neighbor sample at current surface
                 float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance);
+                //float jacobian = ComputeJacobian(centerSurface.worldPos, neighborSurface.worldPos, neighborR.hitPos, neighborR.hitNormal);
+                //jacobian = clamp(jacobian, 0.1f, 10.0f);
+                //neighborTargetPDF *= jacobian;
                 
                 if (neighborTargetPDF > 0.0f) {
                     if (mergeReservoirs(r, neighborR, neighborTargetPDF, next_float(rng))) {

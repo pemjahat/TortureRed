@@ -39,7 +39,7 @@ void Renderer::CreateRasterIndirectGIResources()
     // Structured (RWStructuredBuffer<T>) — CreateStructuredBuffer now writes correct UAV
     CreateStructuredBuffer(m_IrCachePoolBuf,       sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_IrCacheEntryCellBuf,  sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_IrCacheIrradianceBuf, sizeof(float) * 4, MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_IrCacheIrradianceBuf, sizeof(Reservoir), MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_IrCacheIndirectionBuf,sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Fill the IrCacheBindlessIndices struct (all UAV indices)

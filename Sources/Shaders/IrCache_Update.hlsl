@@ -1,7 +1,6 @@
 // IrCache_Update.hlsl
 // Indirect compute dispatch — one group per live probe, IRCACHE_RAYS_PER_PROBE threads/group.
-// Trace rays from each probe, accumulate radiance with groupshared reduction,
-// EMA-blend into the irradiance buffer.
+// Trace rays from each probe and build a single reservoir per probe.
 
 #include "IrCache_Common.hlsl"
 #include "IrCache_Lookup.hlsl"
@@ -12,7 +11,7 @@ ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
-groupshared float3 gs_Radiance[IRCACHE_RAYS_PER_PROBE];
+groupshared Reservoir gs_Candidates[IRCACHE_RAYS_PER_PROBE];
 
 [numthreads(IRCACHE_RAYS_PER_PROBE, 1, 1)]
 void main(uint3 GroupId   : SV_GroupID,
@@ -23,7 +22,7 @@ void main(uint3 GroupId   : SV_GroupID,
     uint tracingCount = meta.Load(IRCACHE_META_TRACING_ALLOC_COUNT);
     if (GroupId.x >= tracingCount)
     {
-        gs_Radiance[GroupIdx] = float3(0, 0, 0);
+        gs_Candidates[GroupIdx] = (Reservoir)0;
         return;
     }
 
@@ -57,7 +56,7 @@ void main(uint3 GroupId   : SV_GroupID,
     q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
     while (q.Proceed()) { PROCESS_ALPHA_MASK(q, rng); }
 
-    float3 sampleRadiance = float3(0, 0, 0);
+    Reservoir localR = (Reservoir)0;
 
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
     {
@@ -103,38 +102,71 @@ void main(uint3 GroupId   : SV_GroupID,
         float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
         IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
 
-        sampleRadiance = direct + indirect * albedo.rgb;
+        float3 sampleRadiance = direct + indirect * albedo.rgb;
+        float sampleWeight = max(1e-5f, Luminance(sampleRadiance));
+        if (sampleWeight > 0.0f)
+        {
+            // One candidate per thread, merged later into the final probe reservoir.
+            updateReservoir(localR, hitPos, hitNorm, sampleRadiance, sampleWeight, 0.0f);
+            localR.W = 1.0f;
+        }
     }
 
-    gs_Radiance[GroupIdx] = sampleRadiance;
+    gs_Candidates[GroupIdx] = localR;
     GroupMemoryBarrierWithGroupSync();
 
-    // ---- thread 0 reduces + writes irradiance ----
+    // ---- thread 0 combines candidates + writes probe reservoir ----
     if (GroupIdx == 0)
     {
-        float3 total = float3(0, 0, 0);
+        Reservoir outR = (Reservoir)0;
+        float selectedPDF = 0.0f;
+        RNG reduceRng;
+        seed_rng(reduceRng, uint2(entryIdx, 131u), g_Frame.frameIndex);
+
         [unroll]
         for (int k = 0; k < IRCACHE_RAYS_PER_PROBE; ++k)
-            total += gs_Radiance[k];
-        float3 newIrr = total / (float)IRCACHE_RAYS_PER_PROBE;
+        {
+            Reservoir candidate = gs_Candidates[k];
+            if (candidate.M > 0.0f)
+            {
+                float shiftedTarget = max(1e-5f, Luminance(candidate.radiance));
+                if (mergeReservoirs(outR, candidate, shiftedTarget, next_float(reduceRng)))
+                    selectedPDF = shiftedTarget;
+            }
+        }
 
-        RWStructuredBuffer<float4> irradiance = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
-        float4 prev = irradiance[entryIdx];
+        if (outR.M > 0.0f && selectedPDF > 0.0f)
+            outR.W = outR.w_sum / (outR.M * selectedPDF);
+        else
+            outR.W = 0.0f;
+
+        RWStructuredBuffer<Reservoir> probeReservoirs = ResourceDescriptorHeap[g_IrCache.IrradianceBufIdx];
 
         RWByteAddressBuffer gridMeta = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
         uint flags      = ircache_cell_flags(gridMeta.Load(cellIdx * 4));
         bool firstTrace = !(flags & IRCACHE_ENTRY_META_TRACED);
-        float blend = (firstTrace || g_Frame.frameIndex == 0) ? 1.0f : 0.05f;
-
         if (firstTrace)
         {
-            // Mark irradiance as valid; SampleIrCache will now return real data.
+            // Mark probe payload as valid so SampleIrCache can read this entry.
             // InterlockedOr only touches bit 2 (TRACED), leaving entryIdx in bits [31:3] intact.
             uint dummy;
             gridMeta.InterlockedOr(cellIdx * 4, IRCACHE_ENTRY_META_TRACED, dummy);
         }
 
-        irradiance[entryIdx] = float4(lerp(prev.rgb, newIrr, blend), 1.0f);
+        if (!firstTrace)
+        {
+            Reservoir prev = probeReservoirs[entryIdx];
+            if (prev.M > 0.0f)
+            {
+                float shiftedTarget = max(1e-5f, Luminance(prev.radiance));
+                if (mergeReservoirs(outR, prev, shiftedTarget, next_float(reduceRng)))
+                    selectedPDF = shiftedTarget;
+                if (outR.M > 0.0f && selectedPDF > 0.0f)
+                    outR.W = outR.w_sum / (outR.M * selectedPDF);
+            }
+        }
+
+        probeReservoirs[entryIdx] = outR;
 
         // Reset life so the aging pass keeps this probe alive
         RWByteAddressBuffer life = ResourceDescriptorHeap[g_IrCache.LifeBufIdx];

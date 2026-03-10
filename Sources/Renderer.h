@@ -164,7 +164,7 @@ private:
     GPUBuffer m_IrCachePoolBuf;          // uint free-list  [MAX_ENTRIES]
     GPUBuffer m_IrCacheGridMetaBuf;      // uint per cell (entryIdx<<3 | flags)  [TOTAL_CELLS]
     GPUBuffer m_IrCacheEntryCellBuf;     // uint entry->cell [MAX_ENTRIES]
-    GPUBuffer m_IrCacheIrradianceBuf;    // float4 irradiance [MAX_ENTRIES]
+    GPUBuffer m_IrCacheIrradianceBuf;    // Reservoir payload [MAX_ENTRIES]
     GPUBuffer m_IrCacheLifeBuf;          // uint life       [MAX_ENTRIES]
     GPUBuffer m_IrCacheIndirectionBuf;   // uint compact list [MAX_ENTRIES]
     GPUBuffer m_IrCacheTraceArgsBuf;     // uint3 indirect dispatch args
