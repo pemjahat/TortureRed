@@ -84,7 +84,7 @@ struct FrameConstants
     float    sharcSceneScale;
     uint32_t sharcAccumulationFrameNum;
     uint32_t sharcStaleFrameNum;
-    uint32_t sharcDebug;
+    uint32_t sharcDebug;          // 0=off, 1=SHaRC output, 2=bounce heatmap
 };
 
 struct LightConstants

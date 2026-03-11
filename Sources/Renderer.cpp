@@ -115,6 +115,14 @@ void Renderer::CreateRasterIndirectGIPipelines()
             m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SharcResolvePSO));
         }
     }
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/SHaRC_Debug.hlsl", "main", "cs_6_6", {});
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SharcDebugPSO));
+        }
+    }
 
     auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
@@ -1097,6 +1105,20 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
+    // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).
+    if (frame.sharcDebug && m_SharcDebugPSO)
+    {
+        D3D12_RESOURCE_BARRIER dbgBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterIndirectLightingTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &dbgBarrier);
+
+        m_CommandList->SetPipelineState(m_SharcDebugPSO.Get());
+        indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        // b2 (slot 13) still holds m_SharcIndices from the SHaRC update/resolve above
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 }

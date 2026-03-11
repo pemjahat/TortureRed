@@ -34,7 +34,7 @@ struct FrameConstants {
     float sharcSceneScale;
     uint  sharcAccumulationFrameNum;
     uint  sharcStaleFrameNum;
-    uint  sharcDebug;          // 0=off, 1=show cached radiance at secondary hit
+    uint  sharcDebug;          // 0=off, 1=SHaRC output, 2=bounce heatmap
 };
 
 struct BindlessIndices

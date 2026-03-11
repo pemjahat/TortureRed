@@ -200,6 +200,7 @@ private:
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcDebugPSO;
 
     // GBuffer resources
     GBuffer m_GBuffer;

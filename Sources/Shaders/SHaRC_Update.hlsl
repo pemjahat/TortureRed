@@ -61,8 +61,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
     SharcState sharcState;
     SharcInit(sharcState);
 
+    float3 throughput = 1;
+
     [loop]
-    for (int bounce = 0; bounce < SHARC_PROPAGATION_DEPTH; ++bounce)
+    for (int bounce = 1; bounce < SHARC_PROPAGATION_DEPTH; ++bounce)
     {
         // Sample next bounce direction + per-step throughput weight
         float3 rayDir, bounceThroughput;
@@ -73,8 +75,14 @@ void main(uint3 DTid : SV_DispatchThreadID)
                           rng, rayDir, bounceThroughput, pdf, isDiffuse,
                           g_Frame.enableIndirectSpecular != 0);
 
-        // Degenerate sample (below horizon, zero BSDF, etc.)
-        if (pdf < 1e-6f || all(bounceThroughput == 0.0f)) break;
+        throughput *= bounceThroughput;
+
+        // Russian Roulette
+        if (bounce > 2) {
+            float p = max(throughput.r, max(throughput.g, throughput.b));
+            if (next_float(rng) > p) break;
+            throughput /= p;
+        }
 
         RayDesc ray;
         ray.Origin    = surface.worldPos + surface.normal * 0.001f;
@@ -146,7 +154,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         if (!continueTracing) break;
 
         // Scale stored sample weights by this bounce's BSDF throughput
-        SharcSetThroughput(sharcState, bounceThroughput);
+        SharcSetThroughput(sharcState, throughput);
 
         // Advance primary surface to this hit for the next bounce
         surface.worldPos  = hitPos;

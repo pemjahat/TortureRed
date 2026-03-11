@@ -599,14 +599,11 @@ void Application::RenderImGui()
 
         if (enableRasterIndirectGI)
         {
-            bool sharcDebug = (m_FrameConstants.sharcDebug != 0);
-            if (ImGui::Checkbox("Debug SHaRC", &sharcDebug))
-                m_FrameConstants.sharcDebug = sharcDebug ? 1 : 0;
-            if (sharcDebug)
-            {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(shows cached radiance at indirect hit)");
-            }
+            const char* sharcDebugModes[] = { "Off", "SHaRC Output", "Bounce Heatmap" };
+            int sharcDebugMode = (int)m_FrameConstants.sharcDebug;
+            ImGui::SetNextItemWidth(180.f);
+            if (ImGui::Combo("Debug Vis Mode", &sharcDebugMode, sharcDebugModes, 3))
+                m_FrameConstants.sharcDebug = (uint32_t)sharcDebugMode;
         }
 
         bool debugIrCache = (m_FrameConstants.debugIrCache != 0);
