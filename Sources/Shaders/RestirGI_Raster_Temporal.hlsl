@@ -1,9 +1,9 @@
+#include "sharc/SharcCommon.h"
 #include "CommonTracing.hlsl"
-#include "IrCache_Lookup.hlsl"
 
-ConstantBuffer<FrameConstants>         g_Frame   : register(b0);
-ConstantBuffer<BindlessIndices>        g_Indices : register(b1);
-ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
+ConstantBuffer<FrameConstants>       g_Frame   : register(b0);
+ConstantBuffer<BindlessIndices>      g_Indices : register(b1);
+ConstantBuffer<SharcBindlessIndices> g_Sharc   : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
@@ -94,11 +94,25 @@ void main(uint3 DTid : SV_DispatchThreadID)
         // Direct Lighting at hit point
         float3 directLighting = GetDirectLightingHybrid(hitPos, hitNormal, hitViewDir, hitAlbedo.rgb, hitMetallic, hitRoughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
 
-        // Multi-bounce: sample spatial irradiance cache at hit point
-        float3 indirectLighting = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNormal);
-        // Demand-allocate a probe here so the cache populates on subsequent frames
-        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNormal);
-        
+        // Multi-bounce: query SHaRC radiance cache at hit point
+        float3 indirectLighting = float3(0.0f, 0.0f, 0.0f);
+        {
+            SharcParameters sharcParams;
+            sharcParams.gridParameters.cameraPosition   = g_Frame.irCacheCameraPosition.xyz;
+            sharcParams.gridParameters.logarithmBase    = SHARC_GRID_LOGARITHM_BASE;
+            sharcParams.gridParameters.sceneScale       = g_Frame.sharcSceneScale;
+            sharcParams.gridParameters.levelBias        = 0.0f;
+            sharcParams.hashMapData.capacity            = SHARC_HASH_ENTRIES_NUM;
+            sharcParams.hashMapData.hashEntriesBuffer   = ResourceDescriptorHeap[g_Sharc.HashEntriesBufIdx];
+            sharcParams.accumulationBuffer              = ResourceDescriptorHeap[g_Sharc.AccumulationBufIdx];
+            sharcParams.resolvedBuffer                  = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
+            sharcParams.radianceScale                   = 1e3f;
+            sharcParams.enableAntiFireflyFilter         = false;
+            SharcHitData sharcQuery;
+            sharcQuery.positionWorld = hitPos;
+            sharcQuery.normalWorld   = hitNormal;
+            SharcGetCachedRadiance(sharcParams, sharcQuery, indirectLighting, false);
+        }
         sampleRadiance = directLighting + indirectLighting * hitAlbedo.rgb;
     }
 

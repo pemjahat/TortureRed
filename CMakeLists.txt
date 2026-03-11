@@ -93,6 +93,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(rtxdi)
 
+# Download SHaRC (Spatial Hash Radiance Cache) headers
+FetchContent_Declare(
+    sharc
+    GIT_REPOSITORY https://github.com/NVIDIA-RTX/SHARC.git
+    GIT_TAG main
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/sharc
+)
+FetchContent_MakeAvailable(sharc)
+
 # Create ImGui library
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -163,6 +172,17 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/Sources/Shaders
     $<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders
+)
+
+# Copy SHaRC headers (fetched from NVIDIA-RTX/SHARC) into the Shaders output directory
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${sharc_SOURCE_DIR}/include/SharcCommon.h"
+        "${sharc_SOURCE_DIR}/include/SharcTypes.h"
+        "${sharc_SOURCE_DIR}/include/HashGridCommon.h"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
+    COMMENT "Copying SHaRC headers to shader output directory"
 )
 
 # Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)

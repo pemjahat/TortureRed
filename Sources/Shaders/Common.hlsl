@@ -30,6 +30,11 @@ struct FrameConstants {
     int  debugIrCacheCascadeFilter; // -1 = all cascades, 0-7 = specific cascade
     uint screenWidth;
     uint screenHeight;
+    // SHaRC (Spatial Hash Radiance Cache) parameters
+    float sharcSceneScale;
+    uint  sharcAccumulationFrameNum;
+    uint  sharcStaleFrameNum;
+    uint  sharcDebug;          // 0=off, 1=show cached radiance at secondary hit
 };
 
 struct BindlessIndices
@@ -72,6 +77,16 @@ struct IrCacheBindlessIndices
     uint PosBufIdx;               // RWStructuredBuffer<float4> — applied probe positions (w=1 if valid)
     uint RepropBufIdx;            // RWStructuredBuffer<float4> — voted proposal positions (written during Update)
     uint ReproposalCountBufIdx;   // RWByteAddressBuffer       — per-entry vote counters
+};
+
+// SHaRC (Spatial Hash Radiance Cache) bindless buffer indices.
+// Bound as root constants at b2 when SHaRC passes are active.
+#define SHARC_HASH_ENTRIES_NUM (4 * 1024 * 1024)
+struct SharcBindlessIndices
+{
+    uint HashEntriesBufIdx;    // RWStructuredBuffer<uint64_t>              — hash table  (32 MB)
+    uint AccumulationBufIdx;   // RWStructuredBuffer<SharcAccumulationData> — per-frame accumulation (64 MB)
+    uint ResolvedBufIdx;       // RWStructuredBuffer<SharcPackedData>       — temporal EMA output  (64 MB)
 };
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {

@@ -1,0 +1,159 @@
+// SHaRC_Update.hlsl
+// Compiled with -DSHARC_UPDATE=1 -DSHARC_PROPAGATION_DEPTH=4
+//
+// Dispatched at full resolution (8x8 per group).  One thread per pixel traces
+// a primary surface then walks up to SHARC_PROPAGATION_DEPTH secondary bounces,
+// depositing direct-lighting samples into the SHaRC hash table at each hit.
+// SharcResolveEntry (in SHaRC_Resolve.hlsl) blends the accumulation into the
+// resolved buffer with EMA and resets the accumulation for next frame.
+
+#include "sharc/SharcCommon.h"
+#include "CommonTracing.hlsl"
+
+ConstantBuffer<FrameConstants>       g_Frame   : register(b0);
+ConstantBuffer<BindlessIndices>      g_Indices : register(b1);
+ConstantBuffer<SharcBindlessIndices> g_Sharc   : register(b2);
+
+StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+SharcParameters BuildSharcParams()
+{
+    SharcParameters p;
+    p.gridParameters.cameraPosition  = g_Frame.irCacheCameraPosition.xyz;
+    p.gridParameters.logarithmBase   = SHARC_GRID_LOGARITHM_BASE;
+    p.gridParameters.sceneScale      = g_Frame.sharcSceneScale;
+    p.gridParameters.levelBias       = 0.0f;
+    p.hashMapData.capacity           = SHARC_HASH_ENTRIES_NUM;
+    p.hashMapData.hashEntriesBuffer  = ResourceDescriptorHeap[g_Sharc.HashEntriesBufIdx];
+    p.accumulationBuffer             = ResourceDescriptorHeap[g_Sharc.AccumulationBufIdx];
+    p.resolvedBuffer                 = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
+    p.radianceScale                  = 1e3f;
+    p.enableAntiFireflyFilter        = false;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+[numthreads(8, 8, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 screenPos  = DTid.xy;
+    uint2 launchDims = uint2(g_Frame.screenWidth, g_Frame.screenHeight);
+
+    if (screenPos.x >= launchDims.x || screenPos.y >= launchDims.y) return;
+
+    RNG rng;
+    seed_rng(rng, screenPos, g_Frame.frameIndex);
+
+    // Trace primary surface from GBuffer (same ray as the camera)
+    Surface surface;
+    float primaryRayT;
+    if (!TracePrimarySurface(screenPos, launchDims, g_Frame, rng, surface, primaryRayT)) return;
+
+    SharcParameters sharcParams = BuildSharcParams();
+
+    SharcState sharcState;
+    SharcInit(sharcState);
+
+    [loop]
+    for (int bounce = 0; bounce < SHARC_PROPAGATION_DEPTH; ++bounce)
+    {
+        // Sample next bounce direction + per-step throughput weight
+        float3 rayDir, bounceThroughput;
+        float  pdf;
+        bool   isDiffuse;
+        SampleIndirectRay(surface.normal, surface.viewDir,
+                          surface.albedo, surface.metallic, surface.roughness,
+                          rng, rayDir, bounceThroughput, pdf, isDiffuse,
+                          g_Frame.enableIndirectSpecular != 0);
+
+        // Degenerate sample (below horizon, zero BSDF, etc.)
+        if (pdf < 1e-6f || all(bounceThroughput == 0.0f)) break;
+
+        RayDesc ray;
+        ray.Origin    = surface.worldPos + surface.normal * 0.001f;
+        ray.Direction = rayDir;
+        ray.TMin      = 0.01f;
+        ray.TMax      = 1000.0f;
+
+        RayQuery<RAY_FLAG_NONE> q;
+        q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+        while (q.Proceed()) { PROCESS_ALPHA_MASK(q, rng); }
+
+        if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        {
+            // Sky hit — propagate zero radiance back through stored vertices
+            SharcUpdateMiss(sharcParams, sharcState, float3(0.0f, 0.0f, 0.0f));
+            break;
+        }
+
+        // --- Decode triangle geometry ---
+        uint instanceIdx = q.CommittedInstanceID();
+        uint triIdx      = q.CommittedPrimitiveIndex();
+        float2 barys     = q.CommittedTriangleBarycentrics();
+        DrawNodeData      nodeData = g_DrawNodeBuffer[instanceIdx];
+        MaterialConstants mat     = g_Materials[nodeData.materialID];
+
+        uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+        uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+        uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+        GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+        GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+        GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+
+        float  bary0     = 1.0f - barys.x - barys.y;
+        float2 hitUv     = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
+        float3 hitNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y,
+                                        (float3x3)nodeData.world));
+
+        float4 hitAlbedo = mat.baseColorFactor;
+        if (mat.baseColorTextureIndex >= 0)
+            hitAlbedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+
+        float hitMetallic  = mat.metallicFactor;
+        float hitRoughness = mat.roughnessFactor;
+        if (mat.metallicRoughnessTextureIndex >= 0)
+        {
+            float4 mr = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+            hitRoughness *= mr.g;
+            hitMetallic  *= mr.b;
+        }
+
+        float3 hitPos     = ray.Origin + ray.Direction * q.CommittedRayT();
+        float3 hitViewDir = -ray.Direction;
+
+        // --- Direct lighting at bounce hit ---
+        float3 directLighting = GetDirectLightingHybrid(
+            hitPos, hitNormal, hitViewDir,
+            hitAlbedo.rgb, hitMetallic, max(0.01f, hitRoughness),
+            g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+
+        // --- Deposit sample into SHaRC hash table ---
+        SharcHitData sharcHit;
+        sharcHit.positionWorld = hitPos;
+        sharcHit.normalWorld   = hitNormal;
+
+        bool continueTracing = SharcUpdateHit(sharcParams, sharcState, sharcHit,
+                                              directLighting, next_float(rng));
+
+        // SharcUpdateHit returns false when cache resampling terminates the path
+        if (!continueTracing) break;
+
+        // Scale stored sample weights by this bounce's BSDF throughput
+        SharcSetThroughput(sharcState, bounceThroughput);
+
+        // Advance primary surface to this hit for the next bounce
+        surface.worldPos  = hitPos;
+        surface.normal    = hitNormal;
+        surface.viewDir   = hitViewDir;
+        surface.albedo    = hitAlbedo.rgb;
+        surface.metallic  = hitMetallic;
+        surface.roughness = max(0.01f, hitRoughness);
+    }
+}

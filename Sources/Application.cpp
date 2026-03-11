@@ -82,6 +82,10 @@ void Application::Initialize()
     m_FrameConstants.enableIndirectSpecular = 0;
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
     m_FrameConstants.debugIrCacheCascadeFilter = -1; // -1 = show all cascades
+    m_FrameConstants.sharcSceneScale = 50.0f;
+    m_FrameConstants.sharcAccumulationFrameNum = 128;
+    m_FrameConstants.sharcStaleFrameNum = 32;
+    m_FrameConstants.sharcDebug = 0;
 
     // Load Scene
     if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
@@ -591,6 +595,18 @@ void Application::RenderImGui()
         if (ImGui::Checkbox("Enable Raster Indirect GI", &enableRasterIndirectGI))
         {
             m_FrameConstants.enableRasterIndirectGI = enableRasterIndirectGI ? 1 : 0;
+        }
+
+        if (enableRasterIndirectGI)
+        {
+            bool sharcDebug = (m_FrameConstants.sharcDebug != 0);
+            if (ImGui::Checkbox("Debug SHaRC", &sharcDebug))
+                m_FrameConstants.sharcDebug = sharcDebug ? 1 : 0;
+            if (sharcDebug)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(shows cached radiance at indirect hit)");
+            }
         }
 
         bool debugIrCache = (m_FrameConstants.debugIrCache != 0);

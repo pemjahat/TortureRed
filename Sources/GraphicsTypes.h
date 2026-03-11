@@ -80,6 +80,11 @@ struct FrameConstants
     int32_t  debugIrCacheCascadeFilter; // -1 = all cascades, 0-7 = specific cascade
     uint32_t screenWidth;
     uint32_t screenHeight;
+    // SHaRC (Spatial Hash Radiance Cache) parameters
+    float    sharcSceneScale;
+    uint32_t sharcAccumulationFrameNum;
+    uint32_t sharcStaleFrameNum;
+    uint32_t sharcDebug;
 };
 
 struct LightConstants
@@ -115,6 +120,14 @@ struct IrCacheBindlessIndices
     uint32_t PosBufIdx;              // float4[MAX_ENTRIES] — applied probe positions (read during Update)
     uint32_t RepropBufIdx;           // float4[MAX_ENTRIES] — voted proposal positions  (written during Update)
     uint32_t ReproposalCountBufIdx;  // uint[MAX_ENTRIES]   — vote counters (cleared by Age, incremented by Update)
+};
+
+// Mirror of SharcBindlessIndices in Common.hlsl — must stay in sync.
+struct SharcBindlessIndices
+{
+    uint32_t HashEntriesBufIdx;    // uint64_t × 4M (~32 MB)
+    uint32_t AccumulationBufIdx;   // SharcAccumulationData (uint4) × 4M (~64 MB)
+    uint32_t ResolvedBufIdx;       // SharcPackedData (float16_t4 + 2×uint) × 4M (~64 MB)
 };
 
 bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false, bool createUAV = false);

@@ -1,7 +1,10 @@
+#define SHARC_ENABLE_DEBUG 1
+#include "sharc/SharcCommon.h"
 #include "CommonTracing.hlsl"
 
-ConstantBuffer<FrameConstants> FrameCB : register(b0);
-ConstantBuffer<BindlessIndices> g_Indices : register(b1);
+ConstantBuffer<FrameConstants>       FrameCB   : register(b0);
+ConstantBuffer<BindlessIndices>       g_Indices : register(b1);
+ConstantBuffer<SharcBindlessIndices>  g_Sharc   : register(b2);
 
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
@@ -29,7 +32,44 @@ void main(uint3 DTid : SV_DispatchThreadID)
     }
 
     Reservoir r = tempReservoirs[pixelIndex];
-    
+
+#if SHARC_ENABLE_DEBUG
+    if (FrameCB.sharcDebug)
+    {
+        // Visualize the SHaRC cache at the secondary hit point stored in the
+        // reservoir (matching RTXGI Pathtracer debug pattern)
+        SharcParameters sharcParams;
+        sharcParams.gridParameters.cameraPosition  = FrameCB.irCacheCameraPosition.xyz;
+        sharcParams.gridParameters.logarithmBase   = SHARC_GRID_LOGARITHM_BASE;
+        sharcParams.gridParameters.sceneScale      = FrameCB.sharcSceneScale;
+        sharcParams.gridParameters.levelBias       = 0.0f;
+        sharcParams.hashMapData.capacity           = SHARC_HASH_ENTRIES_NUM;
+        sharcParams.hashMapData.hashEntriesBuffer  = ResourceDescriptorHeap[g_Sharc.HashEntriesBufIdx];
+        sharcParams.accumulationBuffer             = ResourceDescriptorHeap[g_Sharc.AccumulationBufIdx];
+        sharcParams.resolvedBuffer                 = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
+        sharcParams.radianceScale                  = 1e3f;
+        sharcParams.enableAntiFireflyFilter        = false;
+
+        SharcHitData sharcQuery;
+        // Use secondary hit when reservoir is valid, else fall back to primary surface
+        if (r.W > 0.0f)
+        {
+            sharcQuery.positionWorld = r.hitPos;
+            sharcQuery.normalWorld   = r.hitNormal;
+        }
+        else
+        {
+            sharcQuery.positionWorld = surface.worldPos;
+            sharcQuery.normalWorld   = surface.normal;
+        }
+
+        float3 debugColor = float3(0.0f, 0.0f, 0.0f);
+        SharcGetCachedRadiance(sharcParams, sharcQuery, debugColor, true);
+        indirectIrradiance[screenPos] = float4(debugColor, 1.0f);
+        return;
+    }
+#endif // SHARC_ENABLE_DEBUG
+
     float3 indirectLighting = 0.0f;
 
     if (r.W > 0.0f) {

@@ -60,6 +60,14 @@ void Renderer::CreateRasterIndirectGIResources()
     m_IrCacheIndices.RepropBufIdx          = (UINT)m_IrCacheRepropBuf.uavIndex;
     m_IrCacheIndices.ReproposalCountBufIdx = (UINT)m_IrCacheRepropCountBuf.uavIndex;
 
+    // ------- SHaRC buffers (~160 MB total) -------
+    CreateStructuredBuffer(m_SharcHashEntriesBuf,  8,  SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SharcAccumulationBuf, 16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SharcResolvedBuf,     16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_SharcIndices.HashEntriesBufIdx  = (UINT)m_SharcHashEntriesBuf.uavIndex;
+    m_SharcIndices.AccumulationBufIdx = (UINT)m_SharcAccumulationBuf.uavIndex;
+    m_SharcIndices.ResolvedBufIdx     = (UINT)m_SharcResolvedBuf.uavIndex;
+
     // ReSTIR reservoir buffers (unchanged)
     CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirs[1], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -88,6 +96,25 @@ void Renderer::CreateRasterIndirectGIPipelines()
     CompileAndCreate("Shaders/IrCache_Age.hlsl",            m_IrCacheAgePSO);
     CompileAndCreate("Shaders/IrCache_Prepare_Trace.hlsl",  m_IrCachePrepareTracePSO);
     CompileAndCreate("Shaders/IrCache_Update.hlsl",         m_IrCacheUpdatePSO);
+
+    // ------- SHaRC PSOs -------
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/SHaRC_Update.hlsl", "main", "cs_6_6",
+            {{L"SHARC_UPDATE", L"1"}, {L"SHARC_PROPAGATION_DEPTH", L"4"}});
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SharcUpdatePSO));
+        }
+    }
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/SHaRC_Resolve.hlsl", "main", "cs_6_6", {});
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SharcResolvePSO));
+        }
+    }
 
     auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
@@ -914,7 +941,8 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     // 1. Cascade scrollling one cell at time, only cell at edge reallocated
     // 2. Repositioning probes toward nearest open space using ray (avoid probe inside wall)
     // 3. Lazy trace - trace if probe recently allocated, or light changed
-    
+
+#if 0   // Old cascaded probe IrCache — replaced by SHaRC
     // -----------------------------------------------------------------------
     // Spatial IrCache Pipeline
     // -----------------------------------------------------------------------
@@ -997,6 +1025,44 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
             CD3DX12_RESOURCE_BARRIER::UAV(m_IrCacheRepropCountBuf.resource.Get()),
         };
         m_CommandList->ResourceBarrier(6, barriers);
+    }
+#endif  // Old IrCache
+
+    // -----------------------------------------------------------------------
+    // SHaRC (Spatial Hash Radiance Cache) Pipeline
+    // -----------------------------------------------------------------------
+
+    // Bind SHaRC indices; slot 13 (b2) is read by SHaRC_Update, SHaRC_Resolve,
+    // and RestirGI_Raster_Temporal (query pass) — set once, persists for all three.
+    m_CommandList->SetComputeRoot32BitConstants(13, sizeof(SharcBindlessIndices) / 4, &m_SharcIndices, 0);
+
+    // --- Pass 1: SHaRC Update — trace secondary rays, deposit samples into hash table ---
+    // Downscale by 5 (matching RTXGI default): rays still span the full frustum in NDC,
+    // giving 25x fewer deposits per frame while query remains full-res.
+    static constexpr UINT SHARC_UPDATE_DOWNSCALE = 5;
+    const UINT sharcUpdateW = (WINDOW_WIDTH  + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
+    const UINT sharcUpdateH = (WINDOW_HEIGHT + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
+    m_CommandList->SetPipelineState(m_SharcUpdatePSO.Get());
+    m_CommandList->Dispatch((sharcUpdateW + 7) / 8, (sharcUpdateH + 7) / 8, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SharcHashEntriesBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SharcAccumulationBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
+
+    // --- Pass 2: SHaRC Resolve — EMA blend accumulation→resolved, clears accumulation ---
+    m_CommandList->SetPipelineState(m_SharcResolvePSO.Get());
+    m_CommandList->Dispatch((SHARC_HASH_ENTRIES_NUM + 255) / 256, 1, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SharcHashEntriesBuf.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SharcResolvedBuf.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
     }
 
     // -----------------------------------------------------------------------

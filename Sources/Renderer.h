@@ -175,6 +175,13 @@ private:
     bool      m_IrCacheInitialized = false;
     IrCacheBindlessIndices m_IrCacheIndices = {};
 
+    // ------- SHaRC (Spatial Hash Radiance Cache) buffers ~160 MB -------
+    static constexpr UINT SHARC_HASH_ENTRIES_NUM = 4 * 1024 * 1024;
+    GPUBuffer m_SharcHashEntriesBuf;    // uint64_t × SHARC_HASH_ENTRIES_NUM = 32 MB
+    GPUBuffer m_SharcAccumulationBuf;   // SharcAccumulationData (uint4) × SHARC_HASH_ENTRIES_NUM = 64 MB
+    GPUBuffer m_SharcResolvedBuf;       // SharcPackedData (float16_t4+2×uint) × SHARC_HASH_ENTRIES_NUM = 64 MB
+    SharcBindlessIndices m_SharcIndices = {};
+
     GPUBuffer m_RasterReservoirs[2];
     GPUBuffer m_RasterReservoirIntermediate;
     GPUTexture m_RasterIndirectLightingTex;
@@ -189,6 +196,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
+
+    // ------- SHaRC PSOs -------
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcResolvePSO;
 
     // GBuffer resources
     GBuffer m_GBuffer;

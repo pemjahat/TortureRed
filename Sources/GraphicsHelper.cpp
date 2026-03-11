@@ -109,6 +109,12 @@ void GraphicsHelper::TransitionResource(ID3D12GraphicsCommandList* cmdList, ID3D
 
 std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target)
 {
+    return CompileShader(filename, entryPoint, target, {});
+}
+
+std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target,
+    const std::vector<std::pair<std::wstring, std::wstring>>& defines)
+{
     // Load HLSL source
     std::ifstream file(filename);
     if (!file.is_open())
@@ -141,6 +147,7 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(targetW.c_str());
     arguments.push_back(L"-HV");
     arguments.push_back(L"2021");
+    arguments.push_back(L"-enable-16bit-types");
     arguments.push_back(L"-I");
     arguments.push_back(L"Shaders");
 
@@ -150,6 +157,17 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(L"-I");
     arguments.push_back(rtxdiIncludeW.c_str());
 #endif
+
+    // Per-shader compile defines (e.g. SHARC_UPDATE=1, SHARC_PROPAGATION_DEPTH=4)
+    std::vector<std::wstring> defineArgs;
+    for (auto& [name, value] : defines)
+    {
+        std::wstring arg = L"-D" + name;
+        if (!value.empty()) arg += L"=" + value;
+        defineArgs.push_back(arg);
+    }
+    for (auto& arg : defineArgs)
+        arguments.push_back(arg.c_str());
 
     DxcBuffer sourceBuffer;
     sourceBuffer.Ptr = sourceBlob->GetBufferPointer();
