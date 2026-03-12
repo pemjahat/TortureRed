@@ -16,6 +16,7 @@
 #define SHARC_ENABLE_DEBUG 1
 #include "sharc/SharcCommon.h"
 #include "CommonTracing.hlsl"
+#include "SHaRC_Integration.hlsl"
 
 ConstantBuffer<FrameConstants>       g_Frame   : register(b0);
 ConstantBuffer<BindlessIndices>      g_Indices : register(b1);
@@ -163,18 +164,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
             sharcQuery.positionWorld = hitPos;
             sharcQuery.normalWorld   = hitNormal;
 
-            // Sharc query
-            uint gridLevel = HashGridGetLevel(hitPos, sharcParams.gridParameters);
-            float voxelSize = HashGridGetVoxelSize(gridLevel, sharcParams.gridParameters);
-            bool isValidHit = q.CommittedRayT() > voxelSize * sqrt(3.0f);   // If Hit point and ray origin inside same voxel (rejected)
-
-            cumulativeRoughness = min(cumulativeRoughness, 0.99f);
-            float alpha = cumulativeRoughness * cumulativeRoughness;
-            float footprint = q.CommittedRayT() * sqrt(0.5f * alpha * alpha / (1.0f - alpha * alpha));
-            isValidHit &= footprint > voxelSize;
-
             float3 sampleRadiance;
-            if (isValidHit && SharcGetCachedRadiance(sharcParams, sharcQuery, sampleRadiance, false))
+            float pathRoughness = isPathDiffuse ? 1.0f : cumulativeRoughness;
+            if (IsSharcQueryValid(hitPos, q.CommittedRayT(), pathRoughness, sharcParams)
+                && SharcGetCachedRadiance(sharcParams, sharcQuery, sampleRadiance, false))
                 break;
             // HashGridParameters gridParameters;
             // gridParameters.cameraPosition = g_Frame.irCacheCameraPosition.xyz;

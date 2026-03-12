@@ -100,7 +100,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
     // ------- SHaRC PSOs -------
     {
         auto cs = GraphicsHelper::CompileShader("Shaders/SHaRC_Update.hlsl", "main", "cs_6_6",
-            {{L"SHARC_UPDATE", L"1"}, {L"SHARC_PROPAGATION_DEPTH", L"4"}});
+            {{L"SHARC_UPDATE", L"1"}, {L"SHARC_PROPAGATION_DEPTH", L"4"}, {L"SHARC_UPDATE_DOWNSCALE", L"5"}});
         if (!cs.empty())
         {
             computeDesc.CS = { cs.data(), cs.size() };
@@ -1045,8 +1045,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CommandList->SetComputeRoot32BitConstants(13, sizeof(SharcBindlessIndices) / 4, &m_SharcIndices, 0);
 
     // --- Pass 1: SHaRC Update — trace secondary rays, deposit samples into hash table ---
-    // Downscale by 5 (matching RTXGI default): rays still span the full frustum in NDC,
-    // giving 25x fewer deposits per frame while query remains full-res.
+    // Downscale by 5 (matching RTXGI default): each thread updates one rotating
+    // full-resolution pixel inside a 5x5 tile, giving 25x fewer deposits per frame
+    // while maintaining whole-screen coverage over time.
     static constexpr UINT SHARC_UPDATE_DOWNSCALE = 5;
     const UINT sharcUpdateW = (WINDOW_WIDTH  + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
     const UINT sharcUpdateH = (WINDOW_HEIGHT + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;

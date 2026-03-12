@@ -1,5 +1,6 @@
 #include "sharc/SharcCommon.h"
 #include "CommonTracing.hlsl"
+#include "SHaRC_Integration.hlsl"
 
 ConstantBuffer<FrameConstants>       g_Frame   : register(b0);
 ConstantBuffer<BindlessIndices>      g_Indices : register(b1);
@@ -91,11 +92,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
         hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
         float3 hitViewDir = -ray.Direction;
 
-        // Direct Lighting at hit point
-        float3 directLighting = GetDirectLightingHybrid(hitPos, hitNormal, hitViewDir, hitAlbedo.rgb, hitMetallic, hitRoughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
-
         // Multi-bounce: query SHaRC radiance cache at hit point
-        float3 indirectLighting = float3(0.0f, 0.0f, 0.0f);
+        float3 cachedRadiance = float3(0.0f, 0.0f, 0.0f);
+        bool useCachedRadiance = false;
         {
             SharcParameters sharcParams;
             sharcParams.gridParameters.cameraPosition   = g_Frame.irCacheCameraPosition.xyz;
@@ -108,12 +107,28 @@ void main(uint3 DTid : SV_DispatchThreadID)
             sharcParams.resolvedBuffer                  = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
             sharcParams.radianceScale                   = 1e3f;
             sharcParams.enableAntiFireflyFilter         = false;
+
             SharcHitData sharcQuery;
             sharcQuery.positionWorld = hitPos;
             sharcQuery.normalWorld   = hitNormal;
-            SharcGetCachedRadiance(sharcParams, sharcQuery, indirectLighting, false);
+
+            float pathRoughness = isDiffuse ? 1.0f : surface.roughness;
+            useCachedRadiance = IsSharcQueryValid(hitPos, q.CommittedRayT(), pathRoughness, sharcParams)
+                && SharcGetCachedRadiance(sharcParams, sharcQuery, cachedRadiance, false);
         }
-        sampleRadiance = directLighting + indirectLighting * hitAlbedo.rgb;
+
+        if (useCachedRadiance)
+        {
+            sampleRadiance = cachedRadiance;
+        }
+        else
+        {
+            float3 directLighting = GetDirectLightingHybrid(
+                hitPos, hitNormal, hitViewDir,
+                hitAlbedo.rgb, hitMetallic, max(0.01f, hitRoughness),
+                g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+            sampleRadiance = directLighting;
+        }
     }
 
     // 2. Create Initial Reservoir
