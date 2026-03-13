@@ -84,23 +84,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(directxtex)
 
-# Download RTXDI-Library
-FetchContent_Declare(
-    rtxdi
-    GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXDI-Library.git
-    GIT_TAG main
-    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/rtxdi-library
-)
-FetchContent_MakeAvailable(rtxdi)
+# RTXDI-Library (Inlined in Externals/)
+add_subdirectory(Externals/rtxdi-library)
 
-# Download SHaRC (Spatial Hash Radiance Cache) headers
-FetchContent_Declare(
-    sharc
-    GIT_REPOSITORY https://github.com/NVIDIA-RTX/SHARC.git
-    GIT_TAG main
-    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/sharc
-)
-FetchContent_MakeAvailable(sharc)
+# SHaRC (Inlined in Externals/)
+# Since SHaRC is header-only and we've manually placed it, we don't add_subdirectory
 
 # Create ImGui library
 set(IMGUI_SOURCES
@@ -132,7 +120,8 @@ include_directories(${imgui_SOURCE_DIR}/backends)
 include_directories(${cgltf_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/jsmn)
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
-include_directories(${rtxdi_SOURCE_DIR}/Include)
+include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
+include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -152,7 +141,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 target_precompile_headers(${PROJECT_NAME} PRIVATE Sources/pch.h)
 
 # Set RTXDI include path for shaders
-target_compile_definitions(${PROJECT_NAME} PRIVATE RTXDI_INCLUDE_DIR="${rtxdi_SOURCE_DIR}/Include")
+target_compile_definitions(${PROJECT_NAME} PRIVATE RTXDI_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include")
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
@@ -183,13 +172,13 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying Shared header to shader output directory"
 )
 
-# Copy SHaRC headers (fetched from NVIDIA-RTX/SHARC) into the Shaders output directory
+# Copy SHaRC headers (from Externals/) into the Shaders output directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${sharc_SOURCE_DIR}/include/SharcCommon.h"
-        "${sharc_SOURCE_DIR}/include/SharcTypes.h"
-        "${sharc_SOURCE_DIR}/include/HashGridCommon.h"
+        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/SharcCommon.h"
+        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/SharcTypes.h"
+        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/HashGridCommon.h"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
     COMMENT "Copying SHaRC headers to shader output directory"
 )
@@ -252,7 +241,8 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf, DirectXTex, RTXDI-Library (automatically downloaded)")
+message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf, DirectXTex")
+message(STATUS "Externals: RTXDI-Library, SHaRC")
 message(STATUS "Windowing: SDL2")
 message(STATUS "Rendering: DirectX 12")
 message(STATUS "Debugging: ImGui")
