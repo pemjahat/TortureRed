@@ -53,7 +53,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
         PROCESS_ALPHA_MASK(q, rng);
     }
 
-    float3 sampleRadiance = 0.0f;
+    bool hasFirstBounceCandidate = false;
+    float3 continuationRadiance = 0.0f;
     float3 hitPos = 0.0f;
     float3 hitNormal = 0.0f;
 
@@ -91,8 +92,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
         float3 hitViewDir = -ray.Direction;
+        hasFirstBounceCandidate = true;
 
-        // Multi-bounce: query SHaRC radiance cache at hit point
+        // Evaluate continuation radiance from the sampled first-bounce candidate.
+        // SHaRC provides multi-bounce continuation on a cache hit; on a miss we
+        // currently fall back to direct lighting at the candidate only.
         float3 cachedRadiance = float3(0.0f, 0.0f, 0.0f);
         bool useCachedRadiance = false;
         {
@@ -119,7 +123,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         if (useCachedRadiance)
         {
-            sampleRadiance = cachedRadiance;
+            continuationRadiance = cachedRadiance;
         }
         else
         {
@@ -127,8 +131,14 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 hitPos, hitNormal, hitViewDir,
                 hitAlbedo.rgb, hitMetallic, max(0.01f, hitRoughness),
                 g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
-            sampleRadiance = directLighting;
+            continuationRadiance = directLighting;
         }
+    }
+    else
+    {
+        // First-bounce miss currently produces no candidate in the raster path.
+        // Sky handling will be added later; for now keep the reservoir empty.
+        hasFirstBounceCandidate = false;
     }
 
     // 2. Create Initial Reservoir
@@ -146,10 +156,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.roughness = surface.roughness;
 
     float selectedPDF = 0.f;
-    float targetPDF = GetTargetPDF(s, hitPos, sampleRadiance);
-    float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
-    if (updateReservoir(r, hitPos, hitNormal, sampleRadiance, risWeight, next_float(rng))) {
-        selectedPDF = targetPDF;
+    if (hasFirstBounceCandidate)
+    {
+        float targetPDF = GetTargetPDF(s, hitPos, continuationRadiance);
+        float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
+        if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
+            selectedPDF = targetPDF;
+        }
     }
 
     // 3. Temporal Reuse

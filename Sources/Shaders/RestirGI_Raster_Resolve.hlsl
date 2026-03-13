@@ -18,13 +18,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // Accessing texture bindless
     StructuredBuffer<Reservoir> tempReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
-    RWTexture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+    RWTexture2D<float4> indirectLightingTex = ResourceDescriptorHeap[g_Indices.OutputIdx0];
     
     Surface surface;
     float primaryRayT;
     bool hasPrimaryHit = TracePrimarySurface(screenPos, launchDims, FrameCB, rng, surface, primaryRayT);
     if (!hasPrimaryHit) {
-        indirectIrradiance[screenPos] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        indirectLightingTex[screenPos] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -43,10 +43,12 @@ void main(uint3 DTid : SV_DispatchThreadID)
             if (!FrameCB.enableIndirectSpecular) {
                 specBRDF = 0.0f;
             }
-            
+
+            // The reservoir stores continuation radiance from the sampled
+            // first-bounce candidate; resolve applies the primary BRDF here.
             indirectLighting = (diffBRDF + specBRDF) * r.radiance * r.W * NdotL;
         }
     }
 
-    indirectIrradiance[screenPos] = float4(indirectLighting, 1.0f);
+    indirectLightingTex[screenPos] = float4(indirectLighting, 1.0f);
 }

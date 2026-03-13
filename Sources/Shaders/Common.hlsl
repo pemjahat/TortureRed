@@ -137,9 +137,9 @@ struct DrawNodeData {
 };
 
 struct Reservoir {
-    float3 hitPos;     // Position of the indirect light hit
-    float3 hitNormal;  // Normal at the hit point
-    float3 radiance;   // Folded radiance from the hit point (includes albedo)
+    float3 hitPos;     // Position of the sampled first-bounce candidate
+    float3 hitNormal;  // Surface normal at the sampled candidate
+    float3 radiance;   // Continuation radiance transported from that candidate
     float w_sum;       // Sum of RIS weights
     float W;           // Normalization weight used at resolve
     float M;           // Number of samples
