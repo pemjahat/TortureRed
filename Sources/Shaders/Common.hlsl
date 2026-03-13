@@ -50,9 +50,18 @@ bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float shift
         curRes.hitPos = neighbourRes.hitPos;
         curRes.hitNormal = neighbourRes.hitNormal;
         curRes.radiance = neighbourRes.radiance;
+        curRes.historyAge = neighbourRes.historyAge;
         return true;
     }
     return false;
+}
+
+void capReservoirHistory(inout Reservoir r, float maxHistoryLength) {
+    if (r.M > maxHistoryLength) {
+        float scale = maxHistoryLength / r.M;
+        r.w_sum *= scale;
+        r.M = maxHistoryLength;
+    }
 }
 
 #endif // COMMON_HLSL

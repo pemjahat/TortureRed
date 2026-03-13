@@ -3,6 +3,14 @@
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
+static const float RESTIR_SPATIAL_DEPTH_THRESHOLD = 0.1f;
+static const float RESTIR_SPATIAL_NORMAL_THRESHOLD = 0.95f;
+static const float RESTIR_SPATIAL_ALBEDO_THRESHOLD = 0.15f;
+static const float RESTIR_SPATIAL_ROUGHNESS_THRESHOLD = 0.15f;
+static const float RESTIR_SPATIAL_METALLIC_THRESHOLD = 0.15f;
+static const float RESTIR_SPATIAL_MIN_JACOBIAN = 0.1f;
+static const float RESTIR_SPATIAL_MAX_JACOBIAN = 10.0f;
+
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
@@ -45,8 +53,6 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // Spatial Reuse
     int numNeighbors = 3;
     float radius = 20.f;
-    float depthThreshold = 0.1f;
-    float normalThreshold = 0.95f;
 
     for (int i = 0; i < numNeighbors; ++i) {
         float2 offset = float2(next_float(rng) * 2.0f - 1.0f, next_float(rng) * 2.0f - 1.0f) * radius;
@@ -62,17 +68,23 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 bool hasNeighborHit = TracePrimarySurface((uint2)neighborPos, launchDims, g_Frame, neighborRng, neighborSurface, neighborRayT);
 
             Reservoir neighborR = currReservoirs[neighborIndex];
-                bool normalsMatch = dot(centerSurface.normal, neighborSurface.normal) > normalThreshold;
-                bool depthMatch = abs(neighborRayT - centerRayT) <= (depthThreshold * max(1.0f, centerRayT));
-                if (hasNeighborHit && neighborR.M > 0.0f && normalsMatch && depthMatch) {
+                bool normalsMatch = dot(centerSurface.normal, neighborSurface.normal) > RESTIR_SPATIAL_NORMAL_THRESHOLD;
+                bool depthMatch = abs(neighborRayT - centerRayT) <= (RESTIR_SPATIAL_DEPTH_THRESHOLD * max(1.0f, centerRayT));
+                bool materialMatch = AreMaterialsSimilar(centerSurface, neighborSurface,
+                    RESTIR_SPATIAL_ALBEDO_THRESHOLD,
+                    RESTIR_SPATIAL_ROUGHNESS_THRESHOLD,
+                    RESTIR_SPATIAL_METALLIC_THRESHOLD);
+                if (hasNeighborHit && neighborR.M > 0.0f && normalsMatch && depthMatch && materialMatch) {
                 // Re-evaluate target PDF for neighbor sample at current surface
                 float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance);
-                //float jacobian = ComputeJacobian(centerSurface.worldPos, neighborSurface.worldPos, neighborR.hitPos, neighborR.hitNormal);
-                //jacobian = clamp(jacobian, 0.1f, 10.0f);
-                //neighborTargetPDF *= jacobian;
+                float jacobian = ComputeJacobian(centerSurface.worldPos, neighborSurface.worldPos, neighborR.hitPos, neighborR.hitNormal);
+                bool jacobianValid = jacobian >= RESTIR_SPATIAL_MIN_JACOBIAN && jacobian <= RESTIR_SPATIAL_MAX_JACOBIAN;
                 
-                if (neighborTargetPDF > 0.0f) {
-                    if (mergeReservoirs(r, neighborR, neighborTargetPDF, next_float(rng))) {
+                if (neighborTargetPDF > 0.0f && jacobianValid) {
+                    Reservoir adjustedNeighbor = neighborR;
+                    adjustedNeighbor.w_sum *= jacobian;
+
+                    if (mergeReservoirs(r, adjustedNeighbor, neighborTargetPDF, next_float(rng))) {
                         selectedPDF = neighborTargetPDF;
                     }
                 }

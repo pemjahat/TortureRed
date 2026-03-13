@@ -278,7 +278,7 @@ void Application::Update(float deltaTime)
         }
     }
 
-    if (cameraMoved) {
+    if (cameraMoved && m_UsePathTracer) {
         m_FrameConstants.frameIndex = 0;
     }
 

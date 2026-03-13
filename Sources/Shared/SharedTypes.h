@@ -88,6 +88,7 @@ struct Reservoir {
     float w_sum;
     float W;
     float M;
+    uint historyAge;
 };
 
 struct SharcBindlessIndices {

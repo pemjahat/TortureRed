@@ -67,6 +67,12 @@ float GetTargetPDF(Surface s, float3 samplePos, float3 sampleRadiance) {
     return max(0.0f, Luminance(reflected));
 }
 
+bool AreMaterialsSimilar(Surface lhs, Surface rhs, float albedoThreshold, float roughnessThreshold, float metallicThreshold) {
+    return all(abs(lhs.albedo - rhs.albedo) <= albedoThreshold.xxx)
+        && abs(lhs.roughness - rhs.roughness) <= roughnessThreshold
+        && abs(lhs.metallic - rhs.metallic) <= metallicThreshold;
+}
+
 // Compute the Jacobian for a GI shift (point-to-point solid angle ratio)
 float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampleHitPos, float3 sampleHitNormal) {
     float3 diffP = sampleHitPos - primaryPos;

@@ -8,6 +8,16 @@ ConstantBuffer<SharcBindlessIndices> g_Sharc   : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
+static const float RESTIR_TEMPORAL_DEPTH_THRESHOLD = 0.1f;
+static const float RESTIR_TEMPORAL_NORMAL_THRESHOLD = 0.95f;
+static const float RESTIR_TEMPORAL_ALBEDO_THRESHOLD = 0.15f;
+static const float RESTIR_TEMPORAL_ROUGHNESS_THRESHOLD = 0.15f;
+static const float RESTIR_TEMPORAL_METALLIC_THRESHOLD = 0.15f;
+static const float RESTIR_TEMPORAL_MAX_HISTORY_LENGTH = 16.0f;
+static const uint  RESTIR_TEMPORAL_MAX_HISTORY_AGE = 12u;
+static const float RESTIR_TEMPORAL_MAX_JACOBIAN = 10.0f;
+static const float RESTIR_TEMPORAL_MIN_JACOBIAN = 0.1f;
+
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
@@ -145,7 +155,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     //Reservoir r = (Reservoir)0;
     Reservoir r;
     r.hitPos = 0; r.hitNormal = 0; r.radiance = 0;
-    r.w_sum = 0; r.W = 0; r.M = 0;
+    r.w_sum = 0; r.W = 0; r.M = 0; r.historyAge = 0;
 
     Surface s;
     s.worldPos = surface.worldPos;
@@ -162,33 +172,58 @@ void main(uint3 DTid : SV_DispatchThreadID)
         float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
         if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
             selectedPDF = targetPDF;
+            r.historyAge = 0;
         }
     }
 
     // 3. Temporal Reuse
-    float4 prevClipPos = mul(float4(surface.worldPos, 1.0f), g_Frame.viewProjPrevious);
-    prevClipPos /= prevClipPos.w;
-    float2 prevUV = prevClipPos.xy * float2(0.5f, -0.5f) + 0.5f;
-    
-    if (prevUV.x >= 0 && prevUV.x <= 1 && prevUV.y >= 0 && prevUV.y <= 1) {
-        uint2 prevScreenPos = (uint2)(prevUV * (float2)launchDims);
-        Reservoir prevR = prevReservoirs[prevScreenPos.y * launchDims.x + prevScreenPos.x];
-        
-        if (prevR.M > 0.0f) {
-            // Re-evaluate target PDF for history sample at current surface
-            float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance);
-            
-            if (historyTargetPDF > 0.0f) {
+    if (g_Frame.frameIndex > 0u) {
+        float4 prevClipPos = mul(float4(surface.worldPos, 1.0f), g_Frame.viewProjPrevious);
+        prevClipPos /= prevClipPos.w;
+        float2 prevUV = prevClipPos.xy * float2(0.5f, -0.5f) + 0.5f;
 
-                if (mergeReservoirs(r, prevR, historyTargetPDF, next_float(rng))) {
-                    selectedPDF = historyTargetPDF;
+        if (prevUV.x >= 0.0f && prevUV.x < 1.0f && prevUV.y >= 0.0f && prevUV.y < 1.0f) {
+            uint2 prevScreenPos = min((uint2)(prevUV * (float2)launchDims), launchDims - 1);
+            Reservoir prevR = prevReservoirs[prevScreenPos.y * launchDims.x + prevScreenPos.x];
+
+            if (prevR.M > 0.0f && prevR.historyAge < RESTIR_TEMPORAL_MAX_HISTORY_AGE) {
+                RNG prevRng;
+                seed_rng(prevRng, prevScreenPos, (g_Frame.frameIndex - 1u) + 911u);
+
+                Surface prevSurface;
+                float prevRayT;
+                bool hasPrevHit = TracePrimarySurface(prevScreenPos, launchDims, g_Frame, prevRng, prevSurface, prevRayT, true);
+
+                float expectedPrevRayT = length(surface.worldPos - g_Frame.prevCameraPosition.xyz);
+                bool depthMatch = hasPrevHit
+                    && abs(prevRayT - expectedPrevRayT) <= (RESTIR_TEMPORAL_DEPTH_THRESHOLD * max(1.0f, expectedPrevRayT));
+                bool normalMatch = hasPrevHit
+                    && dot(surface.normal, prevSurface.normal) > RESTIR_TEMPORAL_NORMAL_THRESHOLD;
+                bool materialMatch = hasPrevHit
+                    && AreMaterialsSimilar(s, prevSurface,
+                        RESTIR_TEMPORAL_ALBEDO_THRESHOLD,
+                        RESTIR_TEMPORAL_ROUGHNESS_THRESHOLD,
+                        RESTIR_TEMPORAL_METALLIC_THRESHOLD);
+
+                if (depthMatch && normalMatch && materialMatch) {
+                    float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance);
+                    float jacobian = ComputeJacobian(surface.worldPos, prevSurface.worldPos, prevR.hitPos, prevR.hitNormal);
+                    bool jacobianValid = jacobian >= RESTIR_TEMPORAL_MIN_JACOBIAN && jacobian <= RESTIR_TEMPORAL_MAX_JACOBIAN;
+
+                    if (historyTargetPDF > 0.0f && jacobianValid) {
+                        Reservoir adjustedPrev = prevR;
+                        capReservoirHistory(adjustedPrev, RESTIR_TEMPORAL_MAX_HISTORY_LENGTH);
+                        adjustedPrev.w_sum *= jacobian;
+                        adjustedPrev.historyAge = min(prevR.historyAge + 1u, RESTIR_TEMPORAL_MAX_HISTORY_AGE);
+
+                        if (mergeReservoirs(r, adjustedPrev, historyTargetPDF, next_float(rng))) {
+                            selectedPDF = historyTargetPDF;
+                        }
+                    }
                 }
+            }
 
-            }
-            if (r.M > 30.0f) { 
-                r.w_sum *= (30.0f / r.M); 
-                r.M = 30.0f; 
-            }
+            capReservoirHistory(r, RESTIR_TEMPORAL_MAX_HISTORY_LENGTH);
         }
     }
 
