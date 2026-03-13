@@ -193,6 +193,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePrepareTracePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
+
+    // ------- Restir GI PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;

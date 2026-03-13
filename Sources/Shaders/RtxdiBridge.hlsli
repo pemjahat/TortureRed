@@ -53,6 +53,12 @@ float RAB_GetNextRandom(inout RAB_RandomSamplerState rng) {
     return next_float(rng);
 }
 
+#define RTXDI_RandomSamplerState RAB_RandomSamplerState
+
+float RTXDI_GetNextRandom(inout RTXDI_RandomSamplerState rng) {
+    return RAB_GetNextRandom(rng);
+}
+
 RAB_Surface RAB_EmptySurface() {
     RAB_Surface s;
     s.worldPos = 0; s.normal = 0; s.linearDepth = 1.0f; s.albedo = 0;

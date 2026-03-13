@@ -174,6 +174,15 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     $<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders
 )
 
+# Copy Shared headers into the Shaders output directory
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/Shared"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/Sources/Shared/SharedTypes.h"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/Shared"
+    COMMENT "Copying Shared header to shader output directory"
+)
+
 # Copy SHaRC headers (fetched from NVIDIA-RTX/SHARC) into the Shaders output directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"

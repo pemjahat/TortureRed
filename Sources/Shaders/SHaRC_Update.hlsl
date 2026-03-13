@@ -28,7 +28,7 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 SharcParameters BuildSharcParams()
 {
     SharcParameters p;
-    p.gridParameters.cameraPosition  = g_Frame.irCacheCameraPosition.xyz;
+    p.gridParameters.cameraPosition  = g_Frame.cameraPosition.xyz;
     p.gridParameters.logarithmBase   = SHARC_GRID_LOGARITHM_BASE;
     p.gridParameters.sceneScale      = g_Frame.sharcSceneScale;
     p.gridParameters.levelBias       = 0.0f;

@@ -6,27 +6,7 @@
 struct cgltf_data;
 class Renderer;
 
-// Material constants matching the shader
-struct MaterialConstants
-{
-    DirectX::XMFLOAT4 baseColorFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    int baseColorTextureIndex;
-    int normalTextureIndex;
-    int metallicRoughnessTextureIndex;
-    int alphaMode;
-    float alphaCutoff;
-};
-
-struct DrawNodeData
-{
-    DirectX::XMFLOAT4X4 world;
-    uint32_t vertexOffset;
-    uint32_t indexOffset;
-    uint32_t materialID;
-    uint32_t padding;
-};
+// Material constants, DrawNodeData moved to Shared/SharedTypes.h
 
 struct IndirectDrawCommand
 {

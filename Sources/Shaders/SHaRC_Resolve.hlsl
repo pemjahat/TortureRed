@@ -20,7 +20,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     if (DTid.x >= SHARC_HASH_ENTRIES_NUM) return;
 
     SharcParameters sharcParams;
-    sharcParams.gridParameters.cameraPosition  = g_Frame.irCacheCameraPosition.xyz;
+    sharcParams.gridParameters.cameraPosition  = g_Frame.cameraPosition.xyz;
     sharcParams.gridParameters.logarithmBase   = SHARC_GRID_LOGARITHM_BASE;
     sharcParams.gridParameters.sceneScale      = g_Frame.sharcSceneScale;
     sharcParams.gridParameters.levelBias       = 0.0f;

@@ -1,14 +1,6 @@
 #pragma once
 
-struct Reservoir
-{
-    DirectX::XMFLOAT3 hitPos;
-    DirectX::XMFLOAT3 hitNormal;
-    DirectX::XMFLOAT3 radiance;
-    float w_sum;
-    float M;
-    float W;
-};
+#include "Shared/SharedTypes.h"
 
 struct GPUResource
 {
@@ -52,83 +44,7 @@ struct GBuffer
     GPUTexture depth;
 };
 
-struct FrameConstants
-{
-    DirectX::XMFLOAT4X4 viewProj;
-    DirectX::XMFLOAT4X4 viewInverse;
-    DirectX::XMFLOAT4X4 projectionInverse;
-    DirectX::XMFLOAT4X4 viewProjPrevious;
-    DirectX::XMFLOAT4X4 viewInversePrevious;
-    DirectX::XMFLOAT4 cameraPosition;
-    DirectX::XMFLOAT4 prevCameraPosition;
-    DirectX::XMFLOAT4 irCacheCameraPosition; // frozen when m_FreezeIrCacheCamera, else == cameraPosition
-    uint32_t frameIndex;
-    int32_t albedoIndex;
-    int32_t normalIndex;
-    int32_t materialIndex;
-    int32_t depthIndex;
-    float exposure;
-    uint32_t enableRestir;
-    uint32_t enableAvoidCaustics;
-    uint32_t enableIndirectSpecular;
-    uint32_t enableRasterIndirectGI;
-    uint32_t useRTXDI; // Kept but maybe unused
-    uint32_t numLights;
-    uint32_t lightSamplingMode; // 0=uniform, 1=importance sampling
-    uint32_t lightLUTBufferIndex; // Index into the light LUT buffer for O(1) importance sampling
-    uint32_t debugIrCache;
-    int32_t  debugIrCacheCascadeFilter; // -1 = all cascades, 0-7 = specific cascade
-    uint32_t screenWidth;
-    uint32_t screenHeight;
-    // SHaRC (Spatial Hash Radiance Cache) parameters
-    float    sharcSceneScale;
-    uint32_t sharcAccumulationFrameNum;
-    uint32_t sharcStaleFrameNum;
-    uint32_t sharcDebug;          // 0=off, 1=SHaRC output, 2=bounce heatmap
-};
-
-struct LightConstants
-{
-    DirectX::XMFLOAT4X4 viewProj;
-    DirectX::XMFLOAT4 position;
-    DirectX::XMFLOAT4 color;
-    DirectX::XMFLOAT4 direction;
-    float intensity;
-    float selectionPDF;
-    uint32_t padding[2];
-};
-
-struct BindlessIndices 
-{
-    uint32_t InputIdx0; // raster rister require 2 input: current IrCache and previous Restir reservoir
-    uint32_t InputIdx1;
-    uint32_t OutputIdx0; // Restir output accumulation and path trace output    
-    uint32_t OutputIdx1;
-};
-
-// Mirror of IrCacheBindlessIndices in Common.hlsl — must stay in sync.
-struct IrCacheBindlessIndices
-{
-    uint32_t MetaBufIdx;
-    uint32_t PoolBufIdx;
-    uint32_t GridMetaBufIdx;
-    uint32_t EntryCellBufIdx;
-    uint32_t IrradianceBufIdx;
-    uint32_t LifeBufIdx;
-    uint32_t IndirectionBufIdx;
-    uint32_t TraceArgsBufIdx;
-    uint32_t PosBufIdx;              // float4[MAX_ENTRIES] — applied probe positions (read during Update)
-    uint32_t RepropBufIdx;           // float4[MAX_ENTRIES] — voted proposal positions  (written during Update)
-    uint32_t ReproposalCountBufIdx;  // uint[MAX_ENTRIES]   — vote counters (cleared by Age, incremented by Update)
-};
-
-// Mirror of SharcBindlessIndices in Common.hlsl — must stay in sync.
-struct SharcBindlessIndices
-{
-    uint32_t HashEntriesBufIdx;    // uint64_t × 4M (~32 MB)
-    uint32_t AccumulationBufIdx;   // SharcAccumulationData (uint4) × 4M (~64 MB)
-    uint32_t ResolvedBufIdx;       // SharcPackedData (float16_t4 + 2×uint) × 4M (~64 MB)
-};
+// FrameConstants, LightConstants, BindlessIndices, etc. moved to Shared/SharedTypes.h
 
 bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON, bool createSRV = false, bool createUAV = false);
 bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState);

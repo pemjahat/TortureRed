@@ -151,10 +151,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RTXDI_RuntimeParameters params;
     params.activeCheckerboardField = 0;
     params.neighborOffsetMask = 0;
+    params.frameIndex = g_Frame.frameIndex;
+    params.pad2 = 0;
 
     RTXDI_ReservoirBufferParameters reservoirParams;
     reservoirParams.reservoirBlockRowPitch = (launchDims.x + 15) / 16 * 256;
     reservoirParams.reservoirArrayPitch = 0;
+    reservoirParams.pad1 = 0;
+    reservoirParams.pad2 = 0;
 
     RTXDI_GITemporalResamplingParameters tparams;
     float4 clipPos = mul(float4(surface.worldPos, 1.0f), g_Frame.viewProj);
@@ -163,13 +167,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 prevNDC = prevClipPos.xyz / prevClipPos.w;
     float2 pixelPos = ((ndc.xy * float2(0.5f, -0.5f)) + 0.5f) * launchDims;
     float2 prevPixelPos = ((prevNDC.xy * float2(0.5f, -0.5f)) + 0.5f) * launchDims;
-    
-    tparams.screenSpaceMotion.xy = prevPixelPos - pixelPos;
-    tparams.screenSpaceMotion.z = 0; // Simple for now
-    tparams.sourceBufferIndex = 1; // Used if reading from multiple-arrayed buffer, but we use history buffer directly
+
+    float3 screenSpaceMotion = float3(prevPixelPos - pixelPos, 0.0f);
+    uint sourceBufferIndex = 0;
     tparams.maxHistoryLength = 32;
-    //tparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
-    tparams.biasCorrectionMode = 1;
+    tparams.biasCorrectionMode = RTXDI_BIAS_CORRECTION_BASIC;
     tparams.depthThreshold = 0.1f;
     tparams.normalThreshold = 0.5f;
     tparams.maxReservoirAge = 30;
@@ -177,15 +179,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     tparams.enableFallbackSampling = true;
     tparams.uniformRandomNumber = g_Frame.frameIndex;
 
-    // RTXDI_GITemporalResampling uses RAB_GetGBufferSurface(idx, true) for history
-    // We must ensure 'g_ReservoirHistory' is used for that.
-    // RTXDI SDK uses its own functions to read history reservoir.
-    // In GI/TemporalResampling.hlsli:
-    // RTXDI_GIReservoir temporalReservoir = RTXDI_LoadGIReservoir(idx, reservoirParams, tparams.sourceBufferIndex);
-    // So we need to define RTXDI_LoadGIReservoir to use g_ReservoirHistory.
-
     RTXDI_GIReservoir result = RTXDI_GITemporalResampling(
-        launchIndex, surface, initialReservoir, rng, params, reservoirParams, tparams);
+        launchIndex, surface, screenSpaceMotion, sourceBufferIndex, initialReservoir, rng, params, reservoirParams, tparams);
 
     uint ptr = RTXDI_ReservoirPositionToPointer(reservoirParams, launchIndex, 0);
     g_ReservoirBuffer[ptr] = RTXDI_PackGIReservoir(result, 0);

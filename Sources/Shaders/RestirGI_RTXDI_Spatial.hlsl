@@ -41,15 +41,23 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     RTXDI_RuntimeParameters params;
     params.activeCheckerboardField = 0;
     params.neighborOffsetMask = 31;
+    params.frameIndex = g_Frame.frameIndex;
+    params.pad2 = 0;
 
     RTXDI_GISpatialResamplingParameters sparams;
+    sparams.depthThreshold = 0.1f;
+    sparams.normalThreshold = 0.5f;
     sparams.numSamples = 4;
     sparams.samplingRadius = 20.0f;
-    //sparams.biasCorrectionMode = RTXDI_GI_ALLOWED_BIAS_CORRECTION;
-    sparams.biasCorrectionMode = 1;
+    sparams.biasCorrectionMode = RTXDI_BIAS_CORRECTION_BASIC;
+    sparams.pad1 = 0;
+    sparams.pad2 = 0;
+    sparams.pad3 = 0;
+
+    uint sourceBufferIndex = 0;
 
     RTXDI_GIReservoir result = RTXDI_GISpatialResampling(
-        launchIndex, surface, inputReservoir, rng, params, reservoirParams, sparams);
+        launchIndex, surface, sourceBufferIndex, inputReservoir, rng, params, reservoirParams, sparams);
 
     uint ptr = RTXDI_ReservoirPositionToPointer(reservoirParams, launchIndex, 0);
     g_ReservoirOutput[ptr] = RTXDI_PackGIReservoir(result, 0);

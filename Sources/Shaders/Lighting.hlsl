@@ -23,7 +23,7 @@ PSInput VSMain(VSInput input) {
 
 ConstantBuffer<FrameConstants>         FrameCB   : register(b0);
 ConstantBuffer<BindlessIndices>        g_Indices : register(b1);
-ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
+//ConstantBuffer<IrCacheBindlessIndices> g_IrCache : register(b2);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 //Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
@@ -130,17 +130,17 @@ float4 PSMain(PSInput input) : SV_Target {
         finalColor += indirectLighting;
     }
     
-    if (FrameCB.debugIrCache != IRCACHE_DEBUG_OFF)
-    {
-        float3 debugVal = float3(0.0f, 0.0f, 0.0f);
-        if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
-            debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz, N);
-        else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
-            debugVal = DebugIrCacheLife(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
-        else if (FrameCB.debugIrCache == IRCACHE_DEBUG_CASCADE)
-            debugVal = DebugIrCacheCascade(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
-        finalColor = debugVal;
-    }
+    // if (FrameCB.debugIrCache != IRCACHE_DEBUG_OFF)
+    // {
+    //     float3 debugVal = float3(0.0f, 0.0f, 0.0f);
+    //     if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
+    //         debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz, N);
+    //     else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
+    //         debugVal = DebugIrCacheLife(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+    //     else if (FrameCB.debugIrCache == IRCACHE_DEBUG_CASCADE)
+    //         debugVal = DebugIrCacheCascade(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
+    //     finalColor = debugVal;
+    // }
     
     // Basic Tone Mapping
     float3 exposedColor = finalColor * FrameCB.exposure;

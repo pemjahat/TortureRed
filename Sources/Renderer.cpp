@@ -22,6 +22,7 @@ Renderer::~Renderer()
 
 void Renderer::CreateRasterIndirectGIResources()
 {
+#if 0
     // -----------------------------------------------------------------------
     // Spatial irradiance cache buffers
     // -----------------------------------------------------------------------
@@ -59,6 +60,7 @@ void Renderer::CreateRasterIndirectGIResources()
     m_IrCacheIndices.PosBufIdx             = (UINT)m_IrCachePosBuf.uavIndex;
     m_IrCacheIndices.RepropBufIdx          = (UINT)m_IrCacheRepropBuf.uavIndex;
     m_IrCacheIndices.ReproposalCountBufIdx = (UINT)m_IrCacheRepropCountBuf.uavIndex;
+#endif
 
     // ------- SHaRC buffers (~160 MB total) -------
     CreateStructuredBuffer(m_SharcHashEntriesBuf,  8,  SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -91,11 +93,13 @@ void Renderer::CreateRasterIndirectGIPipelines()
         }
     };
 
+#if 0
     CompileAndCreate("Shaders/IrCache_Pool_Init.hlsl",      m_IrCachePoolInitPSO);
     CompileAndCreate("Shaders/IrCache_Prepare_Age.hlsl",    m_IrCachePrepareAgePSO);
     CompileAndCreate("Shaders/IrCache_Age.hlsl",            m_IrCacheAgePSO);
     CompileAndCreate("Shaders/IrCache_Prepare_Trace.hlsl",  m_IrCachePrepareTracePSO);
     CompileAndCreate("Shaders/IrCache_Update.hlsl",         m_IrCacheUpdatePSO);
+#endif
 
     // ------- SHaRC PSOs -------
     {
@@ -137,6 +141,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
 
+#if 0
     // Command signature for ExecuteIndirect dispatch (used by IrCache_Update indirect pass)
     D3D12_INDIRECT_ARGUMENT_DESC dispatchArg = {};
     dispatchArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -183,6 +188,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
             m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_ProbeSphereDebugPSO));
         }
     }
+#endif
 }
 
 
@@ -574,6 +580,7 @@ void Renderer::CreateRootSignature()
 
 void Renderer::DrawProbeSpheresDebug()
 {
+#if 0
     auto* cmdList = m_CommandList.Get();
     if (!m_ProbeSphereDebugPSO)
         return;
@@ -582,6 +589,7 @@ void Renderer::DrawProbeSpheresDebug()
     // 8 stacks × 8 slices × 6 verts/quad = 384 verts per probe
     // 32768 instances — VS culls unoccupied entries by emitting a degenerate clip position
     cmdList->DrawInstanced(384, 32768, 0, 0);
+#endif
 }
 
 void Renderer::CreatePipelineState()
@@ -945,12 +953,12 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
 
+#if 0
     // IrCache TODO:
     // 1. Cascade scrollling one cell at time, only cell at edge reallocated
     // 2. Repositioning probes toward nearest open space using ray (avoid probe inside wall)
     // 3. Lazy trace - trace if probe recently allocated, or light changed
 
-#if 0   // Old cascaded probe IrCache — replaced by SHaRC
     // -----------------------------------------------------------------------
     // Spatial IrCache Pipeline
     // -----------------------------------------------------------------------
@@ -1034,7 +1042,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         };
         m_CommandList->ResourceBarrier(6, barriers);
     }
-#endif  // Old IrCache
+#endif
 
     // -----------------------------------------------------------------------
     // SHaRC (Spatial Hash Radiance Cache) Pipeline

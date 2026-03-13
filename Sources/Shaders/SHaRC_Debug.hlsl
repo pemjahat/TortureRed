@@ -53,7 +53,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // Init sharc parameter
     SharcParameters sharcParams;
-    sharcParams.gridParameters.cameraPosition  = g_Frame.irCacheCameraPosition.xyz;
+    sharcParams.gridParameters.cameraPosition  = g_Frame.cameraPosition.xyz;
     sharcParams.gridParameters.logarithmBase   = SHARC_GRID_LOGARITHM_BASE;
     sharcParams.gridParameters.sceneScale      = g_Frame.sharcSceneScale;
     sharcParams.gridParameters.levelBias       = 0.0f;

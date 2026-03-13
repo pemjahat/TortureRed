@@ -150,6 +150,8 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(L"-enable-16bit-types");
     arguments.push_back(L"-I");
     arguments.push_back(L"Shaders");
+    arguments.push_back(L"-I");
+    arguments.push_back(L"Sources");
 
 #ifdef RTXDI_INCLUDE_DIR
     std::string rtxdiInclude = RTXDI_INCLUDE_DIR;
