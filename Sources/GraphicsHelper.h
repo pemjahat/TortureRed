@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <functional>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "d3dx12.h"
@@ -28,6 +29,8 @@ struct GraphicsContext {
 
 class GraphicsHelper {
 public:
+    using ShaderDefines = std::vector<std::pair<std::wstring, std::wstring>>;
+
     static void Initialize(ID3D12Device* device);
     static void Shutdown();
     
@@ -42,7 +45,10 @@ public:
 
     static std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
     static std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target,
-                                           const std::vector<std::pair<std::wstring, std::wstring>>& defines);
+                                           const ShaderDefines& defines);
+    static bool UpdateShaders(bool forceReloadAll = false);
+    static uint64_t TrackedShaderCount();
+    static uint64_t TrackedDependencyCount();
 
     static D3D12_CPU_DESCRIPTOR_HANDLE GetSRVCPUHandle(UINT index);
     static D3D12_GPU_DESCRIPTOR_HANDLE GetSRVGPUHandle(UINT index);

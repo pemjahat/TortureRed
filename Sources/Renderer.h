@@ -38,6 +38,7 @@ public:
     void CreateShaderBindingTable();
     void CreateRasterIndirectGIResources();
     void CreateRasterIndirectGIPipelines();
+    bool ReloadShadersIfNeeded(bool forceReload = false);
 
     // GBuffer management
     void CreateGBuffer();
@@ -102,6 +103,7 @@ public:
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
     void WaitForPreviousFrame();
+    void RebuildShaderPipelines();
 
     // DirectX 12 objects
     Microsoft::WRL::ComPtr<ID3D12Device> m_Device;

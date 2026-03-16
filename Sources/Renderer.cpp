@@ -132,14 +132,23 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
     auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
 
-    computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
+    if (!restirTemporalCS.empty())
+    {
+        computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
+    }
 
-    computeDesc.CS = { restirSpatialCS.data(), restirSpatialCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterSpatialPSO));
+    if (!restirSpatialCS.empty())
+    {
+        computeDesc.CS = { restirSpatialCS.data(), restirSpatialCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterSpatialPSO));
+    }
 
-    computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+    if (!restirResolveCS.empty())
+    {
+        computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+    }
 
 #if 0
     // Command signature for ExecuteIndirect dispatch (used by IrCache_Update indirect pass)
@@ -610,6 +619,8 @@ void Renderer::CreatePipelineState()
     // 1. Depth Pre-Pass PSO
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
+        if (vs.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
@@ -621,6 +632,8 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
+        if (vs.empty() || ps.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -645,6 +658,8 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
+        if (vs.empty() || ps.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -659,6 +674,8 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DebugShadow.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/DebugShadow.hlsl", "PSMain", "ps_6_8");
+        if (vs.empty() || ps.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -672,6 +689,8 @@ void Renderer::CreatePipelineState()
     // 4. Shadow PSO
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
+        if (vs.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.RasterizerState.DepthBias = 1000;
@@ -686,6 +705,8 @@ void Renderer::CreatePipelineState()
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
+        if (vs.empty() || ps.empty())
+            return;
         auto psoDesc = GetDefaultPsoDesc();
         psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
         psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
@@ -796,6 +817,22 @@ void Renderer::CreateRayTracingPipeline()
         psoDesc.CS = { rtxdiResolveCode.data(), rtxdiResolveCode.size() };
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirResolvePSO)), "Failed to create RTXDI Resolve PSO");
     }
+}
+
+void Renderer::RebuildShaderPipelines()
+{
+    CreatePipelineState();
+    CreateRasterIndirectGIPipelines();
+}
+
+bool Renderer::ReloadShadersIfNeeded(bool forceReload)
+{
+    if (!GraphicsHelper::UpdateShaders(forceReload))
+        return false;
+
+    WaitForPreviousFrame();
+    RebuildShaderPipelines();
+    return true;
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)

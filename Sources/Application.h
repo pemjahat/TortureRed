@@ -34,6 +34,9 @@ private:
     bool m_EnableDepthPrePass    = false;
     bool m_DebugShadowMap        = false;
     bool m_UsePathTracer          = false;
+    bool m_EnableShaderHotReload = true;
+    bool m_ForceShaderReload = false;
+    uint32_t m_ShaderReloadCount = 0;
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 

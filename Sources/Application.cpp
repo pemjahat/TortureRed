@@ -255,6 +255,16 @@ void Application::ProcessEvents()
 
 void Application::Update(float deltaTime)
 {
+    if (m_EnableShaderHotReload || m_ForceShaderReload)
+    {
+        if (m_Renderer.ReloadShadersIfNeeded(m_ForceShaderReload))
+        {
+            ++m_ShaderReloadCount;
+            m_FrameConstants.frameIndex = 0;
+        }
+        m_ForceShaderReload = false;
+    }
+
     // Update camera (handles W, S, A, D movement)
     m_Camera.Update(deltaTime);
 
@@ -509,6 +519,16 @@ void Application::RenderImGui()
     ImGui::Checkbox("Enable Depth Pre-Pass", &m_EnableDepthPrePass);
 
     ImGui::Checkbox("Debug Shadow Map", &m_DebugShadowMap);
+
+    ImGui::Separator();
+    ImGui::Checkbox("Enable Shader Hot Reload", &m_EnableShaderHotReload);
+    if (ImGui::Button("Force Shader Rebuild"))
+    {
+        m_ForceShaderReload = true;
+    }
+    ImGui::Text("Tracked Shaders: %llu", static_cast<unsigned long long>(GraphicsHelper::TrackedShaderCount()));
+    ImGui::Text("Tracked Dependencies: %llu", static_cast<unsigned long long>(GraphicsHelper::TrackedDependencyCount()));
+    ImGui::Text("Shader Reload Count: %u", m_ShaderReloadCount);
 
     if (m_Renderer.IsRayTracingSupported())
     {
