@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <filesystem>
 #include "GraphicsTypes.h"
 #include "GraphicsHelper.h"
 
@@ -99,9 +100,15 @@ public:
     void UpdateLightLUTBuffer(const std::vector<LightConstants>& lights);
     UINT GetLightLUTDescriptorIndex() const { return (UINT)m_LightLUTBuffer.srvIndex; }
 
+    // Shader hot-reload: call once per frame; GPU-syncs and rebuilds only changed PSOs.
+    void CheckAndReloadShaders();
+
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
     void WaitForPreviousFrame();
+
+    // Shader hot-reload helpers
+    void SetupShaderTimestamps();
 
     // DirectX 12 objects
     Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
@@ -215,6 +222,9 @@ private:
     UINT m_FrameIndex;
     HANDLE m_FenceEvent;
     UINT64 m_FenceValue;
+
+    // Shader hot-reload: tracks all .hlsl timestamps under Sources/Shaders/
+    std::unordered_map<std::string, std::filesystem::file_time_type>  m_ShaderTimestamps;
 
     // Prevent copying
     Renderer(const Renderer&) = delete;

@@ -261,6 +261,9 @@ void Application::Update(float deltaTime)
     // Update model animation
     m_Model.UpdateAnimation(deltaTime);
 
+    // Check for changed shader files and hot-reload affected PSOs
+    m_Renderer.CheckAndReloadShaders();
+
     // Compute view-projection matrix
     DirectX::XMMATRIX view = m_Camera.GetViewMatrix();
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();

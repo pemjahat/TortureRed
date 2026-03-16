@@ -8,7 +8,7 @@
 // SharcResolveEntry (in SHaRC_Resolve.hlsl) blends the accumulation into the
 // resolved buffer with EMA and resets the accumulation for next frame.
 
-#include "sharc/SharcCommon.h"
+#include "SharcCommon.h"
 #include "CommonTracing.hlsl"
 
 #ifndef SHARC_UPDATE_DOWNSCALE

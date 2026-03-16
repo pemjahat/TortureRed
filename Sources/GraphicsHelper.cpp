@@ -115,11 +115,60 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
 std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target,
     const std::vector<std::pair<std::wstring, std::wstring>>& defines)
 {
+    // Resolve "Shaders/foo.hlsl" → SHADER_SOURCE_DIR "/foo.hlsl" so hot-reload
+    // always reads from the source tree, not the post-build copy in Bin/.
+    std::string resolvedFilename = filename;
+#ifdef SHADER_SOURCE_DIR
+    const std::string shadersPrefix = "Shaders/";
+    if (resolvedFilename.size() >= shadersPrefix.size() &&
+        resolvedFilename.compare(0, shadersPrefix.size(), shadersPrefix) == 0)
+    {
+        resolvedFilename = SHADER_SOURCE_DIR "/" + resolvedFilename.substr(shadersPrefix.size());
+    }
+#endif
+
+    // --- Shader disk cache ---
+    // Cache file: <exeDir>/ShaderCache/<stem>.<entry>.<target>[.<definesHash>].dxil
+    // Load from cache if it exists and is newer than the source file.
+    namespace fs = std::filesystem;
+    auto GetExeDir = []() -> fs::path {
+        wchar_t buf[MAX_PATH];
+        GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        return fs::path(buf).parent_path();
+    };
+    fs::path cacheDir = GetExeDir() / L"ShaderCache";
+    std::string cacheFileStem = fs::path(resolvedFilename).stem().string()
+                                + "." + entryPoint + "." + target;
+    if (!defines.empty())
+    {
+        std::string defStr;
+        for (auto& [n, v] : defines)
+            defStr += std::string(n.begin(), n.end()) + "=" + std::string(v.begin(), v.end()) + ";";
+        cacheFileStem += "." + std::to_string(std::hash<std::string>{}(defStr));
+    }
+    fs::path cachePath = cacheDir / (cacheFileStem + ".dxil");
+
+    {
+        std::error_code ecSrc, ecCache;
+        auto srcTime   = fs::last_write_time(resolvedFilename, ecSrc);
+        auto cacheTime = fs::last_write_time(cachePath, ecCache);
+        if (!ecSrc && !ecCache && cacheTime >= srcTime)
+        {
+            std::ifstream cacheIn(cachePath, std::ios::binary);
+            if (cacheIn.is_open())
+            {
+                std::vector<char> blob((std::istreambuf_iterator<char>(cacheIn)), {});
+                if (!blob.empty())
+                    return blob;
+            }
+        }
+    }
+
     // Load HLSL source
-    std::ifstream file(filename);
+    std::ifstream file(resolvedFilename);
     if (!file.is_open())
     {
-        std::cerr << "Failed to open HLSL file: " << filename << std::endl;
+        std::cerr << "Failed to open HLSL file: " << resolvedFilename << std::endl;
         return std::vector<char>();
     }
 
@@ -148,16 +197,43 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(L"-HV");
     arguments.push_back(L"2021");
     arguments.push_back(L"-enable-16bit-types");
+#ifdef SHADER_SOURCE_DIR
+    static const std::wstring shaderSourceDirW = []{
+        std::string s = SHADER_SOURCE_DIR;
+        return std::wstring(s.begin(), s.end());
+    }();
+    arguments.push_back(L"-I");
+    arguments.push_back(shaderSourceDirW.c_str());
+#else
     arguments.push_back(L"-I");
     arguments.push_back(L"Shaders");
+#endif
+
+#ifdef SHADER_SOURCE_DIR
+    // Also expose the parent (Sources/) so "#include "Shared/SharedTypes.h"" resolves.
+    static const std::wstring shaderRootDirW = []{
+        namespace fs = std::filesystem;
+        std::string s = fs::path(SHADER_SOURCE_DIR).parent_path().string();
+        return std::wstring(s.begin(), s.end());
+    }();
     arguments.push_back(L"-I");
-    arguments.push_back(L"Sources");
+    arguments.push_back(shaderRootDirW.c_str());
+#endif
 
 #ifdef RTXDI_INCLUDE_DIR
     std::string rtxdiInclude = RTXDI_INCLUDE_DIR;
     std::wstring rtxdiIncludeW(rtxdiInclude.begin(), rtxdiInclude.end());
     arguments.push_back(L"-I");
     arguments.push_back(rtxdiIncludeW.c_str());
+#endif
+
+#ifdef SHARC_INCLUDE_DIR
+    static const std::wstring sharcDirW = []{
+        std::string s = SHARC_INCLUDE_DIR;
+        return std::wstring(s.begin(), s.end());
+    }();
+    arguments.push_back(L"-I");
+    arguments.push_back(sharcDirW.c_str());
 #endif
 
     // Per-shader compile defines (e.g. SHARC_UPDATE=1, SHARC_PROPAGATION_DEPTH=4)
@@ -209,5 +285,28 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     std::vector<char> compiledShader(shaderBlob->GetBufferSize());
     memcpy(compiledShader.data(), shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize());
 
+    // Write compiled blob to disk cache
+    {
+        std::error_code ecDir;
+        fs::create_directories(cacheDir, ecDir);
+        if (!ecDir)
+        {
+            std::ofstream cacheOut(cachePath, std::ios::binary);
+            if (cacheOut.is_open())
+                cacheOut.write(compiledShader.data(), static_cast<std::streamsize>(compiledShader.size()));
+        }
+    }
+
     return compiledShader;
+}
+
+void GraphicsHelper::InvalidateShaderCache()
+{
+    namespace fs = std::filesystem;
+    wchar_t buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    fs::path cacheDir = fs::path(buf).parent_path() / L"ShaderCache";
+    std::error_code ec;
+    fs::remove_all(cacheDir, ec);
+    std::cout << "[ShaderCache] Cache invalidated." << std::endl;
 }

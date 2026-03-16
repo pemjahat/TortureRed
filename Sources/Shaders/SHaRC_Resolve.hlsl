@@ -8,7 +8,7 @@
 //
 // Dispatch: (SHARC_HASH_ENTRIES_NUM + 255) / 256 groups of 256 threads.
 
-#include "sharc/SharcCommon.h"
+#include "SharcCommon.h"
 #include "CommonTracing.hlsl"
 
 ConstantBuffer<FrameConstants>       g_Frame  : register(b0);

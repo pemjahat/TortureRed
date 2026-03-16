@@ -14,7 +14,7 @@
 // OutputIdx0 must point to m_RasterIndirectLightingTex UAV.
 
 #define SHARC_ENABLE_DEBUG 1
-#include "sharc/SharcCommon.h"
+#include "SharcCommon.h"
 #include "CommonTracing.hlsl"
 #include "SHaRC_Integration.hlsl"
 

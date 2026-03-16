@@ -141,6 +141,9 @@ void Renderer::CreateRasterIndirectGIPipelines()
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
 
+    // Seed file timestamps for hot-reload after all PSOs are initially created.
+    SetupShaderTimestamps();
+
 #if 0
     // Command signature for ExecuteIndirect dispatch (used by IrCache_Update indirect pass)
     D3D12_INDIRECT_ARGUMENT_DESC dispatchArg = {};
@@ -189,6 +192,85 @@ void Renderer::CreateRasterIndirectGIPipelines()
         }
     }
 #endif
+}
+
+
+// =============================================================================
+// Shader Hot-Reload Implementation
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// SetupShaderTimestamps
+// Scans Sources/Shaders/ recursively and caches the last-write-time of every
+// .hlsl file.  Called once after all PSOs are first created.
+// ---------------------------------------------------------------------------
+void Renderer::SetupShaderTimestamps()
+{
+    namespace fs = std::filesystem;
+    m_ShaderTimestamps.clear();
+
+    fs::path shaderDir = fs::path(SHADER_SOURCE_DIR);
+
+    std::error_code ec;
+    for (const auto& dirEntry : fs::recursive_directory_iterator(shaderDir, ec))
+    {
+        if (!ec && dirEntry.is_regular_file() && dirEntry.path().extension() == ".hlsl")
+        {
+            std::error_code ec2;
+            auto canonical = fs::weakly_canonical(dirEntry.path(), ec2).string();
+            if (!ec2)
+            {
+                std::error_code ec3;
+                auto t = fs::last_write_time(dirEntry.path(), ec3);
+                if (!ec3) m_ShaderTimestamps[canonical] = t;
+            }
+        }
+    }
+    if (ec) {
+        std::cout << "[HotReload] Error scanning " << shaderDir.string()
+                  << ": " << ec.message() << std::endl;
+    }
+    std::cout << "[HotReload] Watching " << m_ShaderTimestamps.size()
+              << " shader files under " << shaderDir.string() << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// CheckAndReloadShaders
+// Call once per frame.  If any watched .hlsl changed, GPU-syncs once then
+// rebuilds ALL PSOs (graphics + compute).  This handles include changes too.
+// ---------------------------------------------------------------------------
+void Renderer::CheckAndReloadShaders()
+{
+    namespace fs = std::filesystem;
+
+    bool anyChanged = false;
+    for (const auto& [path, prevTime] : m_ShaderTimestamps)
+    {
+        std::error_code ec;
+        auto curTime = fs::last_write_time(path, ec);
+        if (!ec && curTime != prevTime)
+        {
+            anyChanged = true;
+            break;
+        }
+    }
+
+    if (!anyChanged) return;
+
+    WaitForPreviousFrame();
+    GraphicsHelper::InvalidateShaderCache();
+
+    std::cout << "[HotReload] Shader change detected - rebuilding all PSOs..." << std::endl;
+
+    // CreatePipelineState rebuilds all graphics PSOs; it also calls
+    // CreateRayTracingPipeline() internally when RT is supported.
+    CreatePipelineState();
+
+    // CreateRasterIndirectGIPipelines rebuilds all compute GI/SHaRC/ReSTIR PSOs
+    // and calls SetupShaderTimestamps() at the end to refresh the timestamp map.
+    CreateRasterIndirectGIPipelines();
+
+    std::cout << "[HotReload] Done." << std::endl;
 }
 
 

@@ -10,6 +10,9 @@
 #include <iostream>
 #include <fstream>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <set>
 
 #include <d3d12.h>
 #include <directx/d3dx12.h>

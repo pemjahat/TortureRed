@@ -141,7 +141,11 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 target_precompile_headers(${PROJECT_NAME} PRIVATE Sources/pch.h)
 
 # Set RTXDI include path for shaders
-target_compile_definitions(${PROJECT_NAME} PRIVATE RTXDI_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include")
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    RTXDI_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include"
+    SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/Sources/Shaders"
+    SHARC_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/sharc/include"
+)
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
@@ -154,33 +158,6 @@ target_link_libraries(${PROJECT_NAME}
     ImGui
     DirectXTex
     Rtxdi
-)
-
-# Copy shader source files to output directory
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_SOURCE_DIR}/Sources/Shaders
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders
-)
-
-# Copy Shared headers into the Shaders output directory
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/Shared"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/Sources/Shared/SharedTypes.h"
-        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/Shared"
-    COMMENT "Copying Shared header to shader output directory"
-)
-
-# Copy SHaRC headers (from Externals/) into the Shaders output directory
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/SharcCommon.h"
-        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/SharcTypes.h"
-        "${CMAKE_SOURCE_DIR}/Externals/sharc/include/HashGridCommon.h"
-        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Shaders/sharc"
-    COMMENT "Copying SHaRC headers to shader output directory"
 )
 
 # Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)

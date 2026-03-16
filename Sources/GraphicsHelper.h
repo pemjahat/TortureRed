@@ -43,6 +43,7 @@ public:
     static std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target);
     static std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target,
                                            const std::vector<std::pair<std::wstring, std::wstring>>& defines);
+    static void InvalidateShaderCache();
 
     static D3D12_CPU_DESCRIPTOR_HANDLE GetSRVCPUHandle(UINT index);
     static D3D12_GPU_DESCRIPTOR_HANDLE GetSRVGPUHandle(UINT index);

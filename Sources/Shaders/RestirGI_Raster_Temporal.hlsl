@@ -206,6 +206,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
                         RESTIR_TEMPORAL_METALLIC_THRESHOLD);
 
                 if (depthMatch && normalMatch && materialMatch) {
+                //if (0) {
                     float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance);
                     float jacobian = ComputeJacobian(surface.worldPos, prevSurface.worldPos, prevR.hitPos, prevR.hitNormal);
                     bool jacobianValid = jacobian >= RESTIR_TEMPORAL_MIN_JACOBIAN && jacobian <= RESTIR_TEMPORAL_MAX_JACOBIAN;
