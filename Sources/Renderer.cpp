@@ -398,6 +398,13 @@ bool Renderer::Initialize(HWND hwnd)
             return false;
         }
 
+        // Create Path Visualization Line Buffer (small: MAX_PATH_VIZ_LINES * sizeof(PathVizLine))
+        if (!CreateStructuredBuffer(m_PathVizLineBuffer, sizeof(PathVizLine), MAX_PATH_VIZ_LINES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        {
+            std::cerr << "Failed to create PathViz line buffer" << std::endl;
+            return false;
+        }
+
         // Create RTXDI Reservoirs
         // See RtxdiUtils.cpp: CalculateReservoirBufferParameters
         uint32_t renderWidthBlocks = (WINDOW_WIDTH + 15) / 16;
@@ -878,6 +885,31 @@ void Renderer::CreateRayTracingPipeline()
         psoDesc.CS = { rtxdiResolveCode.data(), rtxdiResolveCode.size() };
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirResolvePSO)), "Failed to create RTXDI Resolve PSO");
     }
+
+    // Path Visualization Lines PSO (graphics pipeline, line list, no depth)
+    {
+        auto vsCode = GraphicsHelper::CompileShader("Shaders/PathVizLines.hlsl", "VSMain", "vs_6_6");
+        auto psCode = GraphicsHelper::CompileShader("Shaders/PathVizLines.hlsl", "PSMain", "ps_6_6");
+        if (!vsCode.empty() && !psCode.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+            psoDesc.pRootSignature = m_RootSignature.Get();
+            psoDesc.VS = { vsCode.data(), vsCode.size() };
+            psoDesc.PS = { psCode.data(), psCode.size() };
+            psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+            psoDesc.NumRenderTargets = 1;
+            psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+            psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+            psoDesc.SampleDesc.Count = 1;
+            psoDesc.SampleMask = UINT_MAX;
+            psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            psoDesc.DepthStencilState.DepthEnable = FALSE;
+            psoDesc.DepthStencilState.StencilEnable = FALSE;
+            CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PathVizLinePSO)), "Failed to create PathViz Lines PSO");
+        }
+    }
 }
 
 void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const LightConstants& light)
@@ -895,6 +927,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathVizLineBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     D3D12_RESOURCE_BARRIER uavBarriers[5];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
@@ -961,16 +994,21 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
         indices.InputIdx0 = m_ReservoirBuffer[previousReservoir].srvIndex;
         indices.OutputIdx0 = m_ReservoirBuffer[currentReservoir].uavIndex;
+        indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-        D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get());
-        m_CommandList->ResourceBarrier(1, &barrier1);
+        D3D12_RESOURCE_BARRIER barriers1[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_PathVizLineBuffer.resource.Get())
+        };
+        m_CommandList->ResourceBarrier(2, barriers1);
 
         // Pass 2: Spatial — writes to Intermediate, reads temporal from ReservoirBuffer[current]
         m_CommandList->SetPipelineState(m_RestirSpatialPSO.Get());
         indices.InputIdx0 = m_ReservoirBuffer[currentReservoir].srvIndex;
         indices.OutputIdx0 = m_ReservoirIntermediate.uavIndex;
+        indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
@@ -1212,6 +1250,35 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
+}
+
+void Renderer::DrawPathVizLines(const FrameConstants& frame)
+{
+    if (!m_PathVizLinePSO || !m_PathVizLineBuffer.resource) return;
+
+    // Transition buffer from UAV (written by compute) to SRV-readable for VS
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathVizLineBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = GetCurrentBackBufferRTV();
+    m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT);
+    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    m_CommandList->RSSetViewports(1, &viewport);
+    m_CommandList->RSSetScissorRects(1, &scissorRect);
+
+    m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
+    m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    m_CommandList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
+
+    BindlessIndices vizIndices = {};
+    vizIndices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.srvIndex;
+    m_CommandList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &vizIndices, 0);
+
+    m_CommandList->SetPipelineState(m_PathVizLinePSO.Get());
+    m_CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    m_CommandList->DrawInstanced(MAX_PATH_VIZ_LINES * 2, 1, 0, 0);
 }
 
 void Renderer::CopyTextureToBackBuffer(const GPUTexture& texture)

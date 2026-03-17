@@ -43,6 +43,10 @@ struct FrameConstants {
     uint sharcAccumulationFrameNum;
     uint sharcStaleFrameNum;
     uint sharcDebug;
+    uint mouseSelectedPixelX;
+    uint mouseSelectedPixelY;
+    uint pathVizEnabled;  // 1 for exactly one frame after left-click
+    uint _fcPad3;
 };
 
 struct BindlessIndices {
@@ -50,6 +54,25 @@ struct BindlessIndices {
     uint InputIdx1;
     uint OutputIdx0;
     uint OutputIdx1;
+    uint PathVizLineBufferIdx; // UAV (CS write) or SRV (VS read) index for path viz lines
+    uint _bPad;
+};
+
+// Path visualization line types (bits[3:0] of typeAndValid)
+// bit[4] = valid flag
+#define PATHVIZ_TYPE_PRIMARY    0u // yellow:  camera -> first surface
+#define PATHVIZ_TYPE_BOUNCE1    1u // white:   first surface -> bounce 1
+#define PATHVIZ_TYPE_BOUNCE2    2u // cyan:    bounce 1 -> bounce 2
+#define PATHVIZ_TYPE_BOUNCE3    3u // blue:    bounce 2 -> bounce 3
+#define PATHVIZ_TYPE_TEMPORAL   4u // orange:  center pixel -> temporal sample
+#define PATHVIZ_TYPE_SPATIAL    5u // magenta: center pixel -> spatial winner
+#define MAX_PATH_VIZ_LINES  16
+
+struct PathVizLine {
+    float3 start;
+    uint typeAndValid; // bits[3:0] = type, bit[4] = valid flag
+    float3 end;
+    uint _pad;
 };
 
 struct LightConstants {

@@ -57,6 +57,10 @@ private:
     bool m_RightMouseButtonHeld;
     int m_LastMouseX, m_LastMouseY;
 
+    // Path visualization state
+    bool m_PathVizJustClicked = false;
+    bool m_PathVizEverCaptured = false;
+
     // Prevent copying
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;

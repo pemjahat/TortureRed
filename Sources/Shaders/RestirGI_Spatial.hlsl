@@ -43,6 +43,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (spatialRes.M > 0 && hasCenterHit) {
         // --- Spatial Reuse ---
+        float3 spatialWinnerHitPos = 0; bool hasSpatialWinner = false;
         for (int i = 0; i < 4; i++) {
             float2 offset = float2(next_float(rng), next_float(rng)) * 2.0f - 1.0f;
             int2 neighborIndex = (int2)launchIndex + (int2)(offset * 20.0f); // Radius 20
@@ -79,11 +80,27 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                             if (mergeReservoirs(spatialRes, neighborRes, shiftedTargetPDF, next_float(rng)))
                             {
                                 selectedTargetPdf = currentTargetPDF;
+                                spatialWinnerHitPos = neighborRes.hitPos;
+                                hasSpatialWinner = true;
                             }
                         //}
                     }
                 }
             }
+        }
+        // Path Visualization: record the winning spatial neighbor
+        if (g_Frame.pathVizEnabled != 0 &&
+            launchIndex.x == g_Frame.mouseSelectedPixelX &&
+            launchIndex.y == g_Frame.mouseSelectedPixelY &&
+            hasCenterHit && hasSpatialWinner)
+        {
+            RWStructuredBuffer<PathVizLine> g_PathVizLines = ResourceDescriptorHeap[g_Indices.PathVizLineBufferIdx];
+            PathVizLine debugLine;
+            debugLine.start = centerSurface.worldPos;
+            debugLine.end   = spatialWinnerHitPos;
+            debugLine.typeAndValid = PATHVIZ_TYPE_SPATIAL | (1u << 4);
+            debugLine._pad = 0;
+            g_PathVizLines[5] = debugLine;
         }
     }
 

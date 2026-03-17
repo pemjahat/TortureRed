@@ -43,6 +43,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float3 indirectHitPos = 0, indirectHitNormal = 0;
     bool hasIndirectHit = false;
+    float3 bounce2HitPos = 0; bool hasBounce2 = false;
+    float3 bounce3HitPos = 0; bool hasBounce3 = false;
+    float3 temporalSampleHitPos = 0; bool hasTemporalSample = false;
     float firstBouncePDF = 1.0f;
     float3 firstBounceThroughput = 1.0f;
     bool isPathDiffuse = false;
@@ -107,6 +110,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 if (bounce == 1) {
                     indirectHitPos = hitPos; indirectHitNormal = worldNormal; hasIndirectHit = true;
                 }
+                if (bounce == 2) { bounce2HitPos = hitPos; hasBounce2 = true; }
+                if (bounce == 3) { bounce3HitPos = hitPos; hasBounce3 = true; }
 
                 // NEE: RIS light sampling — 4 candidates on first bounce, 1 on deeper bounces.
                 // Only 1 shadow ray fired for the winner; O(1) cost regardless of light count.
@@ -140,6 +145,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     indirectHitNormal = -ray.Direction;
                     hasIndirectHit = true;
                 }
+                if (bounce == 2) { bounce2HitPos = ray.Origin + ray.Direction * 1000.0f; hasBounce2 = true; }
+                if (bounce == 3) { bounce3HitPos = ray.Origin + ray.Direction * 1000.0f; hasBounce3 = true; }
                 indirectRadianceAccum += skyRadiance * throughput;
                 break;
             }
@@ -169,6 +176,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 Reservoir prevRes = prevReservoirs[prevIndex.y * launchDims.x + prevIndex.x];
                 
                 if (prevRes.M > 0) {
+                    // Capture previous sample position before merging (for path viz)
+                    temporalSampleHitPos = prevRes.hitPos; hasTemporalSample = true;
+
                     // Re-calculate target PDF of previous sample relative to CURRENT surface
                     float currentTargetPDF = GetTargetPDF(surface, prevRes.hitPos, prevRes.radiance);
 
@@ -210,4 +220,61 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     currReservoirs[launchIndex.y * launchDims.x + launchIndex.x] = res;
+
+    // --- Path Visualization Recording ---
+    // Triggered for exactly one frame by the left-click; writes world-space line segments
+    // into a small fixed-slot buffer that the PathVizLines VS reads each frame.
+    if (g_Frame.pathVizEnabled != 0 &&
+        launchIndex.x == g_Frame.mouseSelectedPixelX &&
+        launchIndex.y == g_Frame.mouseSelectedPixelY)
+    {
+        RWStructuredBuffer<PathVizLine> g_PathVizLines = ResourceDescriptorHeap[g_Indices.PathVizLineBufferIdx];
+
+        // Invalidate all slots so stale data from a previous click doesn't bleed through
+        for (int s = 0; s < MAX_PATH_VIZ_LINES; s++) {
+            PathVizLine blank;
+            blank.start = float3(0, 0, 0); blank.typeAndValid = 0;
+            blank.end   = float3(0, 0, 0); blank._pad = 0;
+            g_PathVizLines[s] = blank;
+        }
+
+        PathVizLine debugLine;
+        debugLine._pad = 0;
+
+        // Line 0: Surface normal at primary hit
+        if (hasPrimaryHit) {
+            debugLine.start = surface.worldPos;
+            debugLine.end   = surface.worldPos + surface.normal * 0.3f;
+            debugLine.typeAndValid = PATHVIZ_TYPE_PRIMARY | (1u << 4);
+            g_PathVizLines[0] = debugLine;
+        }
+        // Line 1: First indirect bounce — first surface to bounce-1 hit
+        if (hasIndirectHit) {
+            debugLine.start = surface.worldPos;
+            debugLine.end   = indirectHitPos;
+            debugLine.typeAndValid = PATHVIZ_TYPE_BOUNCE1 | (1u << 4);
+            g_PathVizLines[1] = debugLine;
+        }
+        // Line 2: Second bounce
+        if (hasBounce2) {
+            debugLine.start = indirectHitPos;
+            debugLine.end   = bounce2HitPos;
+            debugLine.typeAndValid = PATHVIZ_TYPE_BOUNCE2 | (1u << 4);
+            g_PathVizLines[2] = debugLine;
+        }
+        // Line 3: Third bounce
+        if (hasBounce3) {
+            debugLine.start = bounce2HitPos;
+            debugLine.end   = bounce3HitPos;
+            debugLine.typeAndValid = PATHVIZ_TYPE_BOUNCE3 | (1u << 4);
+            g_PathVizLines[3] = debugLine;
+        }
+        // Line 4: Temporal reuse — current surface to the temporally reused sample
+        if (hasTemporalSample) {
+            debugLine.start = surface.worldPos;
+            debugLine.end   = temporalSampleHitPos;
+            debugLine.typeAndValid = PATHVIZ_TYPE_TEMPORAL | (1u << 4);
+            g_PathVizLines[4] = debugLine;
+        }
+    }
 }

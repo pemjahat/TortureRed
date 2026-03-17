@@ -31,6 +31,7 @@ public:
     void DispatchRays(class Model* model, const FrameConstants& frame, const LightConstants& light);
     void DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame);
     void CopyTextureToBackBuffer(const GPUTexture& texture);
+    void DrawPathVizLines(const FrameConstants& frame);
 
     // Resource creation
     void CreateRootSignature();
@@ -210,6 +211,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcResolvePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcDebugPSO;
+
+    // ------- Path Visualization -------
+    GPUBuffer m_PathVizLineBuffer;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathVizLinePSO;
 
     // GBuffer resources
     GBuffer m_GBuffer;

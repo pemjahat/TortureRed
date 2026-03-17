@@ -211,6 +211,15 @@ void Application::ProcessEvents()
                 SDL_GetMouseState(&m_LastMouseX, &m_LastMouseY);
                 SDL_SetRelativeMouseMode(SDL_TRUE); // Capture mouse
             }
+            else if (event.button.button == SDL_BUTTON_LEFT)
+            {
+                if (!ImGui::GetIO().WantCaptureMouse)
+                {
+                    m_FrameConstants.mouseSelectedPixelX = (uint32_t)event.button.x;
+                    m_FrameConstants.mouseSelectedPixelY = (uint32_t)event.button.y;
+                    m_PathVizJustClicked = true;
+                }
+            }
             break;
 
         case SDL_MOUSEBUTTONUP:
@@ -330,6 +339,15 @@ void Application::Update(float deltaTime)
     }
 
     m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
+
+    // Path visualization: enable for exactly one frame after left-click
+    m_FrameConstants.pathVizEnabled = m_PathVizJustClicked ? 1u : 0u;
+    if (m_PathVizJustClicked)
+    {
+        m_PathVizEverCaptured = true;
+        m_PathVizJustClicked = false;
+    }
+
     m_Renderer.UpdateFrameCB(m_FrameConstants);
 }
 
@@ -369,6 +387,10 @@ void Application::Render()
 
         m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
         m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+
+        // Draw path visualization lines on top of the PT output (non-RTXDI ReSTIR only)
+        if (m_PathVizEverCaptured && m_FrameConstants.enableRestir && !m_FrameConstants.useRTXDI)
+            m_Renderer.DrawPathVizLines(m_FrameConstants);
 
         // Setup viewport and RTV for ImGui rendering on top of PT output
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
@@ -559,6 +581,26 @@ void Application::RenderImGui()
                 m_FrameConstants.lightSamplingMode = (uint32_t)currentMode;
                 m_FrameConstants.frameIndex = 0;
             }
+
+            // Path Visualization
+            if (m_FrameConstants.enableRestir && !m_FrameConstants.useRTXDI)
+            {
+                ImGui::Separator();
+                ImGui::Text("Path Visualization");
+                if (m_PathVizEverCaptured)
+                {
+                    ImGui::Text("Captured at pixel (%u, %u)",
+                        m_FrameConstants.mouseSelectedPixelX,
+                        m_FrameConstants.mouseSelectedPixelY);
+                    if (ImGui::Button("Clear Capture"))
+                        m_PathVizEverCaptured = false;
+                }
+                else
+                {
+                    ImGui::TextDisabled("Left-click viewport to capture a path");
+                }
+            }
+
             ImGui::Unindent();
         }
     }
