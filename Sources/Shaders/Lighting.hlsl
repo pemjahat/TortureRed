@@ -127,6 +127,12 @@ float4 PSMain(PSInput input) : SV_Target {
         Texture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.InputIdx0];
         
         float3 indirectLighting = indirectIrradiance.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+
+        if (FrameCB.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF)
+        {
+            return float4(indirectLighting, 1.0f);
+        }
+
         finalColor += indirectLighting;
     }
     

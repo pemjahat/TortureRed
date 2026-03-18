@@ -84,7 +84,8 @@ public:
     // GBuffer access
     GBuffer& GetGBuffer() { return m_GBuffer; }
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
-    GPUTexture& GetPathTracerOutput() { return m_PathTracerOutput; }
+    GPUTexture& GetPathTracerOutput() { return m_PathTracerPresentOutput; }
+    GPUTexture& GetPathTracerHdrOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
     const IrCacheBindlessIndices& GetIrCacheBindlessIndices() const { return m_IrCacheIndices; }
@@ -138,9 +139,11 @@ private:
     // Ray Tracing
     bool m_RayTracingSupported = false;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathTracerPresentPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirReservoirDebugPSO;
     
     // Light Resources
     GPUBuffer m_LightsBuffer;
@@ -152,16 +155,19 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RtxdiRestirReservoirDebugPSO;
 
     std::unordered_map<const struct GLTFPrimitive*, GPUBuffer> m_BlasPool;
     GPUBuffer m_TLAS;
     GPUTexture m_PathTracerOutput;
+    GPUTexture m_PathTracerPresentOutput;
     GPUTexture m_AccumulationBuffer;
     GPUBuffer m_ReservoirBuffer[2]; // ReSTIR Reservoirs (Current and Previous)
     GPUBuffer m_ReservoirIntermediate;
     
     // RTXDI Reservoir Buffer (RTXDI_PackedGIReservoir)
     GPUBuffer m_RtxdiReservoirBuffer[2];
+    GPUBuffer m_RtxdiReservoirIntermediate;
     GPUBuffer m_RtxdiNeighborOffsetsBuffer;
     
     int m_CurrentReservoirIndex = 0;

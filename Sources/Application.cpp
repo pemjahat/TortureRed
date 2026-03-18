@@ -85,6 +85,7 @@ void Application::Initialize()
     m_FrameConstants.sharcAccumulationFrameNum = 128;
     m_FrameConstants.sharcStaleFrameNum = 32;
     m_FrameConstants.sharcDebug = 0;
+    m_FrameConstants.restirReservoirDebugMode = RESTIR_RESERVOIR_DEBUG_OFF;
 
     // Load Scene
     if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
@@ -629,6 +630,39 @@ void Application::RenderImGui()
         {
             m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
             m_FrameConstants.frameIndex = 0;
+        }
+    }
+
+    ImGui::SeparatorText("Reservoir Debug");
+    {
+        const bool supportsReservoirDebug =
+            (m_UsePathTracer && (m_FrameConstants.enableRestir || m_FrameConstants.useRTXDI)) ||
+            (!m_UsePathTracer && m_FrameConstants.enableRasterIndirectGI);
+
+        if (!supportsReservoirDebug)
+        {
+            ImGui::BeginDisabled();
+        }
+
+        const char* reservoirDebugModes[] = {
+            "Off",
+            "Position",
+            "Normal",
+            "Radiance",
+            "WeightSum"
+        };
+
+        int debugMode = static_cast<int>(m_FrameConstants.restirReservoirDebugMode);
+        if (ImGui::Combo("Reservoir Field", &debugMode, reservoirDebugModes, IM_ARRAYSIZE(reservoirDebugModes)))
+        {
+            m_FrameConstants.restirReservoirDebugMode = static_cast<uint32_t>(debugMode);
+            m_FrameConstants.frameIndex = 0;
+        }
+
+        if (!supportsReservoirDebug)
+        {
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Enable ReSTIR path tracing or Raster Indirect GI to view reservoir fields.");
         }
     }
 

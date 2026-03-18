@@ -75,6 +75,5 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
     }
 
-    float3 exposedColor = accumulatedColor * g_Frame.exposure;
-    OutputBuffer[launchIndex] = float4(exposedColor / (exposedColor + 1.0f), 1.0f);
+    OutputBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
 }

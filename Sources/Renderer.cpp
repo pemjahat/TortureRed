@@ -131,6 +131,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
     auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
+    auto restirDebugCS    = GraphicsHelper::CompileShader("Shaders/RestirGI_ReservoirDebug.hlsl",  "main", "cs_6_6");
 
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
@@ -140,6 +141,12 @@ void Renderer::CreateRasterIndirectGIPipelines()
 
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+
+    if (!restirDebugCS.empty())
+    {
+        computeDesc.CS = { restirDebugCS.data(), restirDebugCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirReservoirDebugPSO));
+    }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
     SetupShaderTimestamps();
@@ -376,9 +383,15 @@ bool Renderer::Initialize(HWND hwnd)
             return false;
         }
 
-        if (!CreateTexture(m_PathTracerOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_PathTracerOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
         {
             std::cerr << "Failed to create path tracer output texture" << std::endl;
+            return false;
+        }
+
+        if (!CreateTexture(m_PathTracerPresentOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        {
+            std::cerr << "Failed to create path tracer present texture" << std::endl;
             return false;
         }
 
@@ -418,6 +431,12 @@ bool Renderer::Initialize(HWND hwnd)
                 std::cerr << "Failed to create RTXDI reservoir buffer " << i << std::endl;
                 return false;
             }
+        }
+
+        if (!CreateStructuredBuffer(m_RtxdiReservoirIntermediate, sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        {
+            std::cerr << "Failed to create RTXDI intermediate reservoir buffer" << std::endl;
+            return false;
         }
 
         // Create Neighbor Offsets Buffer
@@ -830,6 +849,17 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPSO)), "Failed to create Path Tracer Compute PSO");
     }
 
+    auto pathTracerPresentCode = GraphicsHelper::CompileShader("Shaders/PathTracerPresent.hlsl", "CSMain", "cs_6_6");
+    if (!pathTracerPresentCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { pathTracerPresentCode.data(), pathTracerPresentCode.size() };
+        psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_PathTracerPresentPSO)), "Failed to create Path Tracer Present PSO");
+    }
+
     // Load ReSTIR Multi-pass shaders
     auto restirTemporalCode = GraphicsHelper::CompileShader("Shaders/RestirGI_Temporal.hlsl", "CSMain", "cs_6_6");
     if (!restirTemporalCode.empty())
@@ -858,6 +888,15 @@ void Renderer::CreateRayTracingPipeline()
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirResolvePSO)), "Failed to create ReSTIR Resolve PSO");
     }
 
+    auto restirDebugCode = GraphicsHelper::CompileShader("Shaders/RestirGI_ReservoirDebug.hlsl", "main", "cs_6_6");
+    if (!restirDebugCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { restirDebugCode.data(), restirDebugCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RestirReservoirDebugPSO)), "Failed to create ReSTIR Reservoir Debug PSO");
+    }
+
     // RTXDI PSOs
     auto rtxdiTemporalCode = GraphicsHelper::CompileShader("Shaders/RestirGI_RTXDI_Temporal.hlsl", "CSMain", "cs_6_6");
     if (!rtxdiTemporalCode.empty())
@@ -884,6 +923,15 @@ void Renderer::CreateRayTracingPipeline()
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.CS = { rtxdiResolveCode.data(), rtxdiResolveCode.size() };
         CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirResolvePSO)), "Failed to create RTXDI Resolve PSO");
+    }
+
+    auto rtxdiDebugCode = GraphicsHelper::CompileShader("Shaders/RestirGI_RTXDI_Debug.hlsl", "main", "cs_6_6");
+    if (!rtxdiDebugCode.empty())
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.CS = { rtxdiDebugCode.data(), rtxdiDebugCode.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_RtxdiRestirReservoirDebugPSO)), "Failed to create RTXDI Reservoir Debug PSO");
     }
 
     // Path Visualization Lines PSO (graphics pipeline, line list, no depth)
@@ -922,20 +970,24 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     // Transition UAVs
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_AccumulationBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerPresentOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_ReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathVizLineBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    D3D12_RESOURCE_BARRIER uavBarriers[5];
+    D3D12_RESOURCE_BARRIER uavBarriers[7];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
     uavBarriers[1] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
-    uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
-    uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[0].resource.Get());
-    uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
-    m_CommandList->ResourceBarrier(5, uavBarriers);
+    uavBarriers[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerPresentOutput.resource.Get());
+    uavBarriers[3] = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+    uavBarriers[4] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[0].resource.Get());
+    uavBarriers[5] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[1].resource.Get());
+    uavBarriers[6] = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirIntermediate.resource.Get());
+    m_CommandList->ResourceBarrier(7, uavBarriers);
 
     m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
@@ -972,20 +1024,32 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
         // Pass 2: Spatial Resampling
         m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
+        D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
 
         // Pass 3: Resolve
         m_CommandList->SetPipelineState(m_RtxdiRestirResolvePSO.Get());
-        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_ReservoirIntermediate.uavIndex));
+        m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RtxdiRestirReservoirDebugPSO)
+        {
+            D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
+            m_CommandList->ResourceBarrier(1, &debugBarrier);
+
+            m_CommandList->SetPipelineState(m_RtxdiRestirReservoirDebugPSO.Get());
+            m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
+            indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
+            m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+            m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+        }
     }
     else if (frame.enableRestir)
     {
@@ -1022,6 +1086,18 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
+        {
+            D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
+            m_CommandList->ResourceBarrier(1, &debugBarrier);
+
+            m_CommandList->SetPipelineState(m_RestirReservoirDebugPSO.Get());
+            indices.InputIdx0 = m_ReservoirIntermediate.srvIndex;
+            indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
+            m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+            m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+        }
     }
     else
     {
@@ -1035,8 +1111,20 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 
+    if (m_PathTracerPresentPSO)
+    {
+        D3D12_RESOURCE_BARRIER presentBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
+        m_CommandList->ResourceBarrier(1, &presentBarrier);
+
+        m_CommandList->SetPipelineState(m_PathTracerPresentPSO.Get());
+        indices.InputIdx0 = m_PathTracerOutput.srvIndex;
+        indices.OutputIdx0 = m_PathTracerPresentOutput.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
+
     // Transition for blitting/Imgui
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerPresentOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
 }
 
 void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
@@ -1234,6 +1322,18 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
+    {
+        D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterIndirectLightingTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &debugBarrier);
+
+        m_CommandList->SetPipelineState(m_RestirReservoirDebugPSO.Get());
+        indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+        indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+    }
 
     // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
     // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).

@@ -14,6 +14,12 @@
     #define ROW_MAJOR row_major
 #endif
 
+#define RESTIR_RESERVOIR_DEBUG_OFF        0u
+#define RESTIR_RESERVOIR_DEBUG_POSITION   1u
+#define RESTIR_RESERVOIR_DEBUG_NORMAL     2u
+#define RESTIR_RESERVOIR_DEBUG_RADIANCE   3u
+#define RESTIR_RESERVOIR_DEBUG_WEIGHTSUM  4u
+
 // Core Frame Constants
 struct FrameConstants {
     ROW_MAJOR float4x4 viewProj;
@@ -43,6 +49,7 @@ struct FrameConstants {
     uint sharcAccumulationFrameNum;
     uint sharcStaleFrameNum;
     uint sharcDebug;
+    uint restirReservoirDebugMode;
     uint mouseSelectedPixelX;
     uint mouseSelectedPixelY;
     uint pathVizEnabled;  // 1 for exactly one frame after left-click
