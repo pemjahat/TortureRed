@@ -73,51 +73,22 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
 
             if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-                uint instanceIdx = q.CommittedInstanceID();
-                uint triIdx = q.CommittedPrimitiveIndex();
-                float2 barys = q.CommittedTriangleBarycentrics();
-                
-                DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-                MaterialConstants mat = g_Materials[nodeData.materialID];
-
-                uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-                uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-                uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-
-                GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-                GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-                GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-                float3 worldNormal = normalize(mul(v0.normal * (1.0f - barys.x - barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-                float2 hitUv = v0.texCoord * (1.0f - barys.x - barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
-                float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
-
-                float4 albedo_hit = mat.baseColorFactor;
-                if (mat.baseColorTextureIndex >= 0) albedo_hit *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-
-                float metallic_hit = mat.metallicFactor;
-                float roughness_hit = mat.roughnessFactor;
-                if (mat.metallicRoughnessTextureIndex >= 0) {
-                    float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-                    roughness_hit *= mrSample.g; metallic_hit *= mrSample.b;
-                }
-                
-                roughness_hit = max(0.15f, roughness_hit);
-                float3 V_hit = -ray.Direction;
+                Surface hitSurf;
+                ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf, 0.15f);
 
                 // NEE - Stochastic light sampling for indirect bounces (with MIS)
-                float3 ndl = GetDirectLightingHybrid(hitPos, worldNormal, V_hit, albedo_hit.rgb,
-                                                    metallic_hit, roughness_hit, g_Scene,
+                float3 ndl = GetDirectLightingHybrid(hitSurf.worldPos, hitSurf.normal, hitSurf.viewDir, hitSurf.albedo,
+                                                    hitSurf.metallic, hitSurf.roughness, g_Scene,
                                                     g_Lights, g_Frame.numLights, g_Frame, isPathDiffuse, rng) * throughput;
                 indirectRadianceAccum += ndl;
 
                 // Sample next bounce
                 float3 nextDir;
                 float3 nextThroughput;
-                SampleIndirectRay(worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+                SampleIndirectRay(hitSurf.normal, hitSurf.viewDir, hitSurf.albedo, hitSurf.metallic, hitSurf.roughness, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
                 throughput *= nextThroughput;
-                rayPos = hitPos + worldNormal * 0.001f;
+                rayPos = hitSurf.worldPos + hitSurf.normal * 0.001f;
                 rayDir = nextDir;
 
                 // Russian Roulette

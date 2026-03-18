@@ -67,48 +67,21 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
 
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            uint instanceIdx = q.CommittedInstanceID();
-            uint triIdx = q.CommittedPrimitiveIndex();
-            float2 barys = q.CommittedTriangleBarycentrics();
-            DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-            MaterialConstants mat = g_Materials[nodeData.materialID];
-
-            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-            float3 worldNormal = normalize(mul(v0.normal * (1.0f-barys.x-barys.y) + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-            float2 uv_hit = v0.texCoord * (1.0f-barys.x-barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y;
-            float3 hitPos = ray.Origin + ray.Direction * q.CommittedRayT();
-
-            float4 albedo_hit = mat.baseColorFactor;
-            if (mat.baseColorTextureIndex >= 0) albedo_hit *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, uv_hit, 0);
-
-            float metallic_hit = mat.metallicFactor;
-            float roughness_hit = mat.roughnessFactor;
-            if (mat.metallicRoughnessTextureIndex >= 0) {
-                float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, uv_hit, 0);
-                roughness_hit *= mrSample.g; metallic_hit *= mrSample.b;
-            }
-            roughness_hit = max(0.15f, roughness_hit);
-
-            float3 V_hit = -ray.Direction;
+            Surface hitSurf;
+            ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf, 0.15f);
 
             // RIS light selection: 4 candidates for first bounce, 1 for deeper bounces.
             // Only 1 shadow ray fired for the winning light — O(1) cost per secondary hit.
             uint risCandidates = (bounce == 1) ? 4 : 1;
             float3 L_direct = GetDirectLightingRIS(
-                hitPos, worldNormal, V_hit,
-                albedo_hit.rgb, metallic_hit, roughness_hit,
+                hitSurf.worldPos, hitSurf.normal, hitSurf.viewDir,
+                hitSurf.albedo, hitSurf.metallic, hitSurf.roughness,
                 g_Scene, g_Lights, g_Frame.numLights,
                 g_Frame, rng, isPathDiffuse, risCandidates);
 
             if (bounce == 1) {
-                pos_secondary = hitPos;
-                norm_secondary = worldNormal;
+                pos_secondary = hitSurf.worldPos;
+                norm_secondary = hitSurf.normal;
                 L_secondary = L_direct;
                 hit_secondary = true;
             } else {
@@ -116,10 +89,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
 
             float3 nextDir; float3 nextThroughput; float next_pdf;
-            SampleIndirectRay(worldNormal, V_hit, albedo_hit.rgb, metallic_hit, roughness_hit, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
+            SampleIndirectRay(hitSurf.normal, hitSurf.viewDir, hitSurf.albedo, hitSurf.metallic, hitSurf.roughness, rng, nextDir, nextThroughput, next_pdf, isPathDiffuse, g_Frame.enableIndirectSpecular != 0);
 
             throughput *= nextThroughput;
-            rayPos = hitPos + worldNormal * 0.001f;
+            rayPos = hitSurf.worldPos + hitSurf.normal * 0.001f;
             rayDir = nextDir;
             
             if (bounce > 2) {

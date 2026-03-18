@@ -71,62 +71,31 @@ void main(uint3 GroupId   : SV_GroupID,
 
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
     {
-        uint instanceIdx = q.CommittedInstanceID();
-        uint triIdx      = q.CommittedPrimitiveIndex();
-        float2 barys     = q.CommittedTriangleBarycentrics();
-        DrawNodeData      nodeData = g_DrawNodeBuffer[instanceIdx];
-        MaterialConstants mat     = g_Materials[nodeData.materialID];
+        Surface hitSurf;
+        ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf);
 
-        uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-        uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-        uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-        GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-        GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-        GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-        float  bary0    = 1.0f - barys.x - barys.y;
-        float2 hitUv    = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
-        float3 hitNorm  = normalize(mul(
-            v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y,
-            (float3x3)nodeData.world));
-
-        float4 albedo    = mat.baseColorFactor;
-        float  metallic  = mat.metallicFactor;
-        float  roughness = mat.roughnessFactor;
-        if (mat.baseColorTextureIndex >= 0)
-            albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-        if (mat.metallicRoughnessTextureIndex >= 0)
-        {
-            float4 mr = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-            roughness *= mr.g;
-            metallic  *= mr.b;
-        }
-
-        float3 hitPos  = ray.Origin + ray.Direction * q.CommittedRayT();
-        float3 viewDir = -ray.Direction;
-
-        float3 direct   = GetDirectLightingHybrid(hitPos, hitNorm, viewDir, albedo.rgb,
-            metallic, roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+        float3 direct   = GetDirectLightingHybrid(hitSurf.worldPos, hitSurf.normal, hitSurf.viewDir, hitSurf.albedo,
+            hitSurf.metallic, hitSurf.roughness, g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
         // SampleIrCache returns pure incident irradiance (no albedo baked in).
         // Apply albedo only to the indirect term; direct is already exitant radiance
         // (BSDF * cos evaluated by GetDirectLightingHybrid).
-        float3 indirect = SampleIrCache(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
-        IrCacheMaybeAllocate(hitPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitNorm);
+        float3 indirect = SampleIrCache(hitSurf.worldPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitSurf.normal);
+        IrCacheMaybeAllocate(hitSurf.worldPos, g_IrCache, g_Frame.irCacheCameraPosition.xyz, hitSurf.normal);
 
-        float3 sampleRadiance = direct + indirect * albedo.rgb;
+        float3 sampleRadiance = direct + indirect * hitSurf.albedo;
         float sampleWeight = max(1e-5f, Luminance(sampleRadiance));
         if (sampleWeight > 0.0f)
         {
             // One candidate per thread, merged later into the final probe reservoir.
-            updateReservoir(localR, hitPos, hitNorm, sampleRadiance, sampleWeight, 0.0f);
+            updateReservoir(localR, hitSurf.worldPos, hitSurf.normal, sampleRadiance, sampleWeight, 0.0f);
             localR.W = 1.0f;
         }
 
 #if IRCACHE_USE_POSITION_VOTING
-        // ---- Cast a position vote for the probe covering hitPos ----
-        // The probe at hitPos should migrate toward the visible surface.
+        // ---- Cast a position vote for the probe covering hitSurf.worldPos ----
+        // The probe at hitSurf.worldPos should migrate toward the visible surface.
         {
-            IrcacheCoord hitCoord  = ws_pos_to_ircache_coord(hitPos, g_Frame.irCacheCameraPosition.xyz, hitNorm);
+            IrcacheCoord hitCoord  = ws_pos_to_ircache_coord(hitSurf.worldPos, g_Frame.irCacheCameraPosition.xyz, hitSurf.normal);
             uint         hitCell   = hitCoord.cell_idx();
             RWByteAddressBuffer hitGrid = ResourceDescriptorHeap[g_IrCache.GridMetaBufIdx];
             uint hitPacked = hitGrid.Load(hitCell * 4);
@@ -144,7 +113,7 @@ void main(uint3 GroupId   : SV_GroupID,
                     : ircache_coord_to_world_center(hitCoord, g_Frame.irCacheCameraPosition.xyz);
 
                 float  cellDiam  = ircache_cascade_cell_diameter(hitCoord.cascade);
-                float3 proposal  = ircache_proposal_pos(hitProbePos, hitPos, cellDiam);
+                float3 proposal  = ircache_proposal_pos(hitProbePos, hitSurf.worldPos, cellDiam);
 
                 // Uniform reservoir sampling: accept with probability 1/(voteCount+1)
                 RWByteAddressBuffer countBuf = ResourceDescriptorHeap[g_IrCache.ReproposalCountBufIdx];

@@ -124,49 +124,16 @@ void main(uint3 DTid : SV_DispatchThreadID)
             }
 
             // --- Decode triangle geometry ---
-            uint instanceIdx = q.CommittedInstanceID();
-            uint triIdx = q.CommittedPrimitiveIndex();
-            float2 barys = q.CommittedTriangleBarycentrics();
-            
-            DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-            MaterialConstants mat = g_Materials[nodeData.materialID];
-
-            uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-            uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-            uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-
-            GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-            GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-            GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-            float  bary0     = 1.0f - barys.x - barys.y;
-            float2 hitUv     = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
-            float3 hitNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y, 
-                                (float3x3)nodeData.world));
-
-            float4 hitAlbedo = mat.baseColorFactor;
-            if (mat.baseColorTextureIndex >= 0)
-                hitAlbedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-
-            float hitMetallic  = mat.metallicFactor;
-            float hitRoughness = mat.roughnessFactor;
-            if (mat.metallicRoughnessTextureIndex >= 0)
-            {
-                float4 mr = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-                hitRoughness *= mr.g;
-                hitMetallic  *= mr.b;
-            }
-
-            float3 hitPos     = ray.Origin + ray.Direction * q.CommittedRayT();
-            float3 hitViewDir = -ray.Direction;
+            Surface hitSurf;
+            ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf);
 
             SharcHitData sharcQuery;
-            sharcQuery.positionWorld = hitPos;
-            sharcQuery.normalWorld   = hitNormal;
+            sharcQuery.positionWorld = hitSurf.worldPos;
+            sharcQuery.normalWorld   = hitSurf.normal;
 
             float3 sampleRadiance;
             float pathRoughness = isPathDiffuse ? 1.0f : cumulativeRoughness;
-            if (IsSharcQueryValid(hitPos, q.CommittedRayT(), pathRoughness, sharcParams)
+            if (IsSharcQueryValid(hitSurf.worldPos, q.CommittedRayT(), pathRoughness, sharcParams)
                 && SharcGetCachedRadiance(sharcParams, sharcQuery, sampleRadiance, false))
                 break;
             // HashGridParameters gridParameters;
@@ -178,12 +145,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             // break;
 
             // Advance primary surface to this hit for the next bounce
-            surface.worldPos  = hitPos;
-            surface.normal    = hitNormal;
-            surface.viewDir   = hitViewDir;
-            surface.albedo    = hitAlbedo.rgb;
-            surface.metallic  = hitMetallic;
-            surface.roughness = max(0.01f, hitRoughness);
+            surface = hitSurf;
 
             cumulativeRoughness += surface.roughness;
         }

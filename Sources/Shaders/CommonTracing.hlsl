@@ -126,6 +126,50 @@ float3 GetCameraRayDirection(float2 uv, float4x4 projectionInverse, float4x4 vie
     return normalize(worldFar - cameraPos);
 }
 
+// Resolves mesh and material data at a committed ray-query hit into a Surface.
+// Call after confirming CommittedStatus() == COMMITTED_TRIANGLE_HIT.
+// minRoughness: minimum roughness clamp (0.01 for primary/near hits, 0.15 for deep indirect bounces).
+void ResolveHitSurface(
+    RayDesc ray, float hitT,
+    uint instanceIdx, uint triIdx, float2 barys,
+    out Surface surf,
+    float minRoughness = 0.01f)
+{
+    DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
+    MaterialConstants mat = g_Materials[nodeData.materialID];
+
+    uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
+    uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
+    uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
+    GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
+    GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
+    GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
+
+    float bary0 = 1.0f - barys.x - barys.y;
+    float2 hitUv = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
+    float3 worldNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
+
+    float4 albedo = mat.baseColorFactor;
+    if (mat.baseColorTextureIndex >= 0) {
+        albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+    }
+
+    float metallic = mat.metallicFactor;
+    float roughness = mat.roughnessFactor;
+    if (mat.metallicRoughnessTextureIndex >= 0) {
+        float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+        roughness *= mrSample.g;
+        metallic *= mrSample.b;
+    }
+
+    surf.worldPos = ray.Origin + ray.Direction * hitT;
+    surf.normal = worldNormal;
+    surf.viewDir = -ray.Direction;
+    surf.albedo = albedo.rgb;
+    surf.metallic = metallic;
+    surf.roughness = max(minRoughness, roughness);
+}
+
 bool TracePrimarySurface(
     uint2 launchIndex,
     uint2 launchDims,
@@ -163,42 +207,7 @@ bool TracePrimarySurface(
         return false;
     }
 
-    uint instanceIdx = q.CommittedInstanceID();
-    uint triIdx = q.CommittedPrimitiveIndex();
-    float2 barys = q.CommittedTriangleBarycentrics();
-    DrawNodeData nodeData = g_DrawNodeBuffer[instanceIdx];
-    MaterialConstants mat = g_Materials[nodeData.materialID];
-
-    uint i0 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 0];
-    uint i1 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 1];
-    uint i2 = g_GlobalIndices[nodeData.indexOffset + triIdx * 3 + 2];
-    GLTFVertex v0 = g_GlobalVertices[nodeData.vertexOffset + i0];
-    GLTFVertex v1 = g_GlobalVertices[nodeData.vertexOffset + i1];
-    GLTFVertex v2 = g_GlobalVertices[nodeData.vertexOffset + i2];
-
-    float bary0 = 1.0f - barys.x - barys.y;
-    float2 hitUv = v0.texCoord * bary0 + v1.texCoord * barys.x + v2.texCoord * barys.y;
-    float3 worldNormal = normalize(mul(v0.normal * bary0 + v1.normal * barys.x + v2.normal * barys.y, (float3x3)nodeData.world));
-
-    float4 albedo = mat.baseColorFactor;
-    if (mat.baseColorTextureIndex >= 0) {
-        albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-    }
-
-    float metallic = mat.metallicFactor;
-    float roughness = mat.roughnessFactor;
-    if (mat.metallicRoughnessTextureIndex >= 0) {
-        float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
-        roughness *= mrSample.g;
-        metallic *= mrSample.b;
-    }
-
-    surface.worldPos = ray.Origin + ray.Direction * q.CommittedRayT();
-    surface.normal = worldNormal;
-    surface.viewDir = -ray.Direction;
-    surface.albedo = albedo.rgb;
-    surface.metallic = metallic;
-    surface.roughness = max(0.01f, roughness);
+    ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), surface);
     rayT = q.CommittedRayT();
     return true;
 }

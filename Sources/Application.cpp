@@ -552,20 +552,6 @@ void Application::RenderImGui()
                 m_FrameConstants.frameIndex = 0;
             }
 
-            bool avoidCaustics = (m_FrameConstants.enableAvoidCaustics != 0);
-            if (ImGui::Checkbox("Avoid Caustic Paths", &avoidCaustics))
-            {
-                m_FrameConstants.enableAvoidCaustics = avoidCaustics ? 1 : 0;
-                m_FrameConstants.frameIndex = 0;
-            }
-
-            bool enableIndirectSpecular = (m_FrameConstants.enableIndirectSpecular != 0);
-            if (ImGui::Checkbox("Enable Indirect Specular", &enableIndirectSpecular))
-            {
-                m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
-                m_FrameConstants.frameIndex = 0;
-            }
-
             bool useRTXDI = (m_FrameConstants.useRTXDI != 0);
             if (ImGui::Checkbox("Use NVIDIA RTXDI", &useRTXDI))
             {
@@ -624,6 +610,25 @@ void Application::RenderImGui()
             ImGui::SetNextItemWidth(180.f);
             if (ImGui::Combo("Debug Vis Mode", &sharcDebugMode, sharcDebugModes, 3))
                 m_FrameConstants.sharcDebug = (uint32_t)sharcDebugMode;
+        }
+    }
+
+    // Shared Indirect GI options — apply to both path tracer and raster indirect GI
+    //if (ImGui::CollapsingHeader("Tracing Options"))
+    ImGui::SeparatorText("Tracing Options");
+    {
+        bool avoidCaustics = (m_FrameConstants.enableAvoidCaustics != 0);
+        if (ImGui::Checkbox("Avoid Caustic Paths", &avoidCaustics))
+        {
+            m_FrameConstants.enableAvoidCaustics = avoidCaustics ? 1 : 0;
+            m_FrameConstants.frameIndex = 0;
+        }
+
+        bool enableIndirectSpecular = (m_FrameConstants.enableIndirectSpecular != 0);
+        if (ImGui::Checkbox("Enable Indirect Specular", &enableIndirectSpecular))
+        {
+            m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
+            m_FrameConstants.frameIndex = 0;
         }
     }
 
@@ -779,5 +784,11 @@ void Application::RenderImGui()
     ImGui::Text("Total Root Nodes: %zu", m_Model.GetTotalRootNodes());
     ImGui::Text("Nodes Survive Frustum: %zu", m_Model.GetNodesSurviveFrustum());
 
+    ImGui::Separator();
+    ImGui::Checkbox("Show ImGui Demo Window", &m_ShowDemoWindow);
+
     ImGui::End();
+
+    if (m_ShowDemoWindow)
+        ImGui::ShowDemoWindow(&m_ShowDemoWindow);
 }

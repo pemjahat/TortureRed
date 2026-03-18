@@ -34,6 +34,7 @@ private:
     bool m_EnableDepthPrePass    = false;
     bool m_DebugShadowMap        = false;
     bool m_UsePathTracer          = false;
+    bool m_ShowDemoWindow         = false;
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 
