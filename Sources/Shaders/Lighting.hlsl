@@ -89,33 +89,15 @@ float4 PSMain(PSInput input) : SV_Target {
     EvaluateBSDF(N, V, L_main, albedo.rgb, metallic, roughness, diff_main, spec_main);
     float3 totalDirectLighting = (diff_main + spec_main) * mainLight.color.rgb * mainLight.intensity * NdotL_main * shadowFactor;
 
-    // 2. Local Light Loop (Index 1+)
-    for(uint i = 1; i < FrameCB.numLights; ++i)
+    // 2. Local Lights (Index 1+) via RTXGI-style RIS: a few candidates, one winner, one shadow ray.
+    if (FrameCB.numLights > 1)
     {
-        LightConstants light = g_Lights[i];
-        
-        // Only handle point/spot lights in this loop
-        if (light.position.w > 0.5f) 
-        {
-             float3 d = light.position.xyz - worldPos.xyz;
-             float dist = length(d);
-             float3 L_i = normalize(d);
-             
-             // Spot attenuation
-             float cosAngle = dot(-L_i, normalize(light.direction.xyz));
-             float cosOuter = light.direction.w;
-             float cosInner = asfloat(light.padding[0]);
-             
-             float spotEffect = smoothstep(cosOuter, cosInner, cosAngle);
-             float attenuation = 1.0f / (1.0f + 0.1f*dist + 0.01f*dist*dist);
-             
-             float NdotL_i = max(dot(N, L_i), 0.0);
-             
-             float3 diff_i, spec_i;
-             EvaluateBSDF(N, V, L_i, albedo.rgb, metallic, roughness, diff_i, spec_i);
-             
-             totalDirectLighting += (diff_i + spec_i) * light.color.rgb * light.intensity * NdotL_i * spotEffect * attenuation;
-        }
+        const uint localLightRisCandidates = 4;
+        totalDirectLighting += GetLocalLightDirectLightingRIS(
+            worldPos.xyz, N, V,
+            albedo.rgb, metallic, roughness,
+            g_Scene, g_Lights, FrameCB.numLights,
+            FrameCB, rng, false, localLightRisCandidates);
     }
 
     float3 ambient = 0.03f * albedo.rgb;

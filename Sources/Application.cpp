@@ -560,10 +560,10 @@ void Application::RenderImGui()
                 m_FrameConstants.frameIndex = 0;
             }
             
-            // Light Sampling Mode
-            const char* samplingModes[] = { "Uniform", "Importance (CDF)", "All Lights (Brute Force)" };
+            // Local-light sampling mode. The main directional light remains exact and shadowed.
+            const char* samplingModes[] = { "Uniform Local", "Importance Local (LUT)", "All Local Lights (Brute Force)" };
             int currentMode = (int)m_FrameConstants.lightSamplingMode;
-            if (ImGui::Combo("Indirect Light Sampling", &currentMode, samplingModes, IM_ARRAYSIZE(samplingModes)))
+            if (ImGui::Combo("Local Light Sampling", &currentMode, samplingModes, IM_ARRAYSIZE(samplingModes)))
             {
                 m_FrameConstants.lightSamplingMode = (uint32_t)currentMode;
                 m_FrameConstants.frameIndex = 0;

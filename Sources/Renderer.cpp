@@ -1558,18 +1558,30 @@ void Renderer::UpdateLightsBuffer(const std::vector<LightConstants>& lights)
     float totalWeight = 0.0f;
     std::vector<float> weights(numLights);
 
-    for (UINT i = 0; i < numLights; ++i) {
-        float luminance = 0.2126f * lights[i].color.x + 0.7152f * lights[i].color.y + 0.0722f * lights[i].color.z;
-        float w = lights[i].intensity * luminance;
+    // Light 0 is treated as the main directional light and is not part of the local-light LUT domain.
+    lightsWithPDF[0].selectionPDF = 0.0f;
+
+    uint32_t localLightCount = 0;
+    for (UINT i = 1; i < numLights; ++i) {
+        float w = 0.0f;
+        if (lights[i].position.w > 0.5f) {
+            float luminance = 0.2126f * lights[i].color.x + 0.7152f * lights[i].color.y + 0.0722f * lights[i].color.z;
+            w = lights[i].intensity * luminance;
+            localLightCount++;
+        }
         weights[i] = w;
         totalWeight += w;
     }
 
-    for (UINT i = 0; i < numLights; ++i) {
-        if (totalWeight > 0.0f) {
+    for (UINT i = 1; i < numLights; ++i) {
+        if (lights[i].position.w <= 0.5f) {
+            lightsWithPDF[i].selectionPDF = 0.0f;
+        } else if (totalWeight > 0.0f) {
             lightsWithPDF[i].selectionPDF = weights[i] / totalWeight;
+        } else if (localLightCount > 0) {
+            lightsWithPDF[i].selectionPDF = 1.0f / float(localLightCount);
         } else {
-            lightsWithPDF[i].selectionPDF = 1.0f / float(numLights);
+            lightsWithPDF[i].selectionPDF = 0.0f;
         }
     }
 
@@ -1598,45 +1610,55 @@ void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
     UINT numLights = std::min((UINT)lights.size(), m_MaxLights);
     std::vector<uint32_t> lut(LIGHT_LUT_RESOLUTION);
     std::vector<float> weights(numLights);
+    std::vector<uint32_t> localLightIndices;
+    localLightIndices.reserve(numLights > 0 ? numLights - 1 : 0);
     
-    // Compute importance weights for each light
+    // Build a local-light-only distribution. Light 0 remains deterministic and bypasses this LUT.
     float totalWeight = 0.0f;
-    for (UINT i = 0; i < numLights; ++i) {
-        // Importance = intensity * luminance(color)
-        // Skip directional lights (position.w == 0) - they get 0 weight in stochastic sampling
+    for (UINT i = 1; i < numLights; ++i) {
         float w = 0.0f;
         if (lights[i].position.w > 0.5f) {
             float luminance = 0.2126f * lights[i].color.x + 0.7152f * lights[i].color.y + 0.0722f * lights[i].color.z;
             w = lights[i].intensity * luminance;
+            localLightIndices.push_back(i);
         }
         weights[i] = w;
         totalWeight += w;
+    }
+
+    if (localLightIndices.empty()) {
+        std::fill(lut.begin(), lut.end(), 0u);
+        memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
+        return;
+    }
+
+    if (totalWeight <= 0.0f) {
+        for (UINT i = 0; i < LIGHT_LUT_RESOLUTION; ++i) {
+            lut[i] = localLightIndices[i % localLightIndices.size()];
+        }
+        memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
+        return;
     }
     
     // Build CDF
     std::vector<float> cdf(numLights);
     float cumulative = 0.0f;
-    for (UINT i = 0; i < numLights; ++i) {
-        if (totalWeight > 0.0f) {
-            cumulative += weights[i] / totalWeight;
-        }
+    for (UINT i = 1; i < numLights; ++i) {
+        cumulative += weights[i] / totalWeight;
         cdf[i] = cumulative;
     }
-    if (numLights > 0) cdf[numLights - 1] = 1.0f;
+    cdf[numLights - 1] = 1.0f;
     
     // Build LUT: for each LUT entry, find which light index to sample
     for (UINT i = 0; i < LIGHT_LUT_RESOLUTION; ++i) {
         float u = (i + 0.5f) / float(LIGHT_LUT_RESOLUTION); // Center of bin
         
         // Binary search in CDF to find light index
-        uint32_t lightIdx = 0;
-        if (numLights > 0 && totalWeight > 0.0f) {
-            // Find first CDF entry >= u
-            for (UINT j = 0; j < numLights; ++j) {
-                if (u <= cdf[j]) {
-                    lightIdx = j;
-                    break;
-                }
+        uint32_t lightIdx = localLightIndices.back();
+        for (UINT j = 1; j < numLights; ++j) {
+            if (weights[j] > 0.0f && u <= cdf[j]) {
+                lightIdx = j;
+                break;
             }
         }
         lut[i] = lightIdx;

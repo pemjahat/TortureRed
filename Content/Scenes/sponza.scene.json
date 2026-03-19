@@ -8,8 +8,8 @@
           "name": "Sun",
           "type": "DirectionalLight",
           "color": [1.0, 0.9, 0.8],
-          "intensity": 5.0,
-          "direction": [0.0, -0.9, 0.2]
+          "intensity": 55.0,
+          "direction": [0.0, -0.906, -0.423]
         },
         {
           "name": "spotLight1",

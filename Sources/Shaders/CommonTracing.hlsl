@@ -403,7 +403,31 @@ struct LightSampleResult {
     LightConstants light;
 };
 
-// Sample a single light using LUT - O(1) lookup
+uint GetLocalLightCount(uint numLights)
+{
+    return (numLights > 1) ? (numLights - 1) : 0;
+}
+
+float3 EvaluateMainDirectionalLightExact(
+    float3 P, float3 N, float3 V,
+    float3 albedo, float metallic, float roughness,
+    RaytracingAccelerationStructure scene,
+    StructuredBuffer<LightConstants> lights,
+    uint numLights,
+    FrameConstants frame,
+    inout RNG rng,
+    bool isDiffuse)
+{
+    if (numLights == 0) return 0.0f;
+
+    LightConstants mainLight = lights[0];
+    if (mainLight.direction.w >= 0.5f) return 0.0f;
+
+    return GetDirectLighting(P, N, V, albedo, metallic, roughness, scene, mainLight, frame, rng, isDiffuse);
+}
+
+// Sample a single local light using a local-light-only LUT - O(1) lookup.
+// Light 0 is reserved for the main directional light and is excluded from this domain.
 LightSampleResult SampleSingleLightLUT(
     float rngSample,                       // Random sample in [0,1)
     StructuredBuffer<LightConstants> lights,
@@ -411,10 +435,13 @@ LightSampleResult SampleSingleLightLUT(
     uint numLights) {
     
     LightSampleResult result;
+    uint localLightCount = GetLocalLightCount(numLights);
     
-    if (numLights <= 1) {
+    if (localLightCount == 0) {
         result.lightIndex = 0;
-        result.pdf = 1.0;
+        result.pdf = 0.0f;
+        result.light = (LightConstants)0;
+        return result;
     } else {
         // Clamp and scale U to LUT resolution
         float u = clamp(rngSample, 0.0f, 0.999999f);
@@ -424,12 +451,10 @@ LightSampleResult SampleSingleLightLUT(
         // Direct LUT lookup: load uint at offset lutIndex * sizeof(uint)
         result.lightIndex = lightLUTBuffer.Load(lutIndex * sizeof(uint));
         
-        // Clamp to valid range (defensive)
-        result.lightIndex = min(result.lightIndex, numLights - 1);
+        // Clamp to the local-light domain (light 0 remains deterministic).
+        result.lightIndex = clamp(result.lightIndex, 1u, numLights - 1);
         
-        // Use the importance PDF stored in the light constants
-        // Note: For numLights > 1, the LUT encodes the distribution.
-        // The selection PDF is stored in the light buffer itself.
+        // The CPU populates selectionPDF for local lights only.
         result.pdf = max(0.00001f, lights[result.lightIndex].selectionPDF);
     }
     
@@ -449,24 +474,27 @@ LightSampleResult SampleSingleLight(
 
 // Legacy CDF functions removed - LUT is O(1) and sufficient for max 256 lights
 
-// Sample a single light uniformly - each light has equal probability 1/numLights
+// Sample a single local light uniformly - each local light has equal probability 1/(numLights-1).
 LightSampleResult SampleSingleLightUniform(
     float rngSample,                        // Random value in [0, 1)
     StructuredBuffer<LightConstants> lights,
     uint numLights) {
     
     LightSampleResult result;
+    uint localLightCount = GetLocalLightCount(numLights);
     
-    if (numLights <= 1) {
+    if (localLightCount == 0) {
         result.lightIndex = 0;
-        result.pdf = 1.0f;
+        result.pdf = 0.0f;
+        result.light = (LightConstants)0;
     } else {
-        uint idx = min(uint(rngSample * float(numLights)), numLights - 1);
+        uint idx = 1 + min(uint(rngSample * float(localLightCount)), localLightCount - 1);
         result.lightIndex = idx;
-        result.pdf = 1.0f / float(numLights);
+        result.pdf = 1.0f / float(localLightCount);
+        result.light = lights[result.lightIndex];
+        return result;
     }
-    
-    result.light = lights[result.lightIndex];
+
     return result;
 }
 
@@ -541,7 +569,7 @@ float3 GetDirectLightingStochastic(
     inout RNG rng,
     bool isDiffuse) {
     
-    if (numLights == 0) return 0.0f;
+    if (GetLocalLightCount(numLights) == 0) return 0.0f;
     
     LightSampleResult lightSample;
     
@@ -607,9 +635,9 @@ float RIS_TargetPDF(
 }
 
 // RIS light selection: M candidates → 1 winner → 1 shadow ray.
-// Returns an unbiased estimate of direct lighting summed over all local lights.
+// Returns an unbiased estimate of direct lighting summed over local lights only.
 // numCandidates: tune 4 for first indirect bounce, 1 for deeper bounces.
-float3 GetDirectLightingRIS(
+float3 GetLocalLightDirectLightingRIS(
     float3 P, float3 N, float3 V,
     float3 albedo, float metallic, float roughness,
     RaytracingAccelerationStructure scene,
@@ -620,7 +648,7 @@ float3 GetDirectLightingRIS(
     bool isDiffuse,
     uint numCandidates = 4)
 {
-    if (numLights == 0) return 0.0f;
+    if (GetLocalLightCount(numLights) == 0) return 0.0f;
 
     // --- Phase 1: weighted reservoir sampling over M candidates (no shadow) ---
     uint  selectedIndex = 0;
@@ -681,11 +709,55 @@ float3 GetDirectLightingRIS(
     return L_winner * W;
 }
 
+float3 GetDirectLightingRIS(
+    float3 P, float3 N, float3 V,
+    float3 albedo, float metallic, float roughness,
+    RaytracingAccelerationStructure scene,
+    StructuredBuffer<LightConstants> lights,
+    uint numLights,
+    FrameConstants frame,
+    inout RNG rng,
+    bool isDiffuse,
+    uint numCandidates = 4)
+{
+    float3 totalLighting = EvaluateMainDirectionalLightExact(
+        P, N, V, albedo, metallic, roughness,
+        scene, lights, numLights, frame, rng, isDiffuse);
+
+    totalLighting += GetLocalLightDirectLightingRIS(
+        P, N, V, albedo, metallic, roughness,
+        scene, lights, numLights, frame, rng, isDiffuse, numCandidates);
+
+    return totalLighting;
+}
+
+float3 GetDirectLightingLocalLightsBruteForce(
+    float3 P, float3 N, float3 V,
+    float3 albedo, float metallic, float roughness,
+    RaytracingAccelerationStructure scene,
+    StructuredBuffer<LightConstants> lights,
+    uint numLights,
+    FrameConstants frame,
+    inout RNG rng,
+    bool isDiffuse)
+{
+    float3 totalLighting = 0.0f;
+
+    for (uint i = 1; i < numLights; ++i) {
+        LightConstants light = lights[i];
+        if (light.position.w > 0.5f) {
+            totalLighting += EvaluateLocalLight(P, N, V, albedo, metallic, roughness, light, scene, frame, rng, isDiffuse);
+        }
+    }
+
+    return totalLighting;
+}
+
 // Direct lighting dispatch based on frame.lightSamplingMode.
-// Applied uniformly to both primary and indirect hits:
-//   0 = Uniform     : 1 shadow ray,  equal probability per light
-//   1 = ImportancePDF: 1 shadow ray,  LUT-weighted by light intensity
-//   2 = Brute Force : N shadow rays, evaluates every light
+// Main directional light remains exact; local lights use the selected sampling mode.
+//   0 = Uniform      : exact main light + 1 local shadow ray, equal probability per local light
+//   1 = ImportancePDF: exact main light + 1 local shadow ray, LUT-weighted local sampling
+//   2 = Brute Force  : exact main light + N local shadow rays
 float3 GetDirectLightingHybrid(
     float3 P, float3 N, float3 V,
     float3 albedo, float metallic, float roughness,
@@ -695,17 +767,24 @@ float3 GetDirectLightingHybrid(
     FrameConstants frame,
     bool isDiffuse,
     inout RNG rng) { // Only used for stochastic modes (mode 0 or 1)) {
-    
-    if (numLights > 1 && frame.lightSamplingMode != 2) {
-        // Stochastic light sampling (Uniform or Importance CDF)
-        return GetDirectLightingStochastic(P, N, V, albedo, metallic, roughness,
-                                          scene, lights, numLights, frame,
-                                          rng, isDiffuse);
-    } else {
-        // Brute force: evaluate every light (primary hit or mode 2)
-        return GetDirectLightingMultiLights(P, N, V, albedo, metallic, roughness,
-                                           scene, lights, numLights, frame, rng, isDiffuse);
+
+    float3 totalLighting = EvaluateMainDirectionalLightExact(
+        P, N, V, albedo, metallic, roughness,
+        scene, lights, numLights, frame, rng, isDiffuse);
+
+    if (GetLocalLightCount(numLights) == 0) {
+        return totalLighting;
     }
+
+    if (frame.lightSamplingMode != 2) {
+        totalLighting += GetDirectLightingStochastic(P, N, V, albedo, metallic, roughness,
+            scene, lights, numLights, frame, rng, isDiffuse);
+    } else {
+        totalLighting += GetDirectLightingLocalLightsBruteForce(P, N, V, albedo, metallic, roughness,
+            scene, lights, numLights, frame, rng, isDiffuse);
+    }
+
+    return totalLighting;
 }
 
 #endif // COMMON_TRACING_HLSL
