@@ -129,6 +129,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- Temporal Merging ---
     float selectedTargetPdf = 0;
+    float debugSourcePdf = 0;
+    float debugTargetPdf = 0;
+    float debugRisWeight = 0;
+    float debugTemporalTargetPdf = 0;    
     if (hasPrimaryHit) {
         if (hasIndirectHit) {            
             // Radiance is now incident radiance by design, no division needed
@@ -137,6 +141,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // Use GetTargetPDF to determine weight for initial sample
             float targetPDF = GetTargetPDF(surface, indirectHitPos, L_in);
             float risWeight = (firstBouncePDF > 0.0f) ? (targetPDF / firstBouncePDF) : 0.0f;
+            debugSourcePdf = firstBouncePDF;
+            debugTargetPdf = targetPDF;
+            debugRisWeight = risWeight;            
             if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, risWeight, next_float(rng))) {
                 selectedTargetPdf = targetPDF;
             }
@@ -155,6 +162,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
                     // Re-calculate target PDF of previous sample relative to CURRENT surface
                     float currentTargetPDF = GetTargetPDF(surface, prevRes.hitPos, prevRes.radiance);
+                    debugTemporalTargetPdf = currentTargetPDF;
 
                      if (currentTargetPDF > 0) {
                          // Apply Jacobian to temporal reservoir's weight (matches RTXDI)
@@ -191,6 +199,32 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
          } else {
              res.W = 0;
          }
+    }
+
+    if (g_Frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF)
+    {
+        RWTexture2D<float4> debugHeatmap = ResourceDescriptorHeap[g_Indices.OutputIdx1];
+        float debugValue = 0.0f;
+        switch (g_Frame.restirReservoirDebugMode)
+        {
+        case RESTIR_RESERVOIR_DEBUG_SOURCE_PDF:
+            debugValue = debugSourcePdf;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_TARGET_PDF:
+            debugValue = debugTargetPdf;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_RIS_WEIGHT:
+            debugValue = debugRisWeight;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_TEMPORAL_TARGET_PDF:
+            debugValue = debugTemporalTargetPdf;
+            break;
+        default:
+            debugValue = 0.0f;
+            break;
+        }
+
+        debugHeatmap[launchIndex] = float4(debugValue, 0.0f, 0.0f, 1.0f);
     }
 
     currReservoirs[launchIndex.y * launchDims.x + launchIndex.x] = res;

@@ -395,6 +395,12 @@ bool Renderer::Initialize(HWND hwnd)
             return false;
         }
 
+        if (!CreateTexture(m_RestirDebugHeatmap, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        {
+            std::cerr << "Failed to create ReSTIR debug heatmap texture" << std::endl;
+            return false;
+        }
+
         // Create ReSTIR Reservoirs
         for (int i = 0; i < 2; ++i)
         {
@@ -964,6 +970,9 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 {
     if (!model) return;
 
+    const bool useCustomRestirHeatmap = frame.enableRestir && !frame.useRTXDI &&
+        frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF;
+
     // Update constant buffers
     memcpy(m_FrameCB.cpuPtr, &frame, sizeof(FrameConstants));
 
@@ -978,6 +987,10 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RtxdiReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathVizLineBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (useCustomRestirHeatmap)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
 
     D3D12_RESOURCE_BARRIER uavBarriers[7];
     uavBarriers[0] = CD3DX12_RESOURCE_BARRIER::UAV(m_AccumulationBuffer.resource.Get());
@@ -1058,6 +1071,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RestirTemporalPSO.Get());
         indices.InputIdx0 = m_ReservoirBuffer[previousReservoir].srvIndex;
         indices.OutputIdx0 = m_ReservoirBuffer[currentReservoir].uavIndex;
+        indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
@@ -1072,6 +1086,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RestirSpatialPSO.Get());
         indices.InputIdx0 = m_ReservoirBuffer[currentReservoir].srvIndex;
         indices.OutputIdx0 = m_ReservoirIntermediate.uavIndex;
+        indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
@@ -1092,8 +1107,14 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
             D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_PathTracerOutput.resource.Get());
             m_CommandList->ResourceBarrier(1, &debugBarrier);
 
+            if (useCustomRestirHeatmap)
+            {
+                GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+
             m_CommandList->SetPipelineState(m_RestirReservoirDebugPSO.Get());
             indices.InputIdx0 = m_ReservoirIntermediate.srvIndex;
+            indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
             m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
             m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
@@ -1132,6 +1153,8 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     if (!frame.enableRasterIndirectGI)
         return;
 
+    const bool useCustomRestirHeatmap = frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF;
+
     // Transition G-Buffer targets to SRV state for compute
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1141,6 +1164,10 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (useCustomRestirHeatmap)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
 
     m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
@@ -1297,6 +1324,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
     indices.InputIdx0  = m_RasterReservoirs[previousReservoir].srvIndex;
     indices.OutputIdx0 = m_RasterReservoirs[currentReservoir].uavIndex;
+    indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
@@ -1308,6 +1336,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CommandList->SetPipelineState(m_RestirGIRasterSpatialPSO.Get());
     indices.InputIdx0 = m_RasterReservoirs[currentReservoir].srvIndex;
     indices.OutputIdx0 = m_RasterReservoirIntermediate.uavIndex;
+    indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
@@ -1328,8 +1357,14 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterIndirectLightingTex.resource.Get());
         m_CommandList->ResourceBarrier(1, &debugBarrier);
 
+        if (useCustomRestirHeatmap)
+        {
+            GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         m_CommandList->SetPipelineState(m_RestirReservoirDebugPSO.Get());
         indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+        indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
         indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
         m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);

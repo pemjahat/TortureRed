@@ -46,6 +46,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     case RESTIR_RESERVOIR_DEBUG_WEIGHTSUM:
         outputTex[screenPos] = reservoir.weightSum;
         break;
+    case RESTIR_RESERVOIR_DEBUG_W:
+        outputTex[screenPos] = reservoir.weightSum;
+        break;
     default:
         outputTex[screenPos] = 0.0f;
         break;

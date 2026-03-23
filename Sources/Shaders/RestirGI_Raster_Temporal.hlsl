@@ -50,78 +50,76 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float pdf;
     bool isDiffuse;
     SampleIndirectRay(surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, rng, rayDir, throughput, pdf, isDiffuse, g_Frame.enableIndirectSpecular != 0);
-
-    RayDesc ray;
-    ray.Origin = surface.worldPos + surface.normal * 0.001f;
-    ray.Direction = rayDir;
-    ray.TMin = 0.01f;
-    ray.TMax = 1000.0f;
-
-    RayQuery<RAY_FLAG_NONE> q;
-    q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
-    while (q.Proceed()) {
-        PROCESS_ALPHA_MASK(q, rng);
-    }
-
+    bool isValidSample = pdf > 0.f && max(throughput.r, max(throughput.g, throughput.b)) > 0.f;
+    
     bool hasFirstBounceCandidate = false;
     float3 continuationRadiance = 0.0f;
     float3 hitPos = 0.0f;
     float3 hitNormal = 0.0f;
 
-    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    if (isValidSample)
     {
-        Surface hitSurf;
-        ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf);
-        hitPos    = hitSurf.worldPos;
-        hitNormal = hitSurf.normal;
-        float3 hitViewDir = hitSurf.viewDir;
-        hasFirstBounceCandidate = true;
+        RayDesc ray;
+        ray.Origin = surface.worldPos + surface.normal * 0.001f;
+        ray.Direction = rayDir;
+        ray.TMin = 0.01f;
+        ray.TMax = 1000.0f;
 
-        // Evaluate continuation radiance from the sampled first-bounce candidate.
-        // SHaRC provides multi-bounce continuation on a cache hit; on a miss we
-        // currently fall back to direct lighting at the candidate only.
-        float3 cachedRadiance = float3(0.0f, 0.0f, 0.0f);
-        bool useCachedRadiance = false;
-        {
-            SharcParameters sharcParams;
-            sharcParams.gridParameters.cameraPosition   = g_Frame.cameraPosition.xyz;
-            sharcParams.gridParameters.logarithmBase    = SHARC_GRID_LOGARITHM_BASE;
-            sharcParams.gridParameters.sceneScale       = g_Frame.sharcSceneScale;
-            sharcParams.gridParameters.levelBias        = 0.0f;
-            sharcParams.hashMapData.capacity            = SHARC_HASH_ENTRIES_NUM;
-            sharcParams.hashMapData.hashEntriesBuffer   = ResourceDescriptorHeap[g_Sharc.HashEntriesBufIdx];
-            sharcParams.accumulationBuffer              = ResourceDescriptorHeap[g_Sharc.AccumulationBufIdx];
-            sharcParams.resolvedBuffer                  = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
-            sharcParams.radianceScale                   = 1e3f;
-            sharcParams.enableAntiFireflyFilter         = false;
-
-            SharcHitData sharcQuery;
-            sharcQuery.positionWorld = hitPos;
-            sharcQuery.normalWorld   = hitNormal;
-
-            float pathRoughness = isDiffuse ? 1.0f : surface.roughness;
-            useCachedRadiance = IsSharcQueryValid(hitPos, q.CommittedRayT(), pathRoughness, sharcParams)
-                && SharcGetCachedRadiance(sharcParams, sharcQuery, cachedRadiance, false);
+        RayQuery<RAY_FLAG_NONE> q;
+        q.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
+        while (q.Proceed()) {
+            PROCESS_ALPHA_MASK(q, rng);
         }
 
-        if (useCachedRadiance)
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) 
         {
-            continuationRadiance = cachedRadiance;
+            Surface hitSurf;
+            ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf, 0.15f);
+            hitPos    = hitSurf.worldPos;
+            hitNormal = hitSurf.normal;
+            float3 hitViewDir = hitSurf.viewDir;
+            hasFirstBounceCandidate = true;
+
+            // Evaluate continuation radiance from the sampled first-bounce candidate.
+            // SHaRC provides multi-bounce continuation on a cache hit; on a miss we
+            // currently fall back to direct lighting at the candidate only.
+            float3 cachedRadiance = float3(0.0f, 0.0f, 0.0f);
+            bool useCachedRadiance = false;
+            {
+                SharcParameters sharcParams;
+                sharcParams.gridParameters.cameraPosition   = g_Frame.cameraPosition.xyz;
+                sharcParams.gridParameters.logarithmBase    = SHARC_GRID_LOGARITHM_BASE;
+                sharcParams.gridParameters.sceneScale       = g_Frame.sharcSceneScale;
+                sharcParams.gridParameters.levelBias        = 0.0f;
+                sharcParams.hashMapData.capacity            = SHARC_HASH_ENTRIES_NUM;
+                sharcParams.hashMapData.hashEntriesBuffer   = ResourceDescriptorHeap[g_Sharc.HashEntriesBufIdx];
+                sharcParams.accumulationBuffer              = ResourceDescriptorHeap[g_Sharc.AccumulationBufIdx];
+                sharcParams.resolvedBuffer                  = ResourceDescriptorHeap[g_Sharc.ResolvedBufIdx];
+                sharcParams.radianceScale                   = 1e3f;
+                sharcParams.enableAntiFireflyFilter         = false;
+
+                SharcHitData sharcQuery;
+                sharcQuery.positionWorld = hitPos;
+                sharcQuery.normalWorld   = hitNormal;
+
+                float pathRoughness = isDiffuse ? 1.0f : surface.roughness;
+                useCachedRadiance = IsSharcQueryValid(hitPos, q.CommittedRayT(), pathRoughness, sharcParams)
+                    && SharcGetCachedRadiance(sharcParams, sharcQuery, cachedRadiance, false);
+            }
+
+            if (useCachedRadiance)
+            {
+                continuationRadiance = cachedRadiance;
+            }
+            else
+            {
+                float3 directLighting = GetDirectLightingHybrid(
+                    hitPos, hitNormal, hitViewDir,
+                    hitSurf.albedo, hitSurf.metallic, hitSurf.roughness,
+                    g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
+                continuationRadiance = directLighting;
+            }
         }
-        else
-        {
-            float3 directLighting = GetDirectLightingHybrid(
-                hitPos, hitNormal, hitViewDir,
-                hitSurf.albedo, hitSurf.metallic, hitSurf.roughness,
-                g_Scene, g_Lights, g_Frame.numLights, g_Frame, true, rng);
-            continuationRadiance = directLighting;
-        }
-    }
-    else
-    {
-        // First-bounce miss currently produces no candidate in the raster path.
-        // Sky handling will be added later; for now keep the reservoir empty.
-        hasFirstBounceCandidate = false;
     }
 
     // 2. Create Initial Reservoir
@@ -139,10 +137,17 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.roughness = surface.roughness;
 
     float selectedPDF = 0.f;
+    float debugSourcePdf = 0.0f;
+    float debugTargetPdf = 0.0f;
+    float debugRisWeight = 0.0f;
+    float debugTemporalTargetPdf = 0.0f;
     if (hasFirstBounceCandidate)
     {
-        float targetPDF = GetTargetPDF(s, hitPos, continuationRadiance);
+        float targetPDF = GetTargetPDF(s, hitPos, continuationRadiance, g_Frame.enableIndirectSpecular != 0);
         float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
+        debugSourcePdf = pdf;
+        debugTargetPdf = targetPDF;
+        debugRisWeight = risWeight;
         if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
             selectedPDF = targetPDF;
             r.historyAge = 0;
@@ -179,18 +184,21 @@ void main(uint3 DTid : SV_DispatchThreadID)
                         RESTIR_TEMPORAL_METALLIC_THRESHOLD);
 
                 if (depthMatch && normalMatch && materialMatch) {
-                    float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance);
+                    float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance, g_Frame.enableIndirectSpecular != 0);
+                    debugTemporalTargetPdf = historyTargetPDF;
                     float jacobian = ComputeJacobian(surface.worldPos, prevSurface.worldPos, prevR.hitPos, prevR.hitNormal);
                     bool jacobianValid = jacobian >= RESTIR_TEMPORAL_MIN_JACOBIAN && jacobian <= RESTIR_TEMPORAL_MAX_JACOBIAN;
 
                     if (historyTargetPDF > 0.0f && jacobianValid) {
+                        float shiftedTargetPDF = historyTargetPDF * jacobian;
+
                         Reservoir adjustedPrev = prevR;
                         capReservoirHistory(adjustedPrev, RESTIR_TEMPORAL_MAX_HISTORY_LENGTH);
-                        adjustedPrev.w_sum *= jacobian;
                         adjustedPrev.historyAge = min(prevR.historyAge + 1u, RESTIR_TEMPORAL_MAX_HISTORY_AGE);
 
-                        if (mergeReservoirs(r, adjustedPrev, historyTargetPDF, next_float(rng))) {
+                        if (mergeReservoirs(r, adjustedPrev, shiftedTargetPDF, next_float(rng))) {
                             selectedPDF = historyTargetPDF;
+                            debugTemporalTargetPdf = historyTargetPDF * jacobian;
                         }
                     }
                 }
@@ -205,6 +213,32 @@ void main(uint3 DTid : SV_DispatchThreadID)
         r.W = r.w_sum / (r.M * selectedPDF);
     } else {
         r.W = 0.0f;
+    }
+
+    if (g_Frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF)
+    {
+        RWTexture2D<float4> debugHeatmap = ResourceDescriptorHeap[g_Indices.OutputIdx1];
+        float debugValue = 0.0f;
+        switch (g_Frame.restirReservoirDebugMode)
+        {
+        case RESTIR_RESERVOIR_DEBUG_SOURCE_PDF:
+            debugValue = debugSourcePdf;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_TARGET_PDF:
+            debugValue = debugTargetPdf;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_RIS_WEIGHT:
+            debugValue = debugRisWeight;
+            break;
+        case RESTIR_RESERVOIR_DEBUG_TEMPORAL_TARGET_PDF:
+            debugValue = debugTemporalTargetPdf;
+            break;
+        default:
+            debugValue = 0.0f;
+            break;
+        }
+
+        debugHeatmap[screenPos] = float4(debugValue, 0.0f, 0.0f, 1.0f);
     }
 
     currReservoirs[pixelIndex] = r;

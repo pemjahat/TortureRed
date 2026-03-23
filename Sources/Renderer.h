@@ -162,6 +162,7 @@ private:
     GPUTexture m_PathTracerOutput;
     GPUTexture m_PathTracerPresentOutput;
     GPUTexture m_AccumulationBuffer;
+    GPUTexture m_RestirDebugHeatmap;
     GPUBuffer m_ReservoirBuffer[2]; // ReSTIR Reservoirs (Current and Previous)
     GPUBuffer m_ReservoirIntermediate;
     

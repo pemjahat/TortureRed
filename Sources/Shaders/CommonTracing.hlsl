@@ -56,13 +56,15 @@ struct Surface {
     float roughness;
 };
 
-float GetTargetPDF(Surface s, float3 samplePos, float3 sampleRadiance) {
+float GetTargetPDF(Surface s, float3 samplePos, float3 sampleRadiance, bool enableSpecular = true) {
     float3 L = normalize(samplePos - s.worldPos);
     float dotNL = max(0.0f, dot(s.normal, L));
     if (dotNL <= 0) return 0;
     
     float3 d, spec;
     EvaluateBSDF(s.normal, s.viewDir, L, s.albedo, s.metallic, s.roughness, d, spec);
+    if (!enableSpecular)
+        spec = 0.f;
     float3 reflected = (d + spec) * sampleRadiance * dotNL;
     return max(0.0f, Luminance(reflected));
 }
@@ -217,14 +219,14 @@ bool TracePrimarySurface(
 void SampleIndirectRay(float3 N, float3 V, float3 baseColor, float metallic, float roughness, inout RNG rng, out float3 rayDir, out float3 throughput, out float pdf, out bool isDiffuse, bool enableSpecular = true) {
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
     float3 F_prob = FresnelSchlick(max(dot(N, V), 0.0), F0);
-    float probSpecular = clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9);
+    float probSpecular = enableSpecular ? clamp(max(F_prob.r, max(F_prob.g, F_prob.b)), 0.1, 0.9) : 0.f;
     float rnd = next_float(rng);
 
     if (rnd < probSpecular) {
-        if (!enableSpecular) {
-            throughput = 0; rayDir = 0; pdf = 1; isDiffuse = false;
-            return;
-        }
+        // if (!enableSpecular) {
+        //     throughput = 0; rayDir = 0; pdf = 1; isDiffuse = false;
+        //     return;
+        // }
         float3 H = ImportanceSampleGGX(float2(next_float(rng), next_float(rng)), N, roughness);
         rayDir = reflect(-V, H);
         float VdotH = max(dot(V, H), 0.0);

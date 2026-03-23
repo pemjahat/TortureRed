@@ -116,7 +116,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         // --- Decode triangle geometry ---
         Surface hitSurf;
-        ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf);
+        ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf, 0.15f);
 
         // --- Direct lighting at bounce hit ---
         float3 directLighting = GetDirectLightingHybrid(

@@ -46,8 +46,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     Reservoir r = currReservoirs[pixelIndex];
     float selectedPDF = 0.f;
+    float selectedShiftedTargetPdf = 0.0f;
     if (r.M > 0.f) {
-        selectedPDF = GetTargetPDF(s, r.hitPos, r.radiance);
+        selectedPDF = GetTargetPDF(s, r.hitPos, r.radiance, g_Frame.enableIndirectSpecular != 0);
     }
 
     // Spatial Reuse
@@ -76,16 +77,18 @@ void main(uint3 DTid : SV_DispatchThreadID)
                     RESTIR_SPATIAL_METALLIC_THRESHOLD);
                 if (hasNeighborHit && neighborR.M > 0.0f && normalsMatch && depthMatch && materialMatch) {
                 // Re-evaluate target PDF for neighbor sample at current surface
-                float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance);
+                float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance, g_Frame.enableIndirectSpecular != 0);
                 float jacobian = ComputeJacobian(centerSurface.worldPos, neighborSurface.worldPos, neighborR.hitPos, neighborR.hitNormal);
                 bool jacobianValid = jacobian >= RESTIR_SPATIAL_MIN_JACOBIAN && jacobian <= RESTIR_SPATIAL_MAX_JACOBIAN;
                 
                 if (neighborTargetPDF > 0.0f && jacobianValid) {
-                    Reservoir adjustedNeighbor = neighborR;
-                    adjustedNeighbor.w_sum *= jacobian;
+                    float shiftedTargetPDF = neighborTargetPDF * jacobian;
 
-                    if (mergeReservoirs(r, adjustedNeighbor, neighborTargetPDF, next_float(rng))) {
+                    Reservoir adjustedNeighbor = neighborR;
+
+                    if (mergeReservoirs(r, adjustedNeighbor, shiftedTargetPDF, next_float(rng))) {
                         selectedPDF = neighborTargetPDF;
+                        selectedShiftedTargetPdf = neighborTargetPDF * jacobian;
                     }
                 }
             }
@@ -97,6 +100,12 @@ void main(uint3 DTid : SV_DispatchThreadID)
         r.W = r.w_sum / (r.M * selectedPDF);
     } else {
         r.W = 0.0f;
+    }
+
+    if (g_Frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_SPATIAL_SHIFTED_TARGET_PDF)
+    {
+        RWTexture2D<float4> debugHeatmap = ResourceDescriptorHeap[g_Indices.OutputIdx1];
+        debugHeatmap[screenPos] = float4(selectedShiftedTargetPdf, 0.0f, 0.0f, 1.0f);
     }
 
     tempReservoirs[pixelIndex] = r;

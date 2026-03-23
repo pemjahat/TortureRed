@@ -21,6 +21,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint pixelIdx = launchIndex.y * launchDims.x + launchIndex.x;
     Reservoir temporalRes = currReservoirs[pixelIdx];
     float selectedTargetPdf = 0;
+    float selectedShiftedTargetPdf = 0;
 
     Surface centerSurface = (Surface)0;
     float centerRayT;
@@ -80,6 +81,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                             if (mergeReservoirs(spatialRes, neighborRes, shiftedTargetPDF, next_float(rng)))
                             {
                                 selectedTargetPdf = currentTargetPDF;
+                                selectedShiftedTargetPdf = shiftedTargetPDF;
                                 spatialWinnerHitPos = neighborRes.hitPos;
                                 hasSpatialWinner = true;
                             }
@@ -115,6 +117,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         spatialRes.W = spatialRes.w_sum / (spatialRes.M * selectedTargetPdf);
     } else {
         spatialRes.W = 0;
+    }
+
+    if (g_Frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_SPATIAL_SHIFTED_TARGET_PDF)
+    {
+        RWTexture2D<float4> debugHeatmap = ResourceDescriptorHeap[g_Indices.OutputIdx1];
+        debugHeatmap[launchIndex] = float4(selectedShiftedTargetPdf, 0.0f, 0.0f, 1.0f);
     }
 
     tempReservoirs[pixelIdx] = spatialRes;

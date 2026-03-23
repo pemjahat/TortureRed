@@ -649,7 +649,14 @@ void Application::RenderImGui()
             "Position",
             "Normal",
             "Radiance",
-            "WeightSum"
+            "WeightSum",
+            "Source PDF (Collect)",
+            "Target PDF (Collect)",
+            "RIS Weight (Collect)",
+            "Target PDF (Temporal)",
+            "Target PDF (Spatial)",
+            "W",
+            "First Bounce Continuation Radiance"
         };
 
         int debugMode = static_cast<int>(m_FrameConstants.restirReservoirDebugMode);

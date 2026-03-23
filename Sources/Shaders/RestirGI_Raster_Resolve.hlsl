@@ -47,6 +47,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             // The reservoir stores continuation radiance from the sampled
             // first-bounce candidate; resolve applies the primary BRDF here.
             indirectLighting = (diffBRDF + specBRDF) * r.radiance * r.W * NdotL;
+            indirectLighting = min(indirectLighting, 10.0f);
         }
     }
 
