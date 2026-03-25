@@ -18,6 +18,27 @@ static const uint  RESTIR_TEMPORAL_MAX_HISTORY_AGE = 12u;
 static const float RESTIR_TEMPORAL_MAX_JACOBIAN = 10.0f;
 static const float RESTIR_TEMPORAL_MIN_JACOBIAN = 0.1f;
 
+static const float RESTIR_GLOSSY_MIN_ROUGHNESS = 0.05f;
+static const float RESTIR_GLOSSY_MAX_ROUGHNESS = 0.30f;
+static const float RESTIR_TEMPORAL_GLOSSY_MAX_HISTORY = 3.0f;
+static const float RESTIR_TEMPORAL_GLOSSY_MAX_JACOBIAN = 1.5f;
+static const float RESTIR_TEMPORAL_INIT_GAIN_CLAMP_GLOSSY = 3.0f;
+static const float RESTIR_TEMPORAL_INIT_GAIN_CLAMP_ROUGH  = 12.0f;
+static const float RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_GLOSSY = 8.0f;
+static const float RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_ROUGH  = 64.0f;
+static const float RESTIR_TEMPORAL_REFLECTION_THRESHOLD_MIN = 0.90f;
+static const float RESTIR_TEMPORAL_REFLECTION_THRESHOLD_MAX = 0.995f;
+
+float GetGlossyFactor(float roughness)
+{
+    return 1.0f - saturate((roughness - RESTIR_GLOSSY_MIN_ROUGHNESS) / (RESTIR_GLOSSY_MAX_ROUGHNESS - RESTIR_GLOSSY_MIN_ROUGHNESS));
+}
+
+float3 GetSurfaceReflectionDir(Surface s)
+{
+    return reflect(-s.viewDir, s.normal);
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
@@ -49,7 +70,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float3 throughput;
     float pdf;
     bool isDiffuse;
-    SampleIndirectRay(surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, rng, rayDir, throughput, pdf, isDiffuse, g_Frame.enableIndirectSpecular != 0);
+    SampleIndirectRay(surface.normal, surface.viewDir, surface.albedo, surface.metallic, surface.roughness, rng, rayDir, throughput, pdf, isDiffuse, true);
     bool isValidSample = pdf > 0.f && max(throughput.r, max(throughput.g, throughput.b)) > 0.f;
     
     bool hasFirstBounceCandidate = false;
@@ -136,6 +157,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     s.metallic = surface.metallic;
     s.roughness = surface.roughness;
 
+    float glossyFactor = GetGlossyFactor(surface.roughness);
+    float3 currentReflectionDir = GetSurfaceReflectionDir(surface);
+
     float selectedPDF = 0.f;
     float debugSourcePdf = 0.0f;
     float debugTargetPdf = 0.0f;
@@ -143,14 +167,28 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float debugTemporalTargetPdf = 0.0f;
     if (hasFirstBounceCandidate)
     {
-        float targetPDF = GetTargetPDF(s, hitPos, continuationRadiance, g_Frame.enableIndirectSpecular != 0);
-        float risWeight = (pdf > 0.0f) ? (targetPDF / pdf) : 0.0f;
+        float targetPDF = GetTargetPDF(s, hitPos, continuationRadiance, true);
+        float targetShape = GetTargetShape(s, hitPos, true);
+        float radianceLuma = max(1e-4f, Luminance(continuationRadiance));
+
+        float proposalGain = (pdf > 0.0f) ? (targetShape / pdf) : 0.0f;
+
+        if (g_Frame.enableReservoirLobeCheck != 0u) {
+            float gainClamp = lerp(
+                RESTIR_TEMPORAL_INIT_GAIN_CLAMP_ROUGH,
+                RESTIR_TEMPORAL_INIT_GAIN_CLAMP_GLOSSY,
+                glossyFactor);
+            proposalGain = min(proposalGain, gainClamp);
+        }
+
+        float risWeight = proposalGain * radianceLuma;
         debugSourcePdf = pdf;
         debugTargetPdf = targetPDF;
-        debugRisWeight = risWeight;
+        debugRisWeight = proposalGain;
         if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
             selectedPDF = targetPDF;
-            r.historyAge = 0;
+            // Tag the initial sample with the lobe it was drawn from.
+            r.historyAge = ReservoirPackAge(0u, !isDiffuse);
         }
     }
 
@@ -164,7 +202,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             uint2 prevScreenPos = min((uint2)(prevUV * (float2)launchDims), launchDims - 1);
             Reservoir prevR = prevReservoirs[prevScreenPos.y * launchDims.x + prevScreenPos.x];
 
-            if (prevR.M > 0.0f && prevR.historyAge < RESTIR_TEMPORAL_MAX_HISTORY_AGE) {
+            if (prevR.M > 0.0f && ReservoirAge(prevR) < RESTIR_TEMPORAL_MAX_HISTORY_AGE) {
                 RNG prevRng;
                 seed_rng(prevRng, prevScreenPos, (g_Frame.frameIndex - 1u) + 911u);
 
@@ -182,21 +220,73 @@ void main(uint3 DTid : SV_DispatchThreadID)
                         RESTIR_TEMPORAL_ALBEDO_THRESHOLD,
                         RESTIR_TEMPORAL_ROUGHNESS_THRESHOLD,
                         RESTIR_TEMPORAL_METALLIC_THRESHOLD);
+                float3 prevReflectionDir = GetSurfaceReflectionDir(prevSurface);
+                bool reflectionMatch = true;
 
-                if (depthMatch && normalMatch && materialMatch) {
-                    float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance, g_Frame.enableIndirectSpecular != 0);
+                if (g_Frame.enableReservoirLobeCheck != 0u && glossyFactor > 0.0f) {
+                    float reflectionThreshold = lerp(
+                        RESTIR_TEMPORAL_REFLECTION_THRESHOLD_MIN,
+                        RESTIR_TEMPORAL_REFLECTION_THRESHOLD_MAX,
+                        glossyFactor);
+                    reflectionMatch = dot(currentReflectionDir, prevReflectionDir) > reflectionThreshold;
+                }
+
+                if (depthMatch && normalMatch && materialMatch && reflectionMatch) {
+                    bool prevIsSpecular = ReservoirIsSpecular(prevR);
+
+                    float maxJac;
+                    float maxHistory;
+                    float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance, true);
+                    if (g_Frame.enableReservoirLobeCheck != 0u) {
+                        float glossyReuseFactor = glossyFactor;
+                        if (prevIsSpecular) {
+                            glossyReuseFactor = max(glossyReuseFactor, 0.5f);
+                        }
+
+                        maxJac = lerp(
+                            RESTIR_TEMPORAL_MAX_JACOBIAN,
+                            RESTIR_TEMPORAL_GLOSSY_MAX_JACOBIAN,
+                            glossyReuseFactor);
+
+                        maxHistory = lerp(
+                            RESTIR_TEMPORAL_MAX_HISTORY_LENGTH,
+                            RESTIR_TEMPORAL_GLOSSY_MAX_HISTORY,
+                            glossyReuseFactor);
+                    } else {
+                        maxJac     = RESTIR_TEMPORAL_MAX_JACOBIAN;
+                        maxHistory = RESTIR_TEMPORAL_MAX_HISTORY_LENGTH;
+                    }
                     debugTemporalTargetPdf = historyTargetPDF;
+
                     float jacobian = ComputeJacobian(surface.worldPos, prevSurface.worldPos, prevR.hitPos, prevR.hitNormal);
-                    bool jacobianValid = jacobian >= RESTIR_TEMPORAL_MIN_JACOBIAN && jacobian <= RESTIR_TEMPORAL_MAX_JACOBIAN;
+                    bool jacobianValid = jacobian >= RESTIR_TEMPORAL_MIN_JACOBIAN && jacobian <= maxJac;
 
                     if (historyTargetPDF > 0.0f && jacobianValid) {
                         float shiftedTargetPDF = historyTargetPDF * jacobian;
 
                         Reservoir adjustedPrev = prevR;
-                        capReservoirHistory(adjustedPrev, RESTIR_TEMPORAL_MAX_HISTORY_LENGTH);
-                        adjustedPrev.historyAge = min(prevR.historyAge + 1u, RESTIR_TEMPORAL_MAX_HISTORY_AGE);
+                        capReservoirHistory(adjustedPrev, maxHistory);
+                        adjustedPrev.historyAge = ReservoirPackAge(
+                            min(ReservoirAge(prevR) + 1u, RESTIR_TEMPORAL_MAX_HISTORY_AGE),
+                            prevIsSpecular);
 
-                        if (mergeReservoirs(r, adjustedPrev, shiftedTargetPDF, next_float(rng))) {
+                        float temporalReuseWeight = shiftedTargetPDF * adjustedPrev.W * adjustedPrev.M;
+
+                        if (g_Frame.enableReservoirLobeCheck != 0u) {
+                            float glossyReuseFactor = glossyFactor;
+                            if (prevIsSpecular) {
+                                glossyReuseFactor = max(glossyReuseFactor, 0.5f);
+                            }
+
+                            float reuseClamp = lerp(
+                                RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_ROUGH,
+                                RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_GLOSSY,
+                                glossyReuseFactor);
+
+                            temporalReuseWeight = min(temporalReuseWeight, reuseClamp);
+                        }
+
+                        if (mergeReservoirsWithWeight(r, adjustedPrev, temporalReuseWeight, next_float(rng))) {
                             selectedPDF = historyTargetPDF;
                             debugTemporalTargetPdf = historyTargetPDF * jacobian;
                         }
@@ -204,7 +294,20 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 }
             }
 
-            capReservoirHistory(r, RESTIR_TEMPORAL_MAX_HISTORY_LENGTH);
+            // Apply the roughness-scaled cap to the final merged reservoir.
+           float finalMaxHistory = RESTIR_TEMPORAL_MAX_HISTORY_LENGTH;
+            if (g_Frame.enableReservoirLobeCheck != 0u) {
+                float finalGlossyFactor = glossyFactor;
+                if (ReservoirIsSpecular(r)) {
+                    finalGlossyFactor = max(finalGlossyFactor, 0.5f);
+                }
+
+                finalMaxHistory = lerp(
+                    RESTIR_TEMPORAL_MAX_HISTORY_LENGTH,
+                    RESTIR_TEMPORAL_GLOSSY_MAX_HISTORY,
+                    finalGlossyFactor);
+            }
+            capReservoirHistory(r, finalMaxHistory);
         }
     }
 

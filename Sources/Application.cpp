@@ -80,6 +80,7 @@ void Application::Initialize()
     m_FrameConstants.enableRestir = 0;
     m_FrameConstants.enableAvoidCaustics = 1;
     m_FrameConstants.enableIndirectSpecular = 0;
+    m_FrameConstants.enableReservoirLobeCheck = 1;
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
     m_FrameConstants.sharcSceneScale = 50.0f;
     m_FrameConstants.sharcAccumulationFrameNum = 128;
@@ -631,6 +632,15 @@ void Application::RenderImGui()
             m_FrameConstants.enableIndirectSpecular = enableIndirectSpecular ? 1 : 0;
             m_FrameConstants.frameIndex = 0;
         }
+
+        bool enableReservoirLobeCheck = (m_FrameConstants.enableReservoirLobeCheck != 0);
+        if (ImGui::Checkbox("Reservoir Lobe Check (Temporal+Spatial)", &enableReservoirLobeCheck))
+        {
+            m_FrameConstants.enableReservoirLobeCheck = enableReservoirLobeCheck ? 1 : 0;
+            m_FrameConstants.frameIndex = 0;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lobe-matched target PDF, roughness-scaled Jacobian/history caps.\nDisable to compare against unguarded reuse.");
     }
 
     ImGui::SeparatorText("Reservoir Debug");
@@ -652,11 +662,10 @@ void Application::RenderImGui()
             "WeightSum",
             "Source PDF (Collect)",
             "Target PDF (Collect)",
-            "RIS Weight (Collect)",
+            "Target Shape (Collect)",
             "Target PDF (Temporal)",
             "Target PDF (Spatial)",
-            "W",
-            "First Bounce Continuation Radiance"
+            "W"
         };
 
         int debugMode = static_cast<int>(m_FrameConstants.restirReservoirDebugMode);

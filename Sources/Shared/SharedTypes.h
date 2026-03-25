@@ -59,7 +59,7 @@ struct FrameConstants {
     uint mouseSelectedPixelX;
     uint mouseSelectedPixelY;
     uint pathVizEnabled;  // 1 for exactly one frame after left-click
-    uint _fcPad3;
+    uint enableReservoirLobeCheck; // 1 = lobe-aware temporal/spatial reuse (lobe-matched PDF, roughness-scaled Jacobian/history)
 };
 
 struct BindlessIndices {
@@ -124,8 +124,13 @@ struct Reservoir {
     float w_sum;
     float W;
     float M;
+    // Bit 31 of historyAge encodes lobe type: 0 = diffuse, 1 = specular.
+    // Bits [0-30] store the actual age. MAX_HISTORY_AGE (12) fits comfortably.
     uint historyAge;
 };
+
+// Use these helpers (defined in CommonTracing.hlsl) to access historyAge safely.
+#define RESERVOIR_SPECULAR_FLAG 0x80000000u
 
 struct SharcBindlessIndices {
     uint HashEntriesBufIdx;

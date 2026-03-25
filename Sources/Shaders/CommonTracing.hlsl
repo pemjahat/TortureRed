@@ -56,6 +56,20 @@ struct Surface {
     float roughness;
 };
 
+// Make guard independent of light intensity
+float GetTargetShape(Surface s, float3 samplePos, bool enableSpecular = true) {
+    float3 L = normalize(samplePos - s.worldPos);
+    float dotNL = max(0.0f, dot(s.normal, L));
+    if (dotNL <= 0.0f) return 0.0f;
+
+    float3 d, spec;
+    EvaluateBSDF(s.normal, s.viewDir, L, s.albedo, s.metallic, s.roughness, d, spec);
+    if (!enableSpecular)
+        spec = 0.0f;
+
+    return max(0.0f, Luminance((d + spec) * dotNL));
+}
+
 float GetTargetPDF(Surface s, float3 samplePos, float3 sampleRadiance, bool enableSpecular = true) {
     float3 L = normalize(samplePos - s.worldPos);
     float dotNL = max(0.0f, dot(s.normal, L));
@@ -88,6 +102,12 @@ float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampl
     // Solid angle at P / Solid angle at Q
     return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));    
 }
+
+// Reservoir lobe-type helpers.
+// Bit 31 of historyAge = specular flag; bits [0-30] = actual age.
+bool ReservoirIsSpecular(Reservoir r)          { return (r.historyAge & RESERVOIR_SPECULAR_FLAG) != 0u; }
+uint ReservoirAge(Reservoir r)                 { return  r.historyAge & ~RESERVOIR_SPECULAR_FLAG; }
+uint ReservoirPackAge(uint age, bool specular) { return  age | (specular ? RESERVOIR_SPECULAR_FLAG : 0u); }
 
 // Random number generator (PCG)
 struct RNG {

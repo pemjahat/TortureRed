@@ -40,9 +40,7 @@ bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 
 
 // Merge two reservoirs with a shifted target PDF
 // Returns true if the reservoir was updated with the new sample
-bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float shiftedTargetPDF, float rnd) {
-    float risWeight = shiftedTargetPDF * neighbourRes.W * neighbourRes.M;
-
+bool mergeReservoirsWithWeight(inout Reservoir curRes, Reservoir neighbourRes, float risWeight, float rnd) {
     curRes.w_sum += risWeight;
     curRes.M += neighbourRes.M;
 
@@ -54,6 +52,11 @@ bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float shift
         return true;
     }
     return false;
+}
+
+bool mergeReservoirs(inout Reservoir curRes, Reservoir neighbourRes, float shiftedTargetPDF, float rnd) {
+    float risWeight = shiftedTargetPDF * neighbourRes.W * neighbourRes.M;
+    return mergeReservoirsWithWeight(curRes, neighbourRes, risWeight, rnd);
 }
 
 void capReservoirHistory(inout Reservoir r, float maxHistoryLength) {
