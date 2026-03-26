@@ -146,7 +146,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // 2. Create Initial Reservoir
     //Reservoir r = (Reservoir)0;
     Reservoir r;
-    r.hitPos = 0; r.hitNormal = 0; r.radiance = 0;
+    r.hitPos = 0; r.hitNormal = 0; r.radiance = 0; r.targetShape = 0;
     r.w_sum = 0; r.W = 0; r.M = 0; r.historyAge = 0;
 
     Surface s;
@@ -163,7 +163,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float selectedPDF = 0.f;
     float debugSourcePdf = 0.0f;
     float debugTargetPdf = 0.0f;
-    float debugRisWeight = 0.0f;
+    float debugTargetShape = 0.0f;
     float debugTemporalTargetPdf = 0.0f;
     if (hasFirstBounceCandidate)
     {
@@ -184,8 +184,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
         float risWeight = proposalGain * radianceLuma;
         debugSourcePdf = pdf;
         debugTargetPdf = targetPDF;
-        debugRisWeight = proposalGain;
-        if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
+        debugTargetShape = targetShape;
+        if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, targetShape, risWeight, next_float(rng))) {
             selectedPDF = targetPDF;
             // Tag the initial sample with the lobe it was drawn from.
             r.historyAge = ReservoirPackAge(0u, !isDiffuse);
@@ -237,6 +237,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
                     float maxJac;
                     float maxHistory;
                     float historyTargetPDF = GetTargetPDF(s, prevR.hitPos, prevR.radiance, true);
+                    float shiftedTargetShape = GetTargetShape(s, prevR.hitPos, true);
+                    float ownerTargetShape = max(prevR.targetShape, 1e-4f);
+                    float shapeRatio = shiftedTargetShape / ownerTargetShape;
+
                     if (g_Frame.enableReservoirLobeCheck != 0u) {
                         float glossyReuseFactor = glossyFactor;
                         if (prevIsSpecular) {
@@ -278,12 +282,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
                                 glossyReuseFactor = max(glossyReuseFactor, 0.5f);
                             }
 
-                            float reuseClamp = lerp(
-                                RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_ROUGH,
-                                RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP_GLOSSY,
-                                glossyReuseFactor);
+                            float shapeRatioClamp = lerp(4.f, 1.f, glossyReuseFactor);
+                            float shapeGuard = min(1.f, shapeRatioClamp / max(shapeRatio, 1e-4f));
 
-                            temporalReuseWeight = min(temporalReuseWeight, reuseClamp);
+                            temporalReuseWeight *= shapeGuard;
                         }
 
                         if (mergeReservoirsWithWeight(r, adjustedPrev, temporalReuseWeight, next_float(rng))) {
@@ -330,8 +332,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
         case RESTIR_RESERVOIR_DEBUG_TARGET_PDF:
             debugValue = debugTargetPdf;
             break;
-        case RESTIR_RESERVOIR_DEBUG_RIS_WEIGHT:
-            debugValue = debugRisWeight;
+        case RESTIR_RESERVOIR_DEBUG_TARGET_SHAPE    :
+            debugValue = debugTargetShape;
             break;
         case RESTIR_RESERVOIR_DEBUG_TEMPORAL_TARGET_PDF:
             debugValue = debugTemporalTargetPdf;

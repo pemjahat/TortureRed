@@ -140,11 +140,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             
             // Use GetTargetPDF to determine weight for initial sample
             float targetPDF = GetTargetPDF(surface, indirectHitPos, L_in);
+            float targetShape = GetTargetShape(surface, indirectHitPos, true);
             float risWeight = (firstBouncePDF > 0.0f) ? (targetPDF / firstBouncePDF) : 0.0f;
             debugSourcePdf = firstBouncePDF;
             debugTargetPdf = targetPDF;
             debugRisWeight = risWeight;            
-            if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, risWeight, next_float(rng))) {
+            if (updateReservoir(res, indirectHitPos, indirectHitNormal, L_in, targetShape, risWeight, next_float(rng))) {
                 selectedTargetPdf = targetPDF;
             }
         }
@@ -213,7 +214,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         case RESTIR_RESERVOIR_DEBUG_TARGET_PDF:
             debugValue = debugTargetPdf;
             break;
-        case RESTIR_RESERVOIR_DEBUG_RIS_WEIGHT:
+        case RESTIR_RESERVOIR_DEBUG_TARGET_SHAPE:
             debugValue = debugRisWeight;
             break;
         case RESTIR_RESERVOIR_DEBUG_TEMPORAL_TARGET_PDF:

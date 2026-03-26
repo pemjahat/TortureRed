@@ -103,6 +103,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 float maxJac = RESTIR_SPATIAL_MAX_JACOBIAN;
                 float neighborTargetPDF = GetTargetPDF(s, neighborR.hitPos, neighborR.radiance, true);
 
+                float shiftedTargetShape = GetTargetShape(s, neighborR.hitPos, true);
+                float ownerTargetShape = max(neighborR.targetShape, 1e-4f);
+                float shapeRatio = shiftedTargetShape / ownerTargetShape;
+
                 if (g_Frame.enableReservoirLobeCheck != 0u) {
                     float3 candidateDir = normalize(neighborR.hitPos - centerSurface.worldPos);
 
@@ -142,12 +146,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
                             glossyReuseFactor = max(glossyReuseFactor, 0.5f);
                         }
 
-                        float reuseClamp = lerp(
-                            RESTIR_SPATIAL_REUSE_WEIGHT_CLAMP_ROUGH,
-                            RESTIR_SPATIAL_REUSE_WEIGHT_CLAMP_GLOSSY,
-                            glossyReuseFactor);
+                        float shapeRatioClamp = lerp(4.0f, 1.25f, glossyReuseFactor);
+                        float shapeGuard = min(1.0f, shapeRatioClamp / max(shapeRatio, 1e-4f));
 
-                        spatialReuseWeight = min(spatialReuseWeight, reuseClamp);
+                        spatialReuseWeight *= shapeGuard;
                     }
                     if (mergeReservoirsWithWeight(r, adjustedNeighbor, spatialReuseWeight, next_float(rng))) {
                         selectedPDF = neighborTargetPDF;

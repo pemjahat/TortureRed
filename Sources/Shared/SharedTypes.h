@@ -21,7 +21,7 @@
 #define RESTIR_RESERVOIR_DEBUG_WEIGHTSUM  4u
 #define RESTIR_RESERVOIR_DEBUG_SOURCE_PDF 5u
 #define RESTIR_RESERVOIR_DEBUG_TARGET_PDF 6u
-#define RESTIR_RESERVOIR_DEBUG_RIS_WEIGHT 7u
+#define RESTIR_RESERVOIR_DEBUG_TARGET_SHAPE 7u
 #define RESTIR_RESERVOIR_DEBUG_TEMPORAL_TARGET_PDF 8u
 #define RESTIR_RESERVOIR_DEBUG_SPATIAL_SHIFTED_TARGET_PDF 9u
 #define RESTIR_RESERVOIR_DEBUG_W         10u
@@ -121,6 +121,7 @@ struct Reservoir {
     float3 hitPos;
     float3 hitNormal;
     float3 radiance;
+    float targetShape;
     float w_sum;
     float W;
     float M;
