@@ -37,7 +37,6 @@ public:
     void CreateRootSignature();
     void CreatePipelineState();
     void CreateRayTracingPipeline();
-    void CreateShaderBindingTable();
     void CreateRasterIndirectGIResources();
     void CreateRasterIndirectGIPipelines();
 

@@ -131,7 +131,6 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
     auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
-    auto restirDebugCS    = GraphicsHelper::CompileShader("Shaders/RestirGI_ReservoirDebug.hlsl",  "main", "cs_6_6");
 
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
@@ -141,12 +140,6 @@ void Renderer::CreateRasterIndirectGIPipelines()
 
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
-
-    if (!restirDebugCS.empty())
-    {
-        computeDesc.CS = { restirDebugCS.data(), restirDebugCS.size() };
-        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirReservoirDebugPSO));
-    }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
     SetupShaderTimestamps();
