@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <unordered_map>
 #include <filesystem>
 #include "GraphicsTypes.h"
@@ -8,6 +9,7 @@
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
 struct GLTFPrimitive;
+namespace nrd { struct Integration; }
 
 const int WINDOW_WIDTH = 1280;
 const int WINDOW_HEIGHT = 720;
@@ -107,6 +109,9 @@ public:
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
     void WaitForPreviousFrame();
+    bool InitializeNrd();
+    void ShutdownNrd();
+    bool DenoiseRasterIndirectGI(const FrameConstants& frame);
 
     // Shader hot-reload helpers
     void SetupShaderTimestamps();
@@ -199,6 +204,15 @@ private:
     GPUBuffer m_RasterReservoirs[2];
     GPUBuffer m_RasterReservoirIntermediate;
     GPUTexture m_RasterIndirectLightingTex;
+    GPUTexture m_NrdMotionVectorsTex;
+    GPUTexture m_NrdNormalRoughnessTex;
+    GPUTexture m_NrdViewZTex;
+    GPUTexture m_NrdNoisyDiffuseTex;
+    GPUTexture m_NrdNoisySpecularTex;
+    GPUTexture m_NrdDenoisedDiffuseTex;
+    GPUTexture m_NrdDenoisedSpecularTex;
+    std::unique_ptr<nrd::Integration> m_NrdIntegration;
+    bool m_NrdInitialized = false;
 
     // ------- spatial ircache PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePoolInitPSO;
@@ -212,6 +226,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPrepareGuidesPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPackSignalsPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;
 
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;

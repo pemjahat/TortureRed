@@ -77,6 +77,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     float3 continuationRadiance = 0.0f;
     float3 hitPos = 0.0f;
     float3 hitNormal = 0.0f;
+    float firstBounceHitT = 0.0f;
 
     if (isValidSample)
     {
@@ -98,6 +99,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceID(), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), hitSurf, 0.15f);
             hitPos    = hitSurf.worldPos;
             hitNormal = hitSurf.normal;
+            firstBounceHitT = q.CommittedRayT();
             float3 hitViewDir = hitSurf.viewDir;
             hasFirstBounceCandidate = true;
 
@@ -147,7 +149,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     //Reservoir r = (Reservoir)0;
     Reservoir r;
     r.hitPos = 0; r.hitNormal = 0; r.radiance = 0;
-    r.w_sum = 0; r.W = 0; r.M = 0; r.historyAge = 0;
+    r.w_sum = 0; r.W = 0; r.M = 0; r.firstBounceHitT = 0; r.historyAge = 0;
 
     Surface s;
     s.worldPos = surface.worldPos;
@@ -185,7 +187,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         debugSourcePdf = pdf;
         debugTargetPdf = targetPDF;
         debugRisWeight = proposalGain;
-        if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, risWeight, next_float(rng))) {
+        if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, firstBounceHitT, risWeight, next_float(rng))) {
             selectedPDF = targetPDF;
             // Tag the initial sample with the lobe it was drawn from.
             r.historyAge = ReservoirPackAge(0u, !isDiffuse);

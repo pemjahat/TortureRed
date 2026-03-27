@@ -25,7 +25,7 @@ struct GLTFVertex {
 
 // Weighted Reservoir Sampling helper
 // Returns true if the new sample was selected
-bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float risWeight, float rnd) {
+bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float firstBounceHitT, float risWeight, float rnd) {
     r.w_sum += risWeight;
     r.M += 1.0f;
 
@@ -33,9 +33,14 @@ bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 
         r.hitPos = hitPos;
         r.hitNormal = hitNormal;
         r.radiance = radiance;
+        r.firstBounceHitT = firstBounceHitT;
         return true;
     }
     return false;
+}
+
+bool updateReservoir(inout Reservoir r, float3 hitPos, float3 hitNormal, float3 radiance, float risWeight, float rnd) {
+    return updateReservoir(r, hitPos, hitNormal, radiance, 0.0f, risWeight, rnd);
 }
 
 // Merge two reservoirs with a shifted target PDF
@@ -48,6 +53,7 @@ bool mergeReservoirsWithWeight(inout Reservoir curRes, Reservoir neighbourRes, f
         curRes.hitPos = neighbourRes.hitPos;
         curRes.hitNormal = neighbourRes.hitNormal;
         curRes.radiance = neighbourRes.radiance;
+        curRes.firstBounceHitT = neighbourRes.firstBounceHitT;
         curRes.historyAge = neighbourRes.historyAge;
         return true;
     }

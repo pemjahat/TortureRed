@@ -4,9 +4,49 @@
 #include "Model.h"
 #include "Utility.h"
 #include <dxcapi.h>
+#include <array>
 #include <cassert>
+#include <cstring>
 #include "Rtxdi/GI/ReSTIRGIParameters.h"
 #include "Rtxdi/RtxdiUtils.h"
+#include "NRI.h"
+#include "Extensions/NRIHelper.h"
+#include "Extensions/NRIWrapperD3D12.h"
+#include "NRD.h"
+#include "NRDIntegration.hpp"
+
+namespace
+{
+    constexpr nrd::Identifier kNrdRelaxDiffuseSpecularIdentifier = 1u;
+
+    nri::AccessLayoutStage ToNriAccessLayoutStage(D3D12_RESOURCE_STATES state)
+    {
+        if ((state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) != 0)
+            return {nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::Layout::SHADER_RESOURCE_STORAGE, nri::StageBits::COMPUTE_SHADER};
+
+        if ((state & (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_GENERIC_READ)) != 0)
+            return {nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE, nri::StageBits::COMPUTE_SHADER};
+
+        return {nri::AccessBits::NONE, nri::Layout::GENERAL, nri::StageBits::NONE};
+    }
+
+    nrd::Resource MakeNrdResource(GPUTexture& texture)
+    {
+        nrd::Resource resource = {};
+        resource.d3d12.resource = texture.resource.Get();
+        resource.d3d12.format = static_cast<DXGIFormat>(texture.format);
+        resource.userArg = &texture;
+        resource.state = ToNriAccessLayoutStage(texture.state);
+        return resource;
+    }
+
+    void CopyMatrixToNrd(float dst[16], DirectX::FXMMATRIX matrix)
+    {
+        DirectX::XMFLOAT4X4 tmp;
+        DirectX::XMStoreFloat4x4(&tmp, DirectX::XMMatrixTranspose(matrix));
+        std::memcpy(dst, &tmp, sizeof(tmp));
+    }
+}
 
 Renderer::Renderer()
     : m_FrameIndex(0)
@@ -18,6 +58,63 @@ Renderer::Renderer()
 Renderer::~Renderer()
 {
     Shutdown();
+}
+
+bool Renderer::InitializeNrd()
+{
+    if (m_NrdInitialized)
+        return true;
+
+    nri::QueueFamilyD3D12Desc queueFamily = {};
+    ID3D12CommandQueue* queue = m_CommandQueue.Get();
+    queueFamily.d3d12Queues = &queue;
+    queueFamily.queueNum = 1;
+    queueFamily.queueType = nri::QueueType::GRAPHICS;
+
+    nri::DeviceCreationD3D12Desc deviceDesc = {};
+    deviceDesc.d3d12Device = m_Device.Get();
+    deviceDesc.queueFamilies = &queueFamily;
+    deviceDesc.queueFamilyNum = 1;
+    deviceDesc.disableD3D12EnhancedBarriers = true;
+
+    const nrd::DenoiserDesc denoisers[] = {
+        { kNrdRelaxDiffuseSpecularIdentifier, nrd::Denoiser::RELAX_DIFFUSE_SPECULAR }
+    };
+
+    nrd::InstanceCreationDesc instanceDesc = {};
+    instanceDesc.denoisers = denoisers;
+    instanceDesc.denoisersNum = _countof(denoisers);
+
+    nrd::IntegrationCreationDesc integrationDesc = {};
+    strcpy_s(integrationDesc.name, "TortureRedNRD");
+    integrationDesc.resourceWidth = static_cast<uint16_t>(WINDOW_WIDTH);
+    integrationDesc.resourceHeight = static_cast<uint16_t>(WINDOW_HEIGHT);
+    integrationDesc.queuedFrameNum = 1;
+    integrationDesc.enableWholeLifetimeDescriptorCaching = false;
+    integrationDesc.autoWaitForIdle = true;
+
+    m_NrdIntegration = std::make_unique<nrd::Integration>();
+    const nrd::Result result = m_NrdIntegration->RecreateD3D12(integrationDesc, instanceDesc, deviceDesc);
+    if (result != nrd::Result::SUCCESS)
+    {
+        std::cerr << "Failed to initialize NRD integration" << std::endl;
+        m_NrdIntegration.reset();
+        return false;
+    }
+
+    m_NrdInitialized = true;
+    return true;
+}
+
+void Renderer::ShutdownNrd()
+{
+    if (m_NrdIntegration)
+    {
+        m_NrdIntegration->Destroy();
+        m_NrdIntegration.reset();
+    }
+
+    m_NrdInitialized = false;
 }
 
 void Renderer::CreateRasterIndirectGIResources()
@@ -76,6 +173,15 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
     CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdMotionVectorsTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNormalRoughnessTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdViewZTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisyDiffuseTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisySpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedDiffuseTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedSpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    InitializeNrd();
 }
 
 void Renderer::CreateRasterIndirectGIPipelines()
@@ -131,6 +237,9 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
     auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
     auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
+    auto nrdGuidesCS      = GraphicsHelper::CompileShader("Shaders/NrdPrepareGuides.hlsl",         "main", "cs_6_6");
+    auto nrdPackCS        = GraphicsHelper::CompileShader("Shaders/NrdPackRasterIndirect.hlsl",    "main", "cs_6_6");
+    auto nrdCompositeCS   = GraphicsHelper::CompileShader("Shaders/NrdCompositeIndirect.hlsl",     "main", "cs_6_6");
 
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
@@ -140,6 +249,15 @@ void Renderer::CreateRasterIndirectGIPipelines()
 
     computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
+
+    computeDesc.CS = { nrdGuidesCS.data(), nrdGuidesCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPrepareGuidesPSO));
+
+    computeDesc.CS = { nrdPackCS.data(), nrdPackCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPackSignalsPSO));
+
+    computeDesc.CS = { nrdCompositeCS.data(), nrdCompositeCS.size() };
+    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdCompositePSO));
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
     SetupShaderTimestamps();
@@ -511,6 +629,8 @@ void Renderer::Shutdown()
 {
     // Wait for the GPU to be done with all resources
     WaitForPreviousFrame();
+
+    ShutdownNrd();
 
     GraphicsHelper::Shutdown();
 
@@ -1008,7 +1128,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     m_CommandList->SetComputeRootShaderResourceView(10, m_LightsBuffer.gpuAddress); // Lights Buffer
     m_CommandList->SetComputeRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
 
-    BindlessIndices indices;
+    BindlessIndices indices = {};
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
@@ -1176,7 +1296,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CommandList->SetComputeRootShaderResourceView(10, m_LightsBuffer.gpuAddress); // Lights Buffer
     m_CommandList->SetComputeRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT Buffer
 
-    BindlessIndices indices;
+    BindlessIndices indices = {};
 
     int currentReservoir = m_CurrentReservoirIndex;
     int previousReservoir = 1 - currentReservoir;
@@ -1336,6 +1456,13 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirIntermediate.resource.Get());
     m_CommandList->ResourceBarrier(1, &barrier2);
 
+    const bool useNrd = frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF && frame.sharcDebug == 0;
+    if (useNrd && DenoiseRasterIndirectGI(frame))
+    {
+        m_CurrentReservoirIndex = previousReservoir;
+        return;
+    }
+
     // Restir Resolve
     // reads spatial output from Intermediate
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1378,6 +1505,126 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
+}
+
+bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
+{
+    if (!m_NrdPrepareGuidesPSO || !m_NrdPackSignalsPSO || !m_NrdCompositePSO || !InitializeNrd())
+        return false;
+
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNormalRoughnessTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdViewZTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNoisyDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNoisySpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    m_CommandList->SetPipelineState(m_NrdPrepareGuidesPSO.Get());
+    BindlessIndices indices = {};
+    indices.OutputIdx0 = m_NrdMotionVectorsTex.uavIndex;
+    indices.OutputIdx1 = m_NrdNormalRoughnessTex.uavIndex;
+    indices.OutputIdx2 = m_NrdViewZTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER guideBarriers[] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdMotionVectorsTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNormalRoughnessTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdViewZTex.resource.Get())
+    };
+    m_CommandList->ResourceBarrier(_countof(guideBarriers), guideBarriers);
+
+    m_CommandList->SetPipelineState(m_NrdPackSignalsPSO.Get());
+    indices = {};
+    indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+    indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
+    indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER noisyBarriers[] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisyDiffuseTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisySpecularTex.resource.Get())
+    };
+    m_CommandList->ResourceBarrier(_countof(noisyBarriers), noisyBarriers);
+
+    DirectX::XMMATRIX projectionInverse = DirectX::XMLoadFloat4x4(&frame.projectionInverse);
+    DirectX::XMMATRIX projection = DirectX::XMMatrixInverse(nullptr, projectionInverse);
+    DirectX::XMMATRIX view = DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&frame.viewInverse));
+    DirectX::XMMATRIX viewPrev = DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&frame.viewInversePrevious));
+
+    nrd::CommonSettings commonSettings = {};
+    CopyMatrixToNrd(commonSettings.viewToClipMatrix, projection);
+    CopyMatrixToNrd(commonSettings.viewToClipMatrixPrev, projection);
+    CopyMatrixToNrd(commonSettings.worldToViewMatrix, view);
+    CopyMatrixToNrd(commonSettings.worldToViewMatrixPrev, viewPrev);
+    commonSettings.motionVectorScale[0] = 1.0f;
+    commonSettings.motionVectorScale[1] = 1.0f;
+    commonSettings.motionVectorScale[2] = 0.0f;
+    commonSettings.resourceSize[0] = static_cast<uint16_t>(frame.screenWidth);
+    commonSettings.resourceSize[1] = static_cast<uint16_t>(frame.screenHeight);
+    commonSettings.resourceSizePrev[0] = static_cast<uint16_t>(frame.screenWidth);
+    commonSettings.resourceSizePrev[1] = static_cast<uint16_t>(frame.screenHeight);
+    commonSettings.rectSize[0] = static_cast<uint16_t>(frame.screenWidth);
+    commonSettings.rectSize[1] = static_cast<uint16_t>(frame.screenHeight);
+    commonSettings.rectSizePrev[0] = static_cast<uint16_t>(frame.screenWidth);
+    commonSettings.rectSizePrev[1] = static_cast<uint16_t>(frame.screenHeight);
+    commonSettings.denoisingRange = 1000.0f;
+    commonSettings.disocclusionThreshold = 0.01f;
+    commonSettings.frameIndex = frame.frameIndex;
+    commonSettings.accumulationMode = frame.frameIndex <= 1 ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+
+    nrd::RelaxSettings relaxSettings = {};
+    relaxSettings.diffuseMaxAccumulatedFrameNum = 12;
+    relaxSettings.specularMaxAccumulatedFrameNum = 8;
+    relaxSettings.diffuseMaxFastAccumulatedFrameNum = 4;
+    relaxSettings.specularMaxFastAccumulatedFrameNum = 3;
+    relaxSettings.diffusePrepassBlurRadius = 20.0f;
+    relaxSettings.specularPrepassBlurRadius = 40.0f;
+    relaxSettings.minHitDistanceWeight = 0.05f;
+    relaxSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+    relaxSettings.enableAntiFirefly = true;
+
+    m_NrdIntegration->NewFrame();
+    if (m_NrdIntegration->SetCommonSettings(commonSettings) != nrd::Result::SUCCESS)
+        return false;
+    if (m_NrdIntegration->SetDenoiserSettings(kNrdRelaxDiffuseSpecularIdentifier, &relaxSettings) != nrd::Result::SUCCESS)
+        return false;
+
+    nrd::ResourceSnapshot resourceSnapshot = {};
+    resourceSnapshot.restoreInitialState = true;
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_MV, MakeNrdResource(m_NrdMotionVectorsTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS, MakeNrdResource(m_NrdNormalRoughnessTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_VIEWZ, MakeNrdResource(m_NrdViewZTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdNoisyDiffuseTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdNoisySpecularTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedDiffuseTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedSpecularTex));
+
+    nri::CommandBufferD3D12Desc commandBufferDesc = {};
+    commandBufferDesc.d3d12CommandList = m_CommandList.Get();
+    commandBufferDesc.d3d12CommandAllocator = m_CommandAllocator.Get();
+
+    const nrd::Identifier denoisers[] = { kNrdRelaxDiffuseSpecularIdentifier };
+    m_NrdIntegration->DenoiseD3D12(denoisers, _countof(denoisers), commandBufferDesc, resourceSnapshot);
+
+    ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
+    m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+    m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+    m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+    m_CommandList->SetPipelineState(m_NrdCompositePSO.Get());
+    indices = {};
+    indices.InputIdx0 = m_NrdDenoisedDiffuseTex.srvIndex;
+    indices.InputIdx1 = m_NrdDenoisedSpecularTex.srvIndex;
+    indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    return true;
 }
 
 void Renderer::DrawPathVizLines(const FrameConstants& frame)

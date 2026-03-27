@@ -67,8 +67,8 @@ struct BindlessIndices {
     uint InputIdx1;
     uint OutputIdx0;
     uint OutputIdx1;
+    uint OutputIdx2;
     uint PathVizLineBufferIdx; // UAV (CS write) or SRV (VS read) index for path viz lines
-    uint _bPad;
 };
 
 // Path visualization line types (bits[3:0] of typeAndValid)
@@ -124,6 +124,7 @@ struct Reservoir {
     float w_sum;
     float W;
     float M;
+    float firstBounceHitT;
     // Bit 31 of historyAge encodes lobe type: 0 = diffuse, 1 = specular.
     // Bits [0-30] store the actual age. MAX_HISTORY_AGE (12) fits comfortably.
     uint historyAge;

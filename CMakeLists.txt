@@ -87,6 +87,24 @@ FetchContent_MakeAvailable(directxtex)
 # RTXDI-Library (Inlined in Externals/)
 add_subdirectory(Externals/rtxdi-library)
 
+# NRD + NRI
+set(NRD_SOURCE_DIR "${CMAKE_SOURCE_DIR}/ThirdParty/NRD")
+set(NRD_NRI ON CACHE BOOL "" FORCE)
+set(NRD_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+set(NRD_EMBEDS_DXIL_SHADERS ON CACHE BOOL "" FORCE)
+set(NRD_EMBEDS_DXBC_SHADERS OFF CACHE BOOL "" FORCE)
+set(NRD_EMBEDS_SPIRV_SHADERS OFF CACHE BOOL "" FORCE)
+#set(NRI_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+set(NRD_NORMAL_ENCODING "2" CACHE STRING "") # Use R10G10B10A2_UNORM normal+roughness packing
+set(NRD_ROUGHNESS_ENCODING "1" CACHE STRING "") # Store linear roughness in the packed alpha channel
+
+FetchContent_Declare(
+    nrd
+    URL https://github.com/NVIDIA-RTX/NRD/archive/refs/tags/v4.17.2.zip
+    SOURCE_DIR ${NRD_SOURCE_DIR}
+)
+FetchContent_MakeAvailable(nrd)
+
 # SHaRC (Inlined in Externals/)
 # Since SHaRC is header-only and we've manually placed it, we don't add_subdirectory
 
@@ -146,6 +164,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     RTXDI_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include"
     SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/Sources/Shaders"
     SHARC_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/sharc/include"
+    NRD_SHADER_INCLUDE_DIR="${NRD_SOURCE_DIR}/Shaders"
 )
 
 # Link libraries
@@ -159,6 +178,9 @@ target_link_libraries(${PROJECT_NAME}
     ImGui
     DirectXTex
     Rtxdi
+    NRD
+    NRDIntegration
+    NRI
 )
 
 # Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)
@@ -220,7 +242,7 @@ message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Dependencies: SDL2, DirectX Headers, DXC, ImGui, cgltf, DirectXTex")
-message(STATUS "Externals: RTXDI-Library, SHaRC")
+message(STATUS "Externals: RTXDI-Library, NRD, SHaRC")
 message(STATUS "Windowing: SDL2")
 message(STATUS "Rendering: DirectX 12")
 message(STATUS "Debugging: ImGui")

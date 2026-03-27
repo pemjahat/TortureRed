@@ -236,6 +236,15 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(sharcDirW.c_str());
 #endif
 
+#ifdef NRD_SHADER_INCLUDE_DIR
+    static const std::wstring nrdShaderDirW = []{
+        std::string s = NRD_SHADER_INCLUDE_DIR;
+        return std::wstring(s.begin(), s.end());
+    }();
+    arguments.push_back(L"-I");
+    arguments.push_back(nrdShaderDirW.c_str());
+#endif
+
     // Per-shader compile defines (e.g. SHARC_UPDATE=1, SHARC_PROPAGATION_DEPTH=4)
     std::vector<std::wstring> defineArgs;
     for (auto& [name, value] : defines)

@@ -449,7 +449,7 @@ void Application::Render()
 
         // 3. Lighting Pass
         {
-            BindlessIndices indices;
+            BindlessIndices indices = {};
 
             // Transition G-Buffer targets to SRV state
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
