@@ -211,6 +211,7 @@ private:
     GPUTexture m_NrdNoisySpecularTex;
     GPUTexture m_NrdDenoisedDiffuseTex;
     GPUTexture m_NrdDenoisedSpecularTex;
+    GPUTexture m_NrdValidationTex;
     std::unique_ptr<nrd::Integration> m_NrdIntegration;
     bool m_NrdInitialized = false;
 

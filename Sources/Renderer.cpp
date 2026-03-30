@@ -43,7 +43,7 @@ namespace
     void CopyMatrixToNrd(float dst[16], DirectX::FXMMATRIX matrix)
     {
         DirectX::XMFLOAT4X4 tmp;
-        DirectX::XMStoreFloat4x4(&tmp, DirectX::XMMatrixTranspose(matrix));
+        DirectX::XMStoreFloat4x4(&tmp, matrix);
         std::memcpy(dst, &tmp, sizeof(tmp));
     }
 }
@@ -180,6 +180,7 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateTexture(m_NrdNoisySpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdDenoisedDiffuseTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdDenoisedSpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdValidationTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     InitializeNrd();
 }
@@ -1456,7 +1457,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirIntermediate.resource.Get());
     m_CommandList->ResourceBarrier(1, &barrier2);
 
-    const bool useNrd = frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF && frame.sharcDebug == 0;
+    const bool useNrd = frame.enableNrdRelax != 0
+        && frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF
+        && frame.sharcDebug == 0;
     if (useNrd && DenoiseRasterIndirectGI(frame))
     {
         m_CurrentReservoirIndex = previousReservoir;
@@ -1519,6 +1522,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNoisySpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     m_CommandList->SetPipelineState(m_NrdPrepareGuidesPSO.Get());
@@ -1575,6 +1579,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     commonSettings.disocclusionThreshold = 0.01f;
     commonSettings.frameIndex = frame.frameIndex;
     commonSettings.accumulationMode = frame.frameIndex <= 1 ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    commonSettings.enableValidation = frame.enableNrdValidation != 0;
 
     nrd::RelaxSettings relaxSettings = {};
     relaxSettings.diffuseMaxAccumulatedFrameNum = 12;
@@ -1602,6 +1607,10 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdNoisySpecularTex));
     resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedDiffuseTex));
     resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedSpecularTex));
+    if (frame.enableNrdValidation != 0)
+    {
+        resourceSnapshot.SetResource(nrd::ResourceType::OUT_VALIDATION, MakeNrdResource(m_NrdValidationTex));
+    }
 
     nri::CommandBufferD3D12Desc commandBufferDesc = {};
     commandBufferDesc.d3d12CommandList = m_CommandList.Get();
@@ -1609,6 +1618,13 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
 
     const nrd::Identifier denoisers[] = { kNrdRelaxDiffuseSpecularIdentifier };
     m_NrdIntegration->DenoiseD3D12(denoisers, _countof(denoisers), commandBufferDesc, resourceSnapshot);
+
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (frame.enableNrdValidation != 0)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
 
     ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -1620,6 +1636,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices = {};
     indices.InputIdx0 = m_NrdDenoisedDiffuseTex.srvIndex;
     indices.InputIdx1 = m_NrdDenoisedSpecularTex.srvIndex;
+    indices.InputIdx2 = frame.enableNrdValidation != 0 ? m_NrdValidationTex.srvIndex : UINT(-1);
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);

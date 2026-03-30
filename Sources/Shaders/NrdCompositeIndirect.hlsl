@@ -17,6 +17,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
     Texture2D<float4> specularIn = ResourceDescriptorHeap[g_Indices.InputIdx1];
     RWTexture2D<float4> indirectLightingTex = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
+    if (g_Indices.InputIdx2 != 0xffffffffu)
+    {
+        Texture2D<float4> validationIn = ResourceDescriptorHeap[g_Indices.InputIdx2];
+        indirectLightingTex[screenPos] = float4(validationIn.Load(int3(screenPos, 0)).rgb, 1.0f);
+        return;
+    }
+
     float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
     if (depth == 0.0f)
     {

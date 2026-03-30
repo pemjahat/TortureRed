@@ -269,7 +269,7 @@ static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* to
              
              XMMATRIX lightView = XMMatrixLookAtRH(XMLoadFloat4(&light.position), XMLoadFloat4(&light.position) + dir, XMVectorSet(0, 1, 0, 0));
              XMMATRIX lightProj = XMMatrixPerspectiveFovRH(XMConvertToRadians(outerAngle * 2.0f), 1.0f, 0.1f, 100.0f);
-             XMStoreFloat4x4(&light.viewProj, XMMatrixTranspose(lightView * lightProj));
+             XMStoreFloat4x4(&light.viewProj, lightView * lightProj);
         }
         
         scene->m_Lights.push_back(light);

@@ -60,11 +60,14 @@ struct FrameConstants {
     uint mouseSelectedPixelY;
     uint pathVizEnabled;  // 1 for exactly one frame after left-click
     uint enableReservoirLobeCheck; // 1 = lobe-aware temporal/spatial reuse (lobe-matched PDF, roughness-scaled Jacobian/history)
+    uint enableNrdRelax;
+    uint enableNrdValidation;
 };
 
 struct BindlessIndices {
     uint InputIdx0;
     uint InputIdx1;
+    uint InputIdx2;
     uint OutputIdx0;
     uint OutputIdx1;
     uint OutputIdx2;

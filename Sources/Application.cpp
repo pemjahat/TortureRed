@@ -81,6 +81,8 @@ void Application::Initialize()
     m_FrameConstants.enableAvoidCaustics = 1;
     m_FrameConstants.enableIndirectSpecular = 0;
     m_FrameConstants.enableReservoirLobeCheck = 1;
+    m_FrameConstants.enableNrdRelax = 1;
+    m_FrameConstants.enableNrdValidation = 0;
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
     m_FrameConstants.sharcSceneScale = 50.0f;
     m_FrameConstants.sharcAccumulationFrameNum = 128;
@@ -132,6 +134,9 @@ void Application::Initialize()
     m_Renderer.CreateRasterIndirectGIPipelines();
 
     m_LastViewMatrix = m_Camera.GetViewMatrix();
+    DirectX::XMStoreFloat4x4(&m_LastViewProj, m_Camera.GetViewMatrix() * m_Camera.GetProjMatrix());
+    DirectX::XMStoreFloat4x4(&m_LastViewInverse, m_Camera.GetInvViewMatrix());
+    m_LastCameraPos = { m_Camera.GetPosition().x, m_Camera.GetPosition().y, m_Camera.GetPosition().z, 1.0f };
 
     std::cout << "TortureRed application initialized successfully!" << std::endl;
 }
@@ -607,6 +612,24 @@ void Application::RenderImGui()
 
         if (enableRasterIndirectGI)
         {
+            bool enableNrdRelax = (m_FrameConstants.enableNrdRelax != 0);
+            if (ImGui::Checkbox("Enable NRD RELAX", &enableNrdRelax))
+            {
+                m_FrameConstants.enableNrdRelax = enableNrdRelax ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
+
+            bool enableNrdValidation = (m_FrameConstants.enableNrdValidation != 0);
+            if (!enableNrdRelax)
+                ImGui::BeginDisabled();
+            if (ImGui::Checkbox("NRD Validation Debug", &enableNrdValidation))
+            {
+                m_FrameConstants.enableNrdValidation = enableNrdValidation ? 1 : 0;
+                m_FrameConstants.frameIndex = 0;
+            }
+            if (!enableNrdRelax)
+                ImGui::EndDisabled();
+
             const char* sharcDebugModes[] = { "Off", "SHaRC Output", "Bounce Heatmap" };
             int sharcDebugMode = (int)m_FrameConstants.sharcDebug;
             ImGui::SetNextItemWidth(180.f);
