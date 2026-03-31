@@ -167,11 +167,6 @@ void Renderer::CreateRasterIndirectGIResources()
     m_SharcIndices.AccumulationBufIdx = (UINT)m_SharcAccumulationBuf.uavIndex;
     m_SharcIndices.ResolvedBufIdx     = (UINT)m_SharcResolvedBuf.uavIndex;
 
-    // ReSTIR reservoir buffers (legacy unified — kept for backward compat)
-    CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_RasterReservoirs[1], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
     // ------- Split Diffuse / Specular ReSTIR buffers -------
     for (int i = 0; i < 2; ++i) {
         CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -244,9 +239,6 @@ void Renderer::CreateRasterIndirectGIPipelines()
         }
     }
 
-    auto restirTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Temporal.hlsl", "main", "cs_6_6");
-    auto restirSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Spatial.hlsl",  "main", "cs_6_6");
-    auto restirResolveCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Raster_Resolve.hlsl",  "main", "cs_6_6");
     auto nrdGuidesCS      = GraphicsHelper::CompileShader("Shaders/NrdPrepareGuides.hlsl",         "main", "cs_6_6");
     auto nrdPackCS        = GraphicsHelper::CompileShader("Shaders/NrdPackRasterIndirect.hlsl",    "main", "cs_6_6");
     auto nrdCompositeCS   = GraphicsHelper::CompileShader("Shaders/NrdCompositeIndirect.hlsl",     "main", "cs_6_6");
@@ -257,15 +249,6 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto diffuseSpatialCS   = GraphicsHelper::CompileShader("Shaders/RestirGI_Diffuse_Spatial.hlsl",   "main", "cs_6_6");
     auto specularSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Spatial.hlsl",  "main", "cs_6_6");
     auto splitResolveCS     = GraphicsHelper::CompileShader("Shaders/RestirGI_Split_Resolve.hlsl",     "main", "cs_6_6");
-
-    computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
-
-    computeDesc.CS = { restirSpatialCS.data(), restirSpatialCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterSpatialPSO));
-
-    computeDesc.CS = { restirResolveCS.data(), restirResolveCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterResolvePSO));
 
     computeDesc.CS = { nrdGuidesCS.data(), nrdGuidesCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPrepareGuidesPSO));
@@ -1313,9 +1296,6 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     // Split diffuse/specular buffers
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

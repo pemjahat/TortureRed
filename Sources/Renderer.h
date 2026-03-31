@@ -201,9 +201,6 @@ private:
     GPUBuffer m_SharcResolvedBuf;       // SharcPackedData (float16_t4+2×uint) × SHARC_HASH_ENTRIES_NUM = 64 MB
     SharcBindlessIndices m_SharcIndices = {};
 
-    GPUBuffer m_RasterReservoirs[2];
-    GPUBuffer m_RasterReservoirIntermediate;
-
     // ------- Split Diffuse / Specular ReSTIR buffers -------
     GPUBuffer m_DiffuseReservoirBuffer[2];       // Ping-pong diffuse reservoirs
     GPUBuffer m_SpecularReservoirBuffer[2];      // Ping-pong specular reservoirs
@@ -230,11 +227,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePrepareTracePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
-
-    // ------- Restir GI PSOs (unified, legacy) -------
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
 
     // ------- Split Diffuse / Specular ReSTIR PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DiffuseTemporalPSO;
