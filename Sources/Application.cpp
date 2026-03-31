@@ -83,6 +83,7 @@ void Application::Initialize()
     m_FrameConstants.enableReservoirLobeCheck = 1;
     m_FrameConstants.enableNrdRelax = 1;
     m_FrameConstants.enableNrdValidation = 0;
+    m_FrameConstants.rtrRoughReuseThreshold = 0.6f;
     m_FrameConstants.lightSamplingMode = 0; // 0=uniform, 1=importance, 2=brute force
     m_FrameConstants.sharcSceneScale = 50.0f;
     m_FrameConstants.sharcAccumulationFrameNum = 128;
@@ -664,6 +665,13 @@ void Application::RenderImGui()
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Lobe-matched target PDF, roughness-scaled Jacobian/history caps.\nDisable to compare against unguarded reuse.");
+
+        if (ImGui::SliderFloat("RTR Rough Reuse Threshold", &m_FrameConstants.rtrRoughReuseThreshold, 0.3f, 1.0f, "%.2f"))
+        {
+            m_FrameConstants.frameIndex = 0;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Roughness above which specular pass reuses diffuse candidate ray\ninstead of tracing its own VNDF ray (Kajiya strategy).");
     }
 
     ImGui::SeparatorText("Reservoir Debug");

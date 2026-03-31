@@ -203,6 +203,14 @@ private:
 
     GPUBuffer m_RasterReservoirs[2];
     GPUBuffer m_RasterReservoirIntermediate;
+
+    // ------- Split Diffuse / Specular ReSTIR buffers -------
+    GPUBuffer m_DiffuseReservoirBuffer[2];       // Ping-pong diffuse reservoirs
+    GPUBuffer m_SpecularReservoirBuffer[2];      // Ping-pong specular reservoirs
+    GPUBuffer m_DiffuseReservoirIntermediate;    // Post-spatial diffuse
+    GPUBuffer m_SpecularReservoirIntermediate;   // Post-spatial specular
+    GPUBuffer m_DiffuseCandidateBuffer;          // DiffuseCandidate per pixel (RTDGI → RTR)
+
     GPUTexture m_RasterIndirectLightingTex;
     GPUTexture m_NrdMotionVectorsTex;
     GPUTexture m_NrdNormalRoughnessTex;
@@ -223,10 +231,17 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
 
-    // ------- Restir GI PSOs -------
+    // ------- Restir GI PSOs (unified, legacy) -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterTemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterSpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirGIRasterResolvePSO;
+
+    // ------- Split Diffuse / Specular ReSTIR PSOs -------
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DiffuseTemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SpecularTemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DiffuseSpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SpecularSpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SplitResolvePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPrepareGuidesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPackSignalsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;

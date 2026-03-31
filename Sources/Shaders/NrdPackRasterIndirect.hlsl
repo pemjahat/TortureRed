@@ -14,7 +14,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     uint pixelIndex = screenPos.y * launchDims.x + screenPos.x;
 
-    StructuredBuffer<Reservoir> reservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    // InputIdx0 = diffuse reservoir (post-spatial), InputIdx1 = specular reservoir (post-spatial)
+    StructuredBuffer<Reservoir> diffuseReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
+    StructuredBuffer<Reservoir> specularReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx1];
     RWTexture2D<float4> diffuseOut = ResourceDescriptorHeap[g_Indices.OutputIdx0];
     RWTexture2D<float4> specularOut = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
@@ -44,42 +46,44 @@ void main(uint3 DTid : SV_DispatchThreadID)
     surface.metallic = packedMaterial.g;
     surface.roughness = max(0.01f, packedMaterial.r);
 
-    Reservoir r = reservoirs[pixelIndex];
+    Reservoir rDiffuse = diffuseReservoirs[pixelIndex];
+    Reservoir rSpecular = specularReservoirs[pixelIndex];
     float3 diffuseRadiance = 0.0f;
     float3 specularRadiance = 0.0f;
     float diffuseHitT = 0.0f;
     float specularHitT = 0.0f;
 
-    if (r.W > 0.0f && r.firstBounceHitT > 0.0f)
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), surface.albedo, surface.metallic);
+    float3 diffuseFactor, specularFactor;
+    NRD_MaterialFactors(surface.normal, surface.viewDir, surface.albedo, F0, surface.roughness, diffuseFactor, specularFactor);
+
+    // Evaluate diffuse reservoir with diffuse BRDF
+    if (rDiffuse.W > 0.0f && rDiffuse.firstBounceHitT > 0.0f)
     {
-        float3 L = normalize(r.hitPos - surface.worldPos);
+        float3 L = normalize(rDiffuse.hitPos - surface.worldPos);
         float NdotL = max(0.0f, dot(surface.normal, L));
         if (NdotL > 0.0f)
         {
             float3 diffuseBRDF, specularBRDF;
             EvaluateBSDF(surface.normal, surface.viewDir, L, surface.albedo, surface.metallic, surface.roughness, diffuseBRDF, specularBRDF);
+            float3 weightedIncomingRadiance = rDiffuse.radiance * (rDiffuse.W * NdotL);
+            diffuseRadiance = diffuseBRDF * weightedIncomingRadiance / max(diffuseFactor, 1e-4f.xxx);
+            diffuseHitT = rDiffuse.firstBounceHitT;
+        }
+    }
 
-            float3 weightedIncomingRadiance = r.radiance * (r.W * NdotL);
-            float3 diffuseIrradiance = diffuseBRDF * weightedIncomingRadiance;
-            float3 specularIrradiance = specularBRDF * weightedIncomingRadiance;
-
-            float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), surface.albedo, surface.metallic);
-            float3 diffuseFactor, specularFactor;
-            NRD_MaterialFactors(surface.normal, surface.viewDir, surface.albedo, F0, surface.roughness, diffuseFactor, specularFactor);
-
-            if (ReservoirIsSpecular(r))
-            {
-                if (FrameCB.enableIndirectSpecular != 0u)
-                {
-                    specularRadiance = specularIrradiance / max(specularFactor, 1e-4f.xxx);
-                    specularHitT = r.firstBounceHitT;
-                }
-            }
-            else
-            {
-                diffuseRadiance = diffuseIrradiance / max(diffuseFactor, 1e-4f.xxx);
-                diffuseHitT = r.firstBounceHitT;
-            }
+    // Evaluate specular reservoir with specular BRDF
+    if (FrameCB.enableIndirectSpecular != 0u && rSpecular.W > 0.0f && rSpecular.firstBounceHitT > 0.0f)
+    {
+        float3 L = normalize(rSpecular.hitPos - surface.worldPos);
+        float NdotL = max(0.0f, dot(surface.normal, L));
+        if (NdotL > 0.0f)
+        {
+            float3 diffuseBRDF, specularBRDF;
+            EvaluateBSDF(surface.normal, surface.viewDir, L, surface.albedo, surface.metallic, surface.roughness, diffuseBRDF, specularBRDF);
+            float3 weightedIncomingRadiance = rSpecular.radiance * (rSpecular.W * NdotL);
+            specularRadiance = specularBRDF * weightedIncomingRadiance / max(specularFactor, 1e-4f.xxx);
+            specularHitT = rSpecular.firstBounceHitT;
         }
     }
 

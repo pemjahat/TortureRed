@@ -167,10 +167,19 @@ void Renderer::CreateRasterIndirectGIResources()
     m_SharcIndices.AccumulationBufIdx = (UINT)m_SharcAccumulationBuf.uavIndex;
     m_SharcIndices.ResolvedBufIdx     = (UINT)m_SharcResolvedBuf.uavIndex;
 
-    // ReSTIR reservoir buffers (unchanged)
+    // ReSTIR reservoir buffers (legacy unified — kept for backward compat)
     CreateStructuredBuffer(m_RasterReservoirs[0], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirs[1], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_RasterReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // ------- Split Diffuse / Specular ReSTIR buffers -------
+    for (int i = 0; i < 2; ++i) {
+        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
     CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdMotionVectorsTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -242,6 +251,13 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto nrdPackCS        = GraphicsHelper::CompileShader("Shaders/NrdPackRasterIndirect.hlsl",    "main", "cs_6_6");
     auto nrdCompositeCS   = GraphicsHelper::CompileShader("Shaders/NrdCompositeIndirect.hlsl",     "main", "cs_6_6");
 
+    // ------- Split Diffuse / Specular PSOs -------
+    auto diffuseTemporalCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Diffuse_Temporal.hlsl",  "main", "cs_6_6");
+    auto specularTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Temporal.hlsl", "main", "cs_6_6");
+    auto diffuseSpatialCS   = GraphicsHelper::CompileShader("Shaders/RestirGI_Diffuse_Spatial.hlsl",   "main", "cs_6_6");
+    auto specularSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Spatial.hlsl",  "main", "cs_6_6");
+    auto splitResolveCS     = GraphicsHelper::CompileShader("Shaders/RestirGI_Split_Resolve.hlsl",     "main", "cs_6_6");
+
     computeDesc.CS = { restirTemporalCS.data(), restirTemporalCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RestirGIRasterTemporalPSO));
 
@@ -259,6 +275,28 @@ void Renderer::CreateRasterIndirectGIPipelines()
 
     computeDesc.CS = { nrdCompositeCS.data(), nrdCompositeCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdCompositePSO));
+
+    // ------- Split Diffuse / Specular PSO creation -------
+    if (!diffuseTemporalCS.empty()) {
+        computeDesc.CS = { diffuseTemporalCS.data(), diffuseTemporalCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_DiffuseTemporalPSO));
+    }
+    if (!specularTemporalCS.empty()) {
+        computeDesc.CS = { specularTemporalCS.data(), specularTemporalCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SpecularTemporalPSO));
+    }
+    if (!diffuseSpatialCS.empty()) {
+        computeDesc.CS = { diffuseSpatialCS.data(), diffuseSpatialCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_DiffuseSpatialPSO));
+    }
+    if (!specularSpatialCS.empty()) {
+        computeDesc.CS = { specularSpatialCS.data(), specularSpatialCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SpecularSpatialPSO));
+    }
+    if (!splitResolveCS.empty()) {
+        computeDesc.CS = { splitResolveCS.data(), splitResolveCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SplitResolvePSO));
+    }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
     SetupShaderTimestamps();
@@ -1278,6 +1316,14 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirs[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // Split diffuse/specular buffers
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseCandidateBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (useCustomRestirHeatmap)
     {
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1432,30 +1478,77 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     }
 
     // -----------------------------------------------------------------------
-    // ReSTIR passes  (temporal → spatial → resolve)
+    // Split Diffuse / Specular ReSTIR passes
+    // (1) RTDGI Temporal → (2) RTR Temporal → (3) Diffuse Spatial →
+    // (4) Specular Spatial → (5) Split Resolve
     // -----------------------------------------------------------------------
-    // Restir Temporal — InputIdx0 no longer needed for IrCache; IrCache is at b2
-    m_CommandList->SetPipelineState(m_RestirGIRasterTemporalPSO.Get());
-    indices.InputIdx0  = m_RasterReservoirs[previousReservoir].srvIndex;
-    indices.OutputIdx0 = m_RasterReservoirs[currentReservoir].uavIndex;
-    indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
+
+    // --- Pass 1: Diffuse Temporal (RTDGI) ---
+    // InputIdx0 = prev diffuse reservoirs, OutputIdx0 = curr diffuse reservoirs,
+    // OutputIdx1 = diffuse candidate buffer, OutputIdx2 = debug heatmap
+    m_CommandList->SetPipelineState(m_DiffuseTemporalPSO.Get());
+    indices.InputIdx0  = m_DiffuseReservoirBuffer[previousReservoir].srvIndex;
+    indices.OutputIdx0 = m_DiffuseReservoirBuffer[currentReservoir].uavIndex;
+    indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
+    indices.OutputIdx2 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-    D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirs[currentReservoir].resource.Get());
-    m_CommandList->ResourceBarrier(1, &barrier1);
+    {
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseReservoirBuffer[currentReservoir].resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseCandidateBuffer.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
 
-    // Restir Spatial
-    // writes to Intermediate, reads temporal from ReservoirBuffer[current]
-    m_CommandList->SetPipelineState(m_RestirGIRasterSpatialPSO.Get());
-    indices.InputIdx0 = m_RasterReservoirs[currentReservoir].srvIndex;
-    indices.OutputIdx0 = m_RasterReservoirIntermediate.uavIndex;
+    // --- Pass 2: Specular Temporal (RTR) ---
+    // InputIdx0 = prev specular reservoirs, InputIdx1 = diffuse candidate buffer (SRV),
+    // OutputIdx0 = curr specular reservoirs, OutputIdx1 = debug heatmap
+    m_CommandList->SetPipelineState(m_SpecularTemporalPSO.Get());
+    indices.InputIdx0  = m_SpecularReservoirBuffer[previousReservoir].srvIndex;
+    indices.InputIdx1  = m_DiffuseCandidateBuffer.srvIndex;
+    indices.OutputIdx0 = m_SpecularReservoirBuffer[currentReservoir].uavIndex;
     indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+    indices.OutputIdx2 = UINT(-1);
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
-    D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterReservoirIntermediate.resource.Get());
-    m_CommandList->ResourceBarrier(1, &barrier2);
+    {
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirBuffer[currentReservoir].resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier);
+    }
+
+    // --- Pass 3: Diffuse Spatial ---
+    // InputIdx0 = curr diffuse reservoirs, OutputIdx0 = diffuse intermediate
+    m_CommandList->SetPipelineState(m_DiffuseSpatialPSO.Get());
+    indices.InputIdx0  = m_DiffuseReservoirBuffer[currentReservoir].srvIndex;
+    indices.InputIdx1  = UINT(-1);
+    indices.OutputIdx0 = m_DiffuseReservoirIntermediate.uavIndex;
+    indices.OutputIdx1 = UINT(-1);
+    indices.OutputIdx2 = UINT(-1);
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseReservoirIntermediate.resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier);
+    }
+
+    // --- Pass 4: Specular Spatial ---
+    // InputIdx0 = curr specular reservoirs, OutputIdx0 = specular intermediate
+    m_CommandList->SetPipelineState(m_SpecularSpatialPSO.Get());
+    indices.InputIdx0  = m_SpecularReservoirBuffer[currentReservoir].srvIndex;
+    indices.OutputIdx0 = m_SpecularReservoirIntermediate.uavIndex;
+    indices.OutputIdx1 = UINT(-1);
+    indices.OutputIdx2 = UINT(-1);
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirIntermediate.resource.Get());
+        m_CommandList->ResourceBarrier(1, &barrier);
+    }
 
     const bool useNrd = frame.enableNrdRelax != 0
         && frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF
@@ -1466,32 +1559,18 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         return;
     }
 
-    // Restir Resolve
-    // reads spatial output from Intermediate
+    // --- Pass 5: Split Resolve ---
+    // InputIdx0 = diffuse intermediate, InputIdx1 = specular intermediate,
+    // OutputIdx0 = indirect lighting texture
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    m_CommandList->SetPipelineState(m_RestirGIRasterResolvePSO.Get());
-    indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+    m_CommandList->SetPipelineState(m_SplitResolvePSO.Get());
+    indices.InputIdx0  = m_DiffuseReservoirIntermediate.srvIndex;
+    indices.InputIdx1  = m_SpecularReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+    indices.OutputIdx1 = UINT(-1);
+    indices.OutputIdx2 = UINT(-1);
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
-
-    if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
-    {
-        D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterIndirectLightingTex.resource.Get());
-        m_CommandList->ResourceBarrier(1, &debugBarrier);
-
-        if (useCustomRestirHeatmap)
-        {
-            GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        }
-
-        m_CommandList->SetPipelineState(m_RestirReservoirDebugPSO.Get());
-        indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
-        indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
-        indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
-        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
-    }
 
     // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
     // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).
@@ -1542,7 +1621,8 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
 
     m_CommandList->SetPipelineState(m_NrdPackSignalsPSO.Get());
     indices = {};
-    indices.InputIdx0 = m_RasterReservoirIntermediate.srvIndex;
+    indices.InputIdx0 = m_DiffuseReservoirIntermediate.srvIndex;
+    indices.InputIdx1 = m_SpecularReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);

@@ -62,6 +62,7 @@ struct FrameConstants {
     uint enableReservoirLobeCheck; // 1 = lobe-aware temporal/spatial reuse (lobe-matched PDF, roughness-scaled Jacobian/history)
     uint enableNrdRelax;
     uint enableNrdValidation;
+    float rtrRoughReuseThreshold; // Roughness above which specular reuses diffuse candidate (default 0.6)
 };
 
 struct BindlessIndices {
@@ -135,6 +136,16 @@ struct Reservoir {
 
 // Use these helpers (defined in CommonTracing.hlsl) to access historyAge safely.
 #define RESERVOIR_SPECULAR_FLAG 0x80000000u
+
+// Per-pixel diffuse candidate data written by RTDGI temporal, read by RTR temporal
+struct DiffuseCandidate {
+    float3 hitPos;
+    float  hitT;
+    float3 hitNormal;
+    float  _pad0;
+    float3 radiance;
+    float  _pad1;
+};
 
 struct SharcBindlessIndices {
     uint HashEntriesBufIdx;
