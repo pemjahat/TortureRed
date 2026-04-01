@@ -219,6 +219,7 @@ private:
     GPUTexture m_NrdValidationTex;
     std::unique_ptr<nrd::Integration> m_NrdIntegration;
     bool m_NrdInitialized = false;
+    bool m_NrdWasActiveLastFrame = false; // Tracks whether NRD ran last frame; used to force RESTART on re-enable
 
     // ------- spatial ircache PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePoolInitPSO;

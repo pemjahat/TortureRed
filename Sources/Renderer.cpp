@@ -1286,7 +1286,11 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
 {
     if (!frame.enableRasterIndirectGI)
+    {
+        m_NrdWasActiveLastFrame = false;
         return;
+    }
+        
 
     const bool useCustomRestirHeatmap = frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF;
 
@@ -1539,6 +1543,9 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         return;
     }
 
+    // NRD path was not taken this frame — record so next activation can RESTART.
+    m_NrdWasActiveLastFrame = false;
+
     // --- Pass 5: Split Resolve ---
     // InputIdx0 = diffuse intermediate, InputIdx1 = specular intermediate,
     // OutputIdx0 = indirect lighting texture
@@ -1638,7 +1645,11 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     commonSettings.denoisingRange = 1000.0f;
     commonSettings.disocclusionThreshold = 0.01f;
     commonSettings.frameIndex = frame.frameIndex;
-    commonSettings.accumulationMode = frame.frameIndex <= 1 ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    // Force RESTART when NRD was inactive on the previous frame (e.g. raster
+    // indirect GI was toggled off then back on).  This resets NRD's internal
+    // m_PrevFrameIndexFromSettings so the +1-per-frame assertion won't fire.
+    const bool needRestart = (frame.frameIndex <= 1) || !m_NrdWasActiveLastFrame;
+    commonSettings.accumulationMode = needRestart ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
     commonSettings.enableValidation = frame.enableNrdValidation != 0;
 
     nrd::RelaxSettings relaxSettings = {};
@@ -1701,6 +1712,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
+    m_NrdWasActiveLastFrame = true;
     return true;
 }
 
