@@ -21,9 +21,11 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     // InputIdx0 = diffuse reservoir (post-spatial)
     // InputIdx1 = specular reservoir (post-spatial)
+    // InputIdx2 = local light reservoir intermediate (post-spatial)
     // OutputIdx0 = indirect lighting texture
     StructuredBuffer<Reservoir> diffuseReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
     StructuredBuffer<Reservoir> specularReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx1];
+    StructuredBuffer<Reservoir> localLightReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx2];
     RWTexture2D<float4> indirectLightingTex = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
     Surface surface;
@@ -58,6 +60,18 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 float3 diffBRDF, specBRDF;
                 EvaluateBSDF(surface.normal, surface.viewDir, L, surface.albedo, surface.metallic, surface.roughness, diffBRDF, specBRDF);
                 indirectLighting += specBRDF * rSpecular.radiance * rSpecular.W * NdotL;
+            }
+        }
+
+        // Additively merge local light specular (Kajiya-style)
+        Reservoir rLocalLight = localLightReservoirs[pixelIndex];
+        if (rLocalLight.W > 0.0f) {
+            float3 L = normalize(rLocalLight.hitPos - surface.worldPos);
+            float NdotL = max(0.0f, dot(surface.normal, L));
+            if (NdotL > 0.0f) {
+                float3 diffBRDF, specBRDF;
+                EvaluateBSDF(surface.normal, surface.viewDir, L, surface.albedo, surface.metallic, surface.roughness, diffBRDF, specBRDF);
+                indirectLighting += specBRDF * rLocalLight.radiance * rLocalLight.W * NdotL;
             }
         }
     }

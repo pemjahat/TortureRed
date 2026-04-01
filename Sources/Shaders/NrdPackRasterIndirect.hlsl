@@ -15,8 +15,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
     uint pixelIndex = screenPos.y * launchDims.x + screenPos.x;
 
     // InputIdx0 = diffuse reservoir (post-spatial), InputIdx1 = specular reservoir (post-spatial)
+    // InputIdx2 = local light reservoir intermediate (post-spatial)
     StructuredBuffer<Reservoir> diffuseReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
     StructuredBuffer<Reservoir> specularReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx1];
+    StructuredBuffer<Reservoir> localLightReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx2];
     RWTexture2D<float4> diffuseOut = ResourceDescriptorHeap[g_Indices.OutputIdx0];
     RWTexture2D<float4> specularOut = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
@@ -84,6 +86,30 @@ void main(uint3 DTid : SV_DispatchThreadID)
             float3 weightedIncomingRadiance = rSpecular.radiance * (rSpecular.W * NdotL);
             specularRadiance = specularBRDF * weightedIncomingRadiance / max(specularFactor, 1e-4f.xxx);
             specularHitT = rSpecular.firstBounceHitT;
+        }
+    }
+
+    // Additively merge local light specular into the specular signal (Kajiya-style)
+    if (FrameCB.enableIndirectSpecular != 0u)
+    {
+        Reservoir rLocalLight = localLightReservoirs[pixelIndex];
+        if (rLocalLight.W > 0.0f && rLocalLight.firstBounceHitT > 0.0f)
+        {
+            float3 L = normalize(rLocalLight.hitPos - surface.worldPos);
+            float NdotL = max(0.0f, dot(surface.normal, L));
+            if (NdotL > 0.0f)
+            {
+                float3 diffuseBRDF, specularBRDF;
+                EvaluateBSDF(surface.normal, surface.viewDir, L, surface.albedo, surface.metallic, surface.roughness, diffuseBRDF, specularBRDF);
+                float3 weightedIncomingRadiance = rLocalLight.radiance * (rLocalLight.W * NdotL);
+                float3 localLightSpecular = specularBRDF * weightedIncomingRadiance / max(specularFactor, 1e-4f.xxx);
+                specularRadiance += localLightSpecular;
+                // Use the closer hit distance for NRD guidance
+                if (specularHitT <= 0.0f)
+                    specularHitT = rLocalLight.firstBounceHitT;
+                else
+                    specularHitT = min(specularHitT, rLocalLight.firstBounceHitT);
+            }
         }
     }
 

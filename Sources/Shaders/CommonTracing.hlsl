@@ -334,7 +334,7 @@ float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float met
     
     float3 diff, spec;
     EvaluateBSDF(N, V, L_light, albedo, metallic, roughness, diff, spec);
-    if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) spec = 0;
+    if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics) || (isDiffuse && frame.enableRasterIndirectGI)) spec = 0;
     
     return (diff + spec) * light.color.rgb * light.intensity * ndotl * attenuation * spotEffect;
 }
@@ -371,7 +371,7 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
                 if (sq.CommittedStatus() == COMMITTED_NOTHING) {
                     float3 d, s;
                     EvaluateBSDF(N, V, L_light, albedo, metallic, roughness, d, s);
-                    if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) s = 0;
+                    if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics) || (isDiffuse && frame.enableRasterIndirectGI)) s = 0;
                     totalLighting += (d + s) * light.color.rgb * light.intensity * ndotl;
                 }
             }
@@ -715,7 +715,7 @@ float3 GetLocalLightDirectLightingRIS(
         {
             float3 d, s;
             EvaluateBSDF(N, V, L, albedo, metallic, roughness, d, s);
-            if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) s = 0;
+            if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics) || (isDiffuse && frame.enableRasterIndirectGI)) s = 0;
             L_winner = (d + s) * winner.color.rgb * winner.intensity * NdotL;
         }
     }

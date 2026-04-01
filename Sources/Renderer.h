@@ -208,6 +208,10 @@ private:
     GPUBuffer m_SpecularReservoirIntermediate;   // Post-spatial specular
     GPUBuffer m_DiffuseCandidateBuffer;          // DiffuseCandidate per pixel (RTDGI → RTR)
 
+    // ------- Local Light Specular ReSTIR buffers (Kajiya-style) -------
+    GPUBuffer m_LocalLightReservoirBuffer[2];    // Ping-pong local light reservoirs
+    GPUBuffer m_LocalLightReservoirIntermediate; // Post-spatial local light
+
     GPUTexture m_RasterIndirectLightingTex;
     GPUTexture m_NrdMotionVectorsTex;
     GPUTexture m_NrdNormalRoughnessTex;
@@ -219,6 +223,7 @@ private:
     GPUTexture m_NrdValidationTex;
     std::unique_ptr<nrd::Integration> m_NrdIntegration;
     bool m_NrdInitialized = false;
+    bool m_NrdWasActiveLastFrame = false;
 
     // ------- spatial ircache PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCachePoolInitPSO;
@@ -237,6 +242,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPrepareGuidesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPackSignalsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;
+
+    // ------- Local Light Specular ReSTIR PSOs (Kajiya-style) -------
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LocalLightSamplePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LocalLightSpatialPSO;
 
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;

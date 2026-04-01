@@ -92,7 +92,7 @@ void Application::Initialize()
     m_FrameConstants.restirReservoirDebugMode = RESTIR_RESERVOIR_DEBUG_OFF;
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log

@@ -175,6 +175,12 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // ------- Local Light Specular ReSTIR buffers (Kajiya-style) -------
+    for (int i = 0; i < 2; ++i) {
+        CreateStructuredBuffer(m_LocalLightReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    CreateStructuredBuffer(m_LocalLightReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
     CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdMotionVectorsTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -250,6 +256,10 @@ void Renderer::CreateRasterIndirectGIPipelines()
     auto specularSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Spatial.hlsl",  "main", "cs_6_6");
     auto splitResolveCS     = GraphicsHelper::CompileShader("Shaders/RestirGI_Split_Resolve.hlsl",     "main", "cs_6_6");
 
+    // ------- Local Light Specular ReSTIR PSOs (Kajiya-style) -------
+    auto localLightSampleCS  = GraphicsHelper::CompileShader("Shaders/LocalLight_Sample.hlsl",        "main", "cs_6_6");
+    auto localLightSpatialCS = GraphicsHelper::CompileShader("Shaders/LocalLight_SpatialReuse.hlsl",  "main", "cs_6_6");
+
     computeDesc.CS = { nrdGuidesCS.data(), nrdGuidesCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPrepareGuidesPSO));
 
@@ -279,6 +289,16 @@ void Renderer::CreateRasterIndirectGIPipelines()
     if (!splitResolveCS.empty()) {
         computeDesc.CS = { splitResolveCS.data(), splitResolveCS.size() };
         m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SplitResolvePSO));
+    }
+
+    // ------- Local Light Specular ReSTIR PSO creation (Kajiya-style) -------
+    if (!localLightSampleCS.empty()) {
+        computeDesc.CS = { localLightSampleCS.data(), localLightSampleCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_LocalLightSamplePSO));
+    }
+    if (!localLightSpatialCS.empty()) {
+        computeDesc.CS = { localLightSpatialCS.data(), localLightSpatialCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_LocalLightSpatialPSO));
     }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
@@ -1286,7 +1306,10 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
 {
     if (!frame.enableRasterIndirectGI)
+    {
+        m_NrdWasActiveLastFrame = false;
         return;
+    }
 
     const bool useCustomRestirHeatmap = frame.restirReservoirDebugMode >= RESTIR_RESERVOIR_DEBUG_SOURCE_PDF;
 
@@ -1530,6 +1553,43 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         m_CommandList->ResourceBarrier(1, &barrier);
     }
 
+    // --- Pass 5: Local Light Sample (Kajiya-style) ---
+    // OutputIdx0 = current local light reservoirs
+    if (frame.numLights > 1 && m_LocalLightSamplePSO)
+    {
+        m_CommandList->SetPipelineState(m_LocalLightSamplePSO.Get());
+        indices.InputIdx0  = UINT(-1);
+        indices.InputIdx1  = UINT(-1);
+        indices.InputIdx2  = UINT(-1);
+        indices.OutputIdx0 = m_LocalLightReservoirBuffer[currentReservoir].uavIndex;
+        indices.OutputIdx1 = UINT(-1);
+        indices.OutputIdx2 = UINT(-1);
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        {
+            D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_LocalLightReservoirBuffer[currentReservoir].resource.Get());
+            m_CommandList->ResourceBarrier(1, &barrier);
+        }
+
+        // --- Pass 6: Local Light Spatial Reuse ---
+        // InputIdx0 = current local light reservoirs, OutputIdx0 = local light intermediate
+        m_CommandList->SetPipelineState(m_LocalLightSpatialPSO.Get());
+        indices.InputIdx0  = m_LocalLightReservoirBuffer[currentReservoir].srvIndex;
+        indices.InputIdx1  = UINT(-1);
+        indices.InputIdx2  = UINT(-1);
+        indices.OutputIdx0 = m_LocalLightReservoirIntermediate.uavIndex;
+        indices.OutputIdx1 = UINT(-1);
+        indices.OutputIdx2 = UINT(-1);
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+
+        {
+            D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_LocalLightReservoirIntermediate.resource.Get());
+            m_CommandList->ResourceBarrier(1, &barrier);
+        }
+    }
+
     const bool useNrd = frame.enableNrdRelax != 0
         && frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF
         && frame.sharcDebug == 0;
@@ -1539,13 +1599,17 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         return;
     }
 
-    // --- Pass 5: Split Resolve ---
+    // NRD path was not taken this frame — record so next activation can RESTART.
+    m_NrdWasActiveLastFrame = false;
+
+    // --- Split Resolve ---
     // InputIdx0 = diffuse intermediate, InputIdx1 = specular intermediate,
-    // OutputIdx0 = indirect lighting texture
+    // InputIdx2 = local light intermediate, OutputIdx0 = indirect lighting texture
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_CommandList->SetPipelineState(m_SplitResolvePSO.Get());
     indices.InputIdx0  = m_DiffuseReservoirIntermediate.srvIndex;
     indices.InputIdx1  = m_SpecularReservoirIntermediate.srvIndex;
+    indices.InputIdx2  = m_LocalLightReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
@@ -1603,6 +1667,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices = {};
     indices.InputIdx0 = m_DiffuseReservoirIntermediate.srvIndex;
     indices.InputIdx1 = m_SpecularReservoirIntermediate.srvIndex;
+    indices.InputIdx2 = m_LocalLightReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
@@ -1638,7 +1703,11 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     commonSettings.denoisingRange = 1000.0f;
     commonSettings.disocclusionThreshold = 0.01f;
     commonSettings.frameIndex = frame.frameIndex;
-    commonSettings.accumulationMode = frame.frameIndex <= 1 ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    // Force RESTART when NRD was inactive on the previous frame (e.g. raster
+    // indirect GI was toggled off then back on).  This resets NRD's internal
+    // m_PrevFrameIndexFromSettings so the +1-per-frame assertion won't fire.
+    const bool needRestart = (frame.frameIndex <= 1) || !m_NrdWasActiveLastFrame;
+    commonSettings.accumulationMode = needRestart ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
     commonSettings.enableValidation = frame.enableNrdValidation != 0;
 
     nrd::RelaxSettings relaxSettings = {};
@@ -1701,6 +1770,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
 
+    m_NrdWasActiveLastFrame = true;
     return true;
 }
 

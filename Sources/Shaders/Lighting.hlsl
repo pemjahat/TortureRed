@@ -89,15 +89,19 @@ float4 PSMain(PSInput input) : SV_Target {
     EvaluateBSDF(N, V, L_main, albedo.rgb, metallic, roughness, diff_main, spec_main);
     float3 totalDirectLighting = (diff_main + spec_main) * mainLight.color.rgb * mainLight.intensity * NdotL_main * shadowFactor;
 
-    // 2. Local Lights (Index 1+) via RTXGI-style RIS: a few candidates, one winner, one shadow ray.
+    // 2. Local Lights (Index 1+)
+    // When raster indirect GI is active, local light specular is handled by the
+    // dedicated LocalLight_Sample → LocalLight_SpatialReuse → NRD pipeline.
+    // The forward RIS path still runs for diffuse-only contribution (isDiffuse = true).
     if (FrameCB.numLights > 1)
     {
         const uint localLightRisCandidates = 4;
+        const bool diffuseOnly = FrameCB.enableRasterIndirectGI;
         totalDirectLighting += GetLocalLightDirectLightingRIS(
             worldPos.xyz, N, V,
             albedo.rgb, metallic, roughness,
             g_Scene, g_Lights, FrameCB.numLights,
-            FrameCB, rng, false, localLightRisCandidates);
+            FrameCB, rng, diffuseOnly, localLightRisCandidates);
     }
 
     float3 ambient = 0.03f * albedo.rgb;
