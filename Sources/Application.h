@@ -62,6 +62,20 @@ private:
     bool m_PathVizJustClicked = false;
     bool m_PathVizEverCaptured = false;
 
+    // Anti-aliasing / post-processing mode (AA_MODE_NONE, AA_MODE_ACCUMULATION, AA_MODE_TAA)
+    int   m_AntiAliasingMode = AA_MODE_TAA;
+    int   m_TaaMode = 0;              // 0 = Naive TSR, 1 = Kajiya TAA (only used when AA_MODE_TAA)
+    float m_TaaUpsamplingFactor = 1.5f;
+    bool  m_TaaResetHistory = false;   // Set true when mode/factor changes
+    uint32_t m_TaaFrameCounter = 0;   // Monotonically increasing counter for TAA jitter sequence
+    bool  m_PendingResolutionChange = false; // Deferred resolution change
+    uint32_t m_PendingInternalWidth = 0;
+    uint32_t m_PendingInternalHeight = 0;
+    uint32_t m_InternalWidth = 0;
+    uint32_t m_InternalHeight = 0;
+    uint32_t m_OutputWidth = WINDOW_WIDTH;
+    uint32_t m_OutputHeight = WINDOW_HEIGHT;
+
     // Prevent copying
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;

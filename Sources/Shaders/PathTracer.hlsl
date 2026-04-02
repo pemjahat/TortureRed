@@ -14,8 +14,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     LightConstants mainLight = g_Lights[0];
 
+    // In TAA mode, frameIndex is always 1 (reset to 0, then incremented).
+    // Use taaFrameCounter for RNG seeding so each frame gets different noise,
+    // allowing TAA to converge over time. In non-TAA modes, frameIndex varies
+    // naturally and provides the per-frame seed variation.
+    uint rngSeed = g_Frame.taaEnabled ? g_Frame.taaFrameCounter : g_Frame.frameIndex;
     RNG rng;
-    seed_rng(rng, launchIndex, g_Frame.frameIndex);
+    seed_rng(rng, launchIndex, rngSeed);
 
     // Accessing texture bindless
     RWTexture2D<float4> accumulationBuffer = ResourceDescriptorHeap[g_Indices.OutputIdx0];

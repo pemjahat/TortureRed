@@ -33,8 +33,10 @@ bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D1
 
     if (createSRV)
     {
-        buffer.srvIndex = GraphicsHelper::AllocateSRV();
-        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GraphicsHelper::GetSRVCPUHandle(buffer.srvIndex);
+        // Reuse existing descriptor slot if available, otherwise allocate a new one
+        if (buffer.srvIndex < 0)
+            buffer.srvIndex = (int)GraphicsHelper::AllocateSRV();
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GraphicsHelper::GetSRVCPUHandle((UINT)buffer.srvIndex);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -50,8 +52,9 @@ bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D1
 
     if (createUAV && (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
     {
-        buffer.uavIndex = GraphicsHelper::AllocateSRV();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GraphicsHelper::GetSRVCPUHandle(buffer.uavIndex);
+        if (buffer.uavIndex < 0)
+            buffer.uavIndex = (int)GraphicsHelper::AllocateSRV();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GraphicsHelper::GetSRVCPUHandle((UINT)buffer.uavIndex);
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
         uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -73,8 +76,10 @@ bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elemen
     if (!CreateBuffer(buffer, size, heapType, initialState, false, false)) return false;
 
     auto& ctx = GraphicsHelper::GetContext();
-    buffer.srvIndex = GraphicsHelper::AllocateSRV();
-    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GraphicsHelper::GetSRVCPUHandle(buffer.srvIndex);
+    // Reuse existing descriptor slot if available, otherwise allocate a new one
+    if (buffer.srvIndex < 0)
+        buffer.srvIndex = (int)GraphicsHelper::AllocateSRV();
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GraphicsHelper::GetSRVCPUHandle((UINT)buffer.srvIndex);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_UNKNOWN;
@@ -89,8 +94,9 @@ bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elemen
 
     if (initialState & D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
     {
-        buffer.uavIndex = GraphicsHelper::AllocateSRV();
-        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GraphicsHelper::GetSRVCPUHandle(buffer.uavIndex);
+        if (buffer.uavIndex < 0)
+            buffer.uavIndex = (int)GraphicsHelper::AllocateSRV();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GraphicsHelper::GetSRVCPUHandle((UINT)buffer.uavIndex);
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
         uavDesc.Format = DXGI_FORMAT_UNKNOWN;
@@ -149,10 +155,11 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
     texture.state = initialState;
     texture.format = format;
 
-    // Create SRV
+    // Create SRV (reuse existing descriptor slot if available)
     if (!(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
     {
-        texture.srvIndex = GraphicsHelper::AllocateSRV();
+        if (texture.srvIndex == UINT(-1))
+            texture.srvIndex = GraphicsHelper::AllocateSRV();
         D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = GraphicsHelper::GetSRVCPUHandle(texture.srvIndex);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -179,10 +186,11 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
         ctx.device->CreateShaderResourceView(texture.resource.Get(), &srvDesc, srvHandle);
     }
 
-    // Create UAV
+    // Create UAV (reuse existing descriptor slot if available)
     if (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
     {
-        texture.uavIndex = GraphicsHelper::AllocateSRV();
+        if (texture.uavIndex == UINT(-1))
+            texture.uavIndex = GraphicsHelper::AllocateSRV();
         D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = GraphicsHelper::GetSRVCPUHandle(texture.uavIndex);
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
@@ -194,15 +202,17 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
         ctx.device->CreateUnorderedAccessView(texture.resource.Get(), nullptr, &uavDesc, uavHandle);
     }
 
-    // Create RTV or DSV
+    // Create RTV or DSV (reuse existing descriptor slot if available)
     if (flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
     {
-        texture.rtvHandle = GraphicsHelper::GetRTVCPUHandle(GraphicsHelper::AllocateRTV());
+        if (texture.rtvHandle.ptr == 0)
+            texture.rtvHandle = GraphicsHelper::GetRTVCPUHandle(GraphicsHelper::AllocateRTV());
         ctx.device->CreateRenderTargetView(texture.resource.Get(), nullptr, texture.rtvHandle);
     }
     else if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
     {
-        texture.dsvHandle = GraphicsHelper::GetDSVCPUHandle(GraphicsHelper::AllocateDSV());
+        if (texture.dsvHandle.ptr == 0)
+            texture.dsvHandle = GraphicsHelper::GetDSVCPUHandle(GraphicsHelper::AllocateDSV());
         
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
         dsvDesc.Format = (format == DXGI_FORMAT_R32_TYPELESS) ? DXGI_FORMAT_D32_FLOAT : format;

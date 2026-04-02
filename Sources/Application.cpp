@@ -134,6 +134,19 @@ void Application::Initialize()
     m_Renderer.CreateRasterIndirectGIResources();
     m_Renderer.CreateRasterIndirectGIPipelines();
 
+    // Initialize TAA / Temporal Super-Resolution
+    // Output is always 1920x1080 (WINDOW_WIDTH x WINDOW_HEIGHT).
+    // Internal resolution is derived from the upsampling factor.
+    m_OutputWidth = WINDOW_WIDTH;
+    m_OutputHeight = WINDOW_HEIGHT;
+    m_InternalWidth = std::max(320u, std::min((uint32_t)(m_OutputWidth / m_TaaUpsamplingFactor), m_OutputWidth));
+    m_InternalHeight = std::max(180u, std::min((uint32_t)(m_OutputHeight / m_TaaUpsamplingFactor), m_OutputHeight));
+
+    // Create all internal-resolution resources (GBuffer, path tracer, NRD, reservoirs, etc.)
+    m_Renderer.CreateInternalResolutionResources(m_InternalWidth, m_InternalHeight);
+    m_Renderer.CreateTaaResources(m_OutputWidth, m_OutputHeight, m_InternalWidth, m_InternalHeight);
+    m_Renderer.CreateTaaPipelines();
+
     m_LastViewMatrix = m_Camera.GetViewMatrix();
     DirectX::XMStoreFloat4x4(&m_LastViewProj, m_Camera.GetViewMatrix() * m_Camera.GetProjMatrix());
     DirectX::XMStoreFloat4x4(&m_LastViewInverse, m_Camera.GetInvViewMatrix());
@@ -284,7 +297,57 @@ void Application::Update(float deltaTime)
     // Compute view-projection matrix
     DirectX::XMMATRIX view = m_Camera.GetViewMatrix();
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
-    m_ViewProj = view * proj;
+
+    // Compute TAA jitter for this frame (only in TAA mode)
+    const bool taaActive = (m_AntiAliasingMode == AA_MODE_TAA);
+    if (taaActive)
+    {
+        // Use a dedicated monotonically-increasing counter for the jitter sequence.
+        // frameIndex is reset to 0 every frame in TAA mode (to prevent PT accumulation),
+        // so it can't be used for jitter — it would freeze the Halton sequence.
+        m_TaaFrameCounter++;
+        uint32_t N = (uint32_t)std::max(8.0f, std::ceil(m_TaaUpsamplingFactor * m_TaaUpsamplingFactor));
+        uint32_t jitterIdx = m_TaaFrameCounter % N;
+
+        // Halton base-2
+        float haltonX = 0.0f;
+        {
+            float f = 0.5f;
+            uint32_t i = jitterIdx + 1;
+            while (i > 0) { haltonX += f * (i % 2); i /= 2; f *= 0.5f; }
+        }
+        // Halton base-3
+        float haltonY = 0.0f;
+        {
+            float f = 1.0f / 3.0f;
+            uint32_t i = jitterIdx + 1;
+            while (i > 0) { haltonY += f * (i % 3); i /= 3; f /= 3.0f; }
+        }
+
+        // Center around 0: range [-0.5, 0.5] in pixel units of internal resolution
+        m_FrameConstants.taaJitter = { haltonX - 0.5f, haltonY - 0.5f };
+    }
+    else
+    {
+        m_FrameConstants.taaJitter = { 0.0f, 0.0f };
+    }
+
+    // Apply TAA jitter to projection matrix (only in TAA mode)
+    DirectX::XMMATRIX jitteredProj = proj;
+    if (taaActive)
+    {
+        // Offset in clip space: (2 * jitter.x / internalWidth, -2 * jitter.y / internalHeight)
+        float jitterX = 2.0f * m_FrameConstants.taaJitter.x / (float)m_InternalWidth;
+        float jitterY = -2.0f * m_FrameConstants.taaJitter.y / (float)m_InternalHeight;
+        // Add jitter to projection matrix elements [2][0] and [2][1] (row-major)
+        DirectX::XMFLOAT4X4 projF;
+        DirectX::XMStoreFloat4x4(&projF, proj);
+        projF._31 += jitterX;
+        projF._32 += jitterY;
+        jitteredProj = DirectX::XMLoadFloat4x4(&projF);
+    }
+
+    m_ViewProj = view * jitteredProj;
 
     // Reset frame index if camera moved or rotated (checked against previous frame's view matrix)
     bool cameraMoved = false;
@@ -298,8 +361,31 @@ void Application::Update(float deltaTime)
         }
     }
 
-    if (cameraMoved && m_UsePathTracer) {
+    // Frame index reset logic driven by anti-aliasing mode:
+    //  - No AA:         Reset every frame (single sample, no accumulation)
+    //  - Accumulation:  Reset only on camera movement (progressive convergence)
+    //  - TAA:           Reset every frame (TAA handles temporal accumulation;
+    //                   letting the path tracer also accumulate conflicts with jitter)
+    //
+    // In TAA mode, frameIndex is forced to 0 so the path tracer outputs a fresh
+    // single sample each frame (no progressive accumulation). However, the RNG
+    // seed must still vary per frame so TAA sees different noise to converge.
+    // We use taaFrameCounter for that — see PathTracer.hlsl.
+    if (m_AntiAliasingMode == AA_MODE_NONE && m_UsePathTracer) {
         m_FrameConstants.frameIndex = 0;
+    }
+    else if (m_AntiAliasingMode == AA_MODE_ACCUMULATION && cameraMoved && m_UsePathTracer) {
+        m_FrameConstants.frameIndex = 0;
+    }
+    else if (m_AntiAliasingMode == AA_MODE_TAA && m_UsePathTracer) {
+        m_FrameConstants.frameIndex = 0;
+    }
+
+    // Handle TAA history reset (mode/factor changed)
+    if (m_TaaResetHistory)
+    {
+        m_FrameConstants.frameIndex = 0;
+        m_TaaResetHistory = false;
     }
 
     // Save view matrix for next frame's comparison
@@ -312,10 +398,17 @@ void Application::Update(float deltaTime)
 
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProj, m_ViewProj);
     DirectX::XMStoreFloat4x4(&m_FrameConstants.viewInverse, m_Camera.GetInvViewMatrix());
-    DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverse, DirectX::XMMatrixInverse(nullptr, proj));
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverse, DirectX::XMMatrixInverse(nullptr, jitteredProj));
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.projectionInverseUnjittered, DirectX::XMMatrixInverse(nullptr, proj));
     m_FrameConstants.cameraPosition = { m_Camera.GetPosition().x, m_Camera.GetPosition().y, m_Camera.GetPosition().z, 1.0f };
-    
-    m_LastViewProj = m_FrameConstants.viewProj;
+
+    // Store the *unjittered* viewProj as the previous-frame matrix for motion vectors.
+    // Motion vectors should encode pure camera motion, not jitter differences.
+    // The TAA resolve pass handles jitter compensation separately via its unjitter logic.
+    DirectX::XMMATRIX unjitteredViewProj = view * proj;
+    DirectX::XMFLOAT4X4 unjitteredVP;
+    DirectX::XMStoreFloat4x4(&unjitteredVP, unjitteredViewProj);
+    m_LastViewProj = unjitteredVP;
     m_LastViewInverse = m_FrameConstants.viewInverse;
     m_LastCameraPos = m_FrameConstants.cameraPosition;
 
@@ -330,8 +423,19 @@ void Application::Update(float deltaTime)
     m_FrameConstants.exposure = m_Exposure;
     m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
     m_FrameConstants.lightLUTBufferIndex = m_Renderer.GetLightLUTDescriptorIndex();
-    m_FrameConstants.screenWidth = (uint32_t)WINDOW_WIDTH;
-    m_FrameConstants.screenHeight = (uint32_t)WINDOW_HEIGHT;
+    m_FrameConstants.screenWidth = m_InternalWidth;
+    m_FrameConstants.screenHeight = m_InternalHeight;
+
+    // TAA / Temporal Super-Resolution
+    m_FrameConstants.taaMode = (uint32_t)m_TaaMode;
+    m_FrameConstants.taaEnabled = taaActive ? 1u : 0u;
+    m_FrameConstants.internalWidth = m_InternalWidth;
+    m_FrameConstants.internalHeight = m_InternalHeight;
+    m_FrameConstants.taaUpsamplingFactor = m_TaaUpsamplingFactor;
+    m_FrameConstants.outputWidth = m_OutputWidth;
+    m_FrameConstants.outputHeight = m_OutputHeight;
+    m_FrameConstants.taaHistoryIndex = 0; // Will be set by renderer
+    m_FrameConstants.taaFrameCounter = m_TaaFrameCounter;
 
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
@@ -364,13 +468,30 @@ void Application::Render()
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
+    // Apply deferred resolution change (must happen after BeginFrame but before any rendering)
+    if (m_PendingResolutionChange)
+    {
+        m_PendingResolutionChange = false;
+        m_InternalWidth = m_PendingInternalWidth;
+        m_InternalHeight = m_PendingInternalHeight;
+        m_Renderer.CreateInternalResolutionResources(m_InternalWidth, m_InternalHeight);
+        m_Renderer.CreateTaaResources(m_OutputWidth, m_OutputHeight, m_InternalWidth, m_InternalHeight);
+
+        // Update frame constants with new internal resolution
+        m_FrameConstants.screenWidth = m_InternalWidth;
+        m_FrameConstants.screenHeight = m_InternalHeight;
+        m_FrameConstants.internalWidth = m_InternalWidth;
+        m_FrameConstants.internalHeight = m_InternalHeight;
+        m_Renderer.UpdateFrameCB(m_FrameConstants);
+    }
+
     auto cmdList = m_Renderer.GetCommandList();
     auto& gbuffer = m_Renderer.GetGBuffer();
     const bool usePathTracingFrame = m_UsePathTracer && m_Renderer.IsRayTracingSupported();
 
-    // Reset viewport and scissor for main pass
-    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
-    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    // Reset viewport and scissor for main pass (internal resolution for rendering)
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_InternalWidth), static_cast<float>(m_InternalHeight));
+    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, m_InternalWidth, m_InternalHeight);
     cmdList->RSSetViewports(1, &viewport);
     cmdList->RSSetScissorRects(1, &scissorRect);
 
@@ -380,7 +501,7 @@ void Application::Render()
 
     // Compute frustum for culling
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();
-    DirectX::BoundingFrustum frustum(proj, true);
+    DirectX::BoundingFrustum frustum(proj, true); 
 
     // Transform frustum to world space (inverse view matrix)
     DirectX::XMMATRIX invView = m_Camera.GetInvViewMatrix();
@@ -394,7 +515,19 @@ void Application::Render()
         GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
-        m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+
+        if (m_AntiAliasingMode == AA_MODE_TAA && m_Renderer.IsTaaEnabled())
+        {
+            // Generate motion vectors from depth + viewProj matrices
+            m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            // Run TAA on the HDR path tracer output, then copy TAA output to back buffer
+            m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetPathTracerHdrOutput());
+            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+        }
+        else
+        {
+            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+        }
 
         // Draw path visualization lines on top of the PT output (non-RTXDI ReSTIR only)
         if (m_PathVizEverCaptured && m_FrameConstants.enableRestir && !m_FrameConstants.useRTXDI)
@@ -453,7 +586,11 @@ void Application::Render()
         // 2.5 Rasterizer Indirect GI Passes
         m_Renderer.DispatchRasterIndirectGI(&m_Model, m_FrameConstants);
 
+        const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
+
         // 3. Lighting Pass
+        // When TAA is active: render to internal-res HDR texture (no tonemapping).
+        // When TAA is off:    render directly to output-res back buffer (with tonemapping).
         {
             BindlessIndices indices = {};
 
@@ -468,9 +605,6 @@ void Application::Render()
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
 
-            // Transition backbuffer to RTV
-            m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
-
             // Need this binding for shadow ray in pixel shader
             cmdList->SetGraphicsRootShaderResourceView(1, m_Model.GetMaterialBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
@@ -483,15 +617,55 @@ void Application::Render()
             }
             cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-            cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+            if (rasterTaaActive)
+            {
+                // Render to internal-res HDR texture for TAA input
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-            const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
-            cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
+                cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, nullptr);
 
-            cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
+                const float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                cmdList->ClearRenderTargetView(hdrRtvHandle, clearColor, 0, nullptr);
+
+                // Keep viewport at internal resolution (already set above)
+                // Use HDR lighting PSO (debug shadow map doesn't support HDR, skip TAA for it)
+                cmdList->SetPipelineState(m_Renderer.GetLightingHdrPSO());
+            }
+            else
+            {
+                // Switch to output resolution viewport for direct-to-backbuffer rendering
+                D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+                D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+                cmdList->RSSetViewports(1, &outputViewport);
+                cmdList->RSSetScissorRects(1, &outputScissor);
+
+                // Transition backbuffer to RTV
+                m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+                cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+                const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
+                cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+                cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
+            }
 
             cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
+        }
+
+        // 3.5 TAA post-processing for rasterizer path
+        if (rasterTaaActive)
+        {
+            // Generate motion vectors from depth + viewProj matrices
+            m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            // Run TAA on the HDR rasterizer output, then copy TAA output to back buffer
+            m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
+            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+
+            // Setup RTV for transparency pass on top of TAA output
+            m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
 
         // 4. Transparency Pass (Forward)
@@ -501,6 +675,12 @@ void Application::Render()
 
             // Ensure depth is in read state for forward pass
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+
+            // Set output resolution viewport for transparency (always renders to back buffer)
+            D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+            D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+            cmdList->RSSetViewports(1, &outputViewport);
+            cmdList->RSSetScissorRects(1, &outputScissor);
 
             cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
@@ -513,9 +693,23 @@ void Application::Render()
     }
 
 
+    // Prepare back buffer for ImGui rendering at full output resolution.
+    // Rebind the back-buffer RTV *without* a DSV so that the stale G-buffer
+    // depth (which is at internal resolution) does not clip ImGui draws.
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+        cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+        D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+        D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+        cmdList->RSSetViewports(1, &outputViewport);
+        cmdList->RSSetScissorRects(1, &outputScissor);
+    }
+
     // Start the Dear ImGui frame
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+
     ImGui::NewFrame();
 
     // Render ImGui UI
@@ -710,6 +904,86 @@ void Application::RenderImGui()
         {
             ImGui::EndDisabled();
             ImGui::TextDisabled("Enable ReSTIR path tracing or Raster Indirect GI to view reservoir fields.");
+        }
+    }
+
+    // Anti-Aliasing / Post-Processing mode
+    ImGui::SeparatorText("Anti-Aliasing");
+    {
+        const char* aaModes[] = { "No AA", "Accumulation", "TAAU" };
+        if (ImGui::Combo("AA Mode", &m_AntiAliasingMode, aaModes, IM_ARRAYSIZE(aaModes)))
+        {
+            m_TaaResetHistory = true;
+            m_FrameConstants.frameIndex = 0;
+        }
+        if (ImGui::IsItemHovered())
+        {
+            const char* tooltips[] = {
+                "No anti-aliasing. Single sample per pixel, no accumulation.",
+                "Progressive accumulation. Path tracer converges over time when camera is still.",
+                "Temporal Anti-Aliasing Upsample with sub-pixel jitter. TAA handles temporal accumulation."
+            };
+            ImGui::SetTooltip("%s", tooltips[m_AntiAliasingMode]);
+        }
+
+        // TAA-specific options (only enabled when AA mode is TAA)
+        const bool isTaaMode = (m_AntiAliasingMode == AA_MODE_TAA);
+        if (!isTaaMode)
+            ImGui::BeginDisabled();
+
+        const char* taaModes[] = { "Naive TSR (2-pass, default)", "Kajiya TAA (7-pass, high quality)" };
+        if (ImGui::Combo("TAA Mode", &m_TaaMode, taaModes, IM_ARRAYSIZE(taaModes)))
+        {
+            m_TaaResetHistory = true;
+        }
+
+        float prevFactor = m_TaaUpsamplingFactor;
+        if (ImGui::SliderFloat("Upsampling Factor", &m_TaaUpsamplingFactor, 1.0f, 4.0f, "%.1f"))
+        {
+            // Defer resource recreation to the start of the next frame
+            // to avoid destroying GPU resources mid-frame (causes ImGui crash)
+            uint32_t newW = std::max(320u, std::min((uint32_t)(m_OutputWidth / m_TaaUpsamplingFactor), m_OutputWidth));
+            uint32_t newH = std::max(180u, std::min((uint32_t)(m_OutputHeight / m_TaaUpsamplingFactor), m_OutputHeight));
+            if (newW != m_InternalWidth || newH != m_InternalHeight)
+            {
+                m_PendingResolutionChange = true;
+                m_PendingInternalWidth = newW;
+                m_PendingInternalHeight = newH;
+            }
+            m_TaaResetHistory = true;
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Internal render resolution: %ux%u (factor %.1fx)",
+                m_InternalWidth, m_InternalHeight, m_TaaUpsamplingFactor);
+        }
+
+        ImGui::Text("Internal: %ux%u -> Output: %ux%u [%s]",
+            m_InternalWidth, m_InternalHeight,
+            m_OutputWidth, m_OutputHeight,
+            taaModes[m_TaaMode]);
+
+        if (!isTaaMode)
+            ImGui::EndDisabled();
+
+        // Debug info (collapsible, always available)
+        if (ImGui::TreeNode("AA Debug"))
+        {
+            ImGui::Text("Mode: %s", aaModes[m_AntiAliasingMode]);
+            ImGui::Text("Jitter: (%.4f, %.4f) px", m_FrameConstants.taaJitter.x, m_FrameConstants.taaJitter.y);
+            if (isTaaMode)
+            {
+                uint32_t N = (uint32_t)std::max(8.0f, std::ceil(m_TaaUpsamplingFactor * m_TaaUpsamplingFactor));
+                ImGui::Text("Halton sequence length: %u", N);
+                ImGui::Text("TAA history index: %d", m_Renderer.IsTaaEnabled() ? 1 : 0);
+            }
+            ImGui::Text("Frame index: %u", m_FrameConstants.frameIndex);
+            const char* accumState = "N/A";
+            if (m_AntiAliasingMode == AA_MODE_NONE)          accumState = "DISABLED (No AA)";
+            else if (m_AntiAliasingMode == AA_MODE_ACCUMULATION) accumState = "ENABLED (converging)";
+            else if (m_AntiAliasingMode == AA_MODE_TAA)      accumState = "DISABLED (TAA active)";
+            ImGui::Text("PT accumulation: %s", accumState);
+            ImGui::TreePop();
         }
     }
 

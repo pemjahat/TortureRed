@@ -11,8 +11,8 @@ struct GLTFVertex;
 struct GLTFPrimitive;
 namespace nrd { struct Integration; }
 
-const int WINDOW_WIDTH = 1280;
-const int WINDOW_HEIGHT = 720;
+const int WINDOW_WIDTH = 1920;
+const int WINDOW_HEIGHT = 1080;
 
 class Renderer
 {
@@ -42,8 +42,22 @@ public:
     void CreateRasterIndirectGIResources();
     void CreateRasterIndirectGIPipelines();
 
+    // TAA / Temporal Super-Resolution
+    void CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH);
+    void CreateTaaPipelines();
+    void DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& inputColor);
+    void GenerateMotionVectors(const FrameConstants& frame);
+    GPUTexture& GetTaaOutputTex() { return m_TaaOutputTex; }
+    GPUTexture& GetNrdMotionVectorsTex() { return m_NrdMotionVectorsTex; }
+    bool IsTaaEnabled() const { return m_TaaEnabled; }
+
+    // Internal resolution resource management
+    void CreateInternalResolutionResources(uint32_t w, uint32_t h);
+    uint32_t GetInternalWidth() const { return m_InternalWidth; }
+    uint32_t GetInternalHeight() const { return m_InternalHeight; }
+
     // GBuffer management
-    void CreateGBuffer();
+    void CreateGBuffer(uint32_t w, uint32_t h);
 
     // Shader compilation
 
@@ -88,6 +102,8 @@ public:
     GPUTexture& GetPathTracerOutput() { return m_PathTracerPresentOutput; }
     GPUTexture& GetPathTracerHdrOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
+    GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
+    ID3D12PipelineState* GetLightingHdrPSO() const { return m_LightingHdrPSO.Get(); }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
     const IrCacheBindlessIndices& GetIrCacheBindlessIndices() const { return m_IrCacheIndices; }
     void DrawProbeSpheresDebug();
@@ -209,6 +225,7 @@ private:
     GPUBuffer m_DiffuseCandidateBuffer;          // DiffuseCandidate per pixel (RTDGI → RTR)
 
     GPUTexture m_RasterIndirectLightingTex;
+    GPUTexture m_RasterHdrOutputTex;          // Internal-res HDR output for rasterizer TAA
     GPUTexture m_NrdMotionVectorsTex;
     GPUTexture m_NrdNormalRoughnessTex;
     GPUTexture m_NrdViewZTex;
@@ -238,6 +255,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPrepareGuidesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPackSignalsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
 
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;
@@ -247,6 +265,21 @@ private:
     // ------- Path Visualization -------
     GPUBuffer m_PathVizLineBuffer;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PathVizLinePSO;
+
+    // ------- Internal resolution tracking -------
+    uint32_t m_InternalWidth = WINDOW_WIDTH;
+    uint32_t m_InternalHeight = WINDOW_HEIGHT;
+
+    // ------- TAA / Temporal Super-Resolution -------
+    bool m_TaaEnabled = false;
+    int  m_TaaHistoryIndex = 0; // Ping-pong index (0 or 1)
+    GPUTexture m_TaaHistoryTex[2];           // Output-res: rgb + coverage
+    GPUTexture m_TaaReprojectedHistoryTex;   // Output-res: reprojected history
+    GPUTexture m_TaaClosestVelocityTex;      // Output-res: dilated closest velocity
+    GPUTexture m_TaaOutputTex;               // Output-res: final TAA output
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NaiveTsrReprojectPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NaiveTsrResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MotionVectorsPSO;
 
     // GBuffer resources
     GBuffer m_GBuffer;

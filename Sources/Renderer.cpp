@@ -87,8 +87,8 @@ bool Renderer::InitializeNrd()
 
     nrd::IntegrationCreationDesc integrationDesc = {};
     strcpy_s(integrationDesc.name, "TortureRedNRD");
-    integrationDesc.resourceWidth = static_cast<uint16_t>(WINDOW_WIDTH);
-    integrationDesc.resourceHeight = static_cast<uint16_t>(WINDOW_HEIGHT);
+    integrationDesc.resourceWidth = static_cast<uint16_t>(m_InternalWidth);
+    integrationDesc.resourceHeight = static_cast<uint16_t>(m_InternalHeight);
     integrationDesc.queuedFrameNum = 1;
     integrationDesc.enableWholeLifetimeDescriptorCaching = false;
     integrationDesc.autoWaitForIdle = true;
@@ -169,22 +169,22 @@ void Renderer::CreateRasterIndirectGIResources()
 
     // ------- Split Diffuse / Specular ReSTIR buffers -------
     for (int i = 0; i < 2; ++i) {
-        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
-    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
-    CreateTexture(m_RasterIndirectLightingTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdMotionVectorsTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNormalRoughnessTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdViewZTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisyDiffuseTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisySpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdDenoisedDiffuseTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdDenoisedSpecularTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdValidationTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_RasterIndirectLightingTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdMotionVectorsTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNormalRoughnessTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdViewZTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisyDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisySpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdValidationTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     InitializeNrd();
 }
@@ -410,6 +410,9 @@ void Renderer::CheckAndReloadShaders()
     // and calls SetupShaderTimestamps() at the end to refresh the timestamp map.
     CreateRasterIndirectGIPipelines();
 
+    // Rebuild TAA PSOs
+    CreateTaaPipelines();
+
     std::cout << "[HotReload] Done." << std::endl;
 }
 
@@ -496,8 +499,9 @@ bool Renderer::Initialize(HWND hwnd)
         return false;
     }
 
-    // Create GBuffer
-    CreateGBuffer();
+    // Create GBuffer — initially at WINDOW_WIDTH x WINDOW_HEIGHT.
+    // Will be recreated at internal resolution by CreateInternalResolutionResources().
+    CreateGBuffer(WINDOW_WIDTH, WINDOW_HEIGHT);
 
     // Create Shadow Map
     const UINT shadowMapSize = 2048;
@@ -534,7 +538,8 @@ bool Renderer::Initialize(HWND hwnd)
             return false;
         }
 
-        // Create ReSTIR Reservoirs
+        // Create ReSTIR Reservoirs — initially at WINDOW_WIDTH x WINDOW_HEIGHT.
+        // Will be recreated at internal resolution by CreateInternalResolutionResources().
         for (int i = 0; i < 2; ++i)
         {
             if (!CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
@@ -559,8 +564,8 @@ bool Renderer::Initialize(HWND hwnd)
 
         // Create RTXDI Reservoirs
         // See RtxdiUtils.cpp: CalculateReservoirBufferParameters
-        uint32_t renderWidthBlocks = (WINDOW_WIDTH + 15) / 16;
-        uint32_t renderHeightBlocks = (WINDOW_HEIGHT + 15) / 16;
+        uint32_t renderWidthBlocks = (m_InternalWidth + 15) / 16;
+        uint32_t renderHeightBlocks = (m_InternalHeight + 15) / 16;
         uint32_t reservoirArrayPitch = renderWidthBlocks * 256 * renderHeightBlocks;
 
         for (int i = 0; i < 2; ++i)
@@ -704,8 +709,8 @@ void Renderer::BeginFrame()
     m_CommandList->SetGraphicsRootShaderResourceView(10, m_LightsBuffer.gpuAddress);
     m_CommandList->SetGraphicsRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress); // Light LUT (t1, space2)
 
-    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(WINDOW_WIDTH), static_cast<float>(WINDOW_HEIGHT));
-    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_InternalWidth), static_cast<float>(m_InternalHeight));
+    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, m_InternalWidth, m_InternalHeight);
     m_CommandList->RSSetViewports(1, &viewport);
     m_CommandList->RSSetScissorRects(1, &scissorRect);
 
@@ -890,7 +895,7 @@ void Renderer::CreatePipelineState()
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferWritePSO));
     }
 
-    // 3. Lighting PSO
+    // 3. Lighting PSO (LDR — renders to R8G8B8A8_UNORM back buffer with tonemapping)
     {
         std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
         std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
@@ -902,6 +907,20 @@ void Renderer::CreatePipelineState()
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingPSO));
+    }
+
+    // 3.1 Lighting HDR PSO (renders to R16G16B16A16_FLOAT for TAA input — no tonemapping in shader)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingHdrPSO));
     }
 
     // 3.5 Debug PSO
@@ -1165,7 +1184,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
         m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier1);
@@ -1174,7 +1193,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
         m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
@@ -1185,7 +1204,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RtxdiRestirReservoirDebugPSO)
         {
@@ -1196,7 +1215,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
             m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
             m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-            m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
         }
     }
     else if (frame.enableRestir)
@@ -1209,7 +1228,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barriers1[2] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get()),
@@ -1224,7 +1243,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
@@ -1235,7 +1254,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
         {
@@ -1252,7 +1271,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
             indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
             m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-            m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
         }
     }
     else
@@ -1262,7 +1281,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
@@ -1276,7 +1295,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         indices.InputIdx0 = m_PathTracerOutput.srvIndex;
         indices.OutputIdx0 = m_PathTracerPresentOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     // Transition for blitting/Imgui
@@ -1436,8 +1455,8 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     // full-resolution pixel inside a 5x5 tile, giving 25x fewer deposits per frame
     // while maintaining whole-screen coverage over time.
     static constexpr UINT SHARC_UPDATE_DOWNSCALE = 5;
-    const UINT sharcUpdateW = (WINDOW_WIDTH  + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
-    const UINT sharcUpdateH = (WINDOW_HEIGHT + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
+    const UINT sharcUpdateW = (m_InternalWidth  + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
+    const UINT sharcUpdateH = (m_InternalHeight + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
     m_CommandList->SetPipelineState(m_SharcUpdatePSO.Get());
     m_CommandList->Dispatch((sharcUpdateW + 7) / 8, (sharcUpdateH + 7) / 8, 1);
 
@@ -1476,7 +1495,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
     indices.OutputIdx2 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -1496,7 +1515,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirBuffer[currentReservoir].resource.Get());
@@ -1512,7 +1531,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseReservoirIntermediate.resource.Get());
@@ -1527,7 +1546,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirIntermediate.resource.Get());
@@ -1557,7 +1576,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
     // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).
@@ -1570,7 +1589,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
         indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
         // b2 (slot 13) still holds m_SharcIndices from the SHaRC update/resolve above
-        m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
@@ -1597,7 +1616,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices.OutputIdx1 = m_NrdNormalRoughnessTex.uavIndex;
     indices.OutputIdx2 = m_NrdViewZTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER guideBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdMotionVectorsTex.resource.Get()),
@@ -1613,7 +1632,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER noisyBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisyDiffuseTex.resource.Get()),
@@ -1710,7 +1729,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices.InputIdx2 = frame.enableNrdValidation != 0 ? m_NrdValidationTex.srvIndex : UINT(-1);
     indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((WINDOW_WIDTH + 7) / 8, (WINDOW_HEIGHT + 7) / 8, 1);
+m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     m_NrdWasActiveLastFrame = true;
     return true;
@@ -1727,7 +1746,7 @@ void Renderer::DrawPathVizLines(const FrameConstants& frame)
     m_CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT);
-    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, (LONG)WINDOW_WIDTH, (LONG)WINDOW_HEIGHT);
     m_CommandList->RSSetViewports(1, &viewport);
     m_CommandList->RSSetScissorRects(1, &scissorRect);
 
@@ -1753,7 +1772,37 @@ void Renderer::CopyTextureToBackBuffer(const GPUTexture& texture)
     // Transition backbuffer to COPY_DEST
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_COPY_DEST);
 
-    m_CommandList->CopyResource(m_RenderTargets[m_FrameIndex].Get(), texture.resource.Get());
+    // Check if source and destination have the same dimensions
+    D3D12_RESOURCE_DESC srcDesc = texture.resource->GetDesc();
+    D3D12_RESOURCE_DESC dstDesc = m_RenderTargets[m_FrameIndex]->GetDesc();
+
+    if (srcDesc.Width == dstDesc.Width && srcDesc.Height == dstDesc.Height)
+    {
+        m_CommandList->CopyResource(m_RenderTargets[m_FrameIndex].Get(), texture.resource.Get());
+    }
+    else
+    {
+        // Copy the smaller region (internal resolution) to the top-left of the back buffer
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = m_RenderTargets[m_FrameIndex].Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = texture.resource.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        D3D12_BOX srcBox = {};
+        srcBox.left = 0;
+        srcBox.top = 0;
+        srcBox.front = 0;
+        srcBox.right = (UINT)std::min(srcDesc.Width, dstDesc.Width);
+        srcBox.bottom = std::min(srcDesc.Height, dstDesc.Height);
+        srcBox.back = 1;
+
+        m_CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, &srcBox);
+    }
 
     // Transition backbuffer to RTV for ImGui
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -2032,13 +2081,13 @@ void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
     memcpy(m_LightLUTBuffer.cpuPtr, lut.data(), LIGHT_LUT_RESOLUTION * sizeof(uint32_t));
 }
 
-void Renderer::CreateGBuffer()
+void Renderer::CreateGBuffer(uint32_t w, uint32_t h)
 {
     float blackClear[] = { 0, 0, 0, 0 };
-    CreateTexture(m_GBuffer.albedo, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.normal, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.material, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.depth, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    CreateTexture(m_GBuffer.albedo, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
+    CreateTexture(m_GBuffer.normal, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
+    CreateTexture(m_GBuffer.material, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
+    CreateTexture(m_GBuffer.depth, w, h, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 }
 
 std::vector<char> Renderer::LoadShader(const std::string& filename)
@@ -2114,4 +2163,273 @@ void Renderer::WaitForPreviousFrame()
 void Renderer::TransitionBackBuffer(D3D12_RESOURCE_STATES newState)
 {
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RenderTargets[m_FrameIndex].Get(), m_BackBufferStates[m_FrameIndex], newState);
+}
+
+// =============================================================================
+// Internal Resolution Resource Management
+// =============================================================================
+
+void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
+{
+    // GPU-idle before releasing and reallocating resources
+    WaitForPreviousFrame();
+
+    m_InternalWidth = w;
+    m_InternalHeight = h;
+
+    std::cout << "Recreating internal-resolution resources at " << w << "x" << h << std::endl;
+
+    // ---- GBuffer ----
+    CreateGBuffer(w, h);
+
+    // ---- Path Tracer Output Textures ----
+    if (m_RayTracingSupported)
+    {
+        CreateTexture(m_AccumulationBuffer, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+        CreateTexture(m_PathTracerOutput, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+        CreateTexture(m_PathTracerPresentOutput, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+        CreateTexture(m_RestirDebugHeatmap, w, h, DXGI_FORMAT_R16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+
+        // ReSTIR-DI Reservoirs
+        for (int i = 0; i < 2; ++i)
+            CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), w * h,
+                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_ReservoirIntermediate, sizeof(Reservoir), w * h,
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // RTXDI Reservoirs
+        uint32_t renderWidthBlocks = (w + 15) / 16;
+        uint32_t renderHeightBlocks = (h + 15) / 16;
+        uint32_t reservoirArrayPitch = renderWidthBlocks * 256 * renderHeightBlocks;
+        for (int i = 0; i < 2; ++i)
+            CreateStructuredBuffer(m_RtxdiReservoirBuffer[i], sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch,
+                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_RtxdiReservoirIntermediate, sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch,
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    // ---- Split Diffuse / Specular ReSTIR buffers ----
+    for (int i = 0; i < 2; ++i) {
+        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), w * h,
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), w * h,
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), w * h,
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), w * h,
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), w * h,
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // ---- Raster Indirect Lighting + NRD Textures ----
+    CreateTexture(m_RasterIndirectLightingTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // HDR render target for rasterizer lighting when TAA is active
+    CreateTexture(m_RasterHdrOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    CreateTexture(m_NrdMotionVectorsTex, w, h, DXGI_FORMAT_R16G16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNormalRoughnessTex, w, h, DXGI_FORMAT_R10G10B10A2_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdViewZTex, w, h, DXGI_FORMAT_R16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisyDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdNoisySpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdDenoisedSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdValidationTex, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // ---- Re-initialize NRD at new resolution ----
+    if (m_NrdInitialized)
+    {
+        ShutdownNrd();
+        InitializeNrd();
+    }
+
+    std::cout << "Internal-resolution resources recreated: " << w << "x" << h << std::endl;
+}
+
+// =============================================================================
+// TAA / Temporal Super-Resolution
+// =============================================================================
+
+void Renderer::CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH)
+{
+    // Output-resolution textures (shared by both modes)
+    for (int i = 0; i < 2; ++i)
+    {
+        CreateTexture(m_TaaHistoryTex[i], outputW, outputH,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    CreateTexture(m_TaaReprojectedHistoryTex, outputW, outputH,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    CreateTexture(m_TaaClosestVelocityTex, outputW, outputH,
+        DXGI_FORMAT_R16G16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    CreateTexture(m_TaaOutputTex, outputW, outputH,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    m_TaaEnabled = true;
+    m_TaaHistoryIndex = 0;
+
+    std::cout << "TAA resources created: output=" << outputW << "x" << outputH
+              << " internal=" << internalW << "x" << internalH << std::endl;
+}
+
+void Renderer::CreateTaaPipelines()
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+    computeDesc.pRootSignature = m_RootSignature.Get();
+
+    // Naive TSR PSOs
+    auto reprojectCS = GraphicsHelper::CompileShader("Shaders/NaiveTsr_Reproject.hlsl", "main", "cs_6_6");
+    if (!reprojectCS.empty())
+    {
+        computeDesc.CS = { reprojectCS.data(), reprojectCS.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NaiveTsrReprojectPSO)),
+            "Failed to create NaiveTsr Reproject PSO");
+    }
+
+    auto resolveCS = GraphicsHelper::CompileShader("Shaders/NaiveTsr_Resolve.hlsl", "main", "cs_6_6");
+    if (!resolveCS.empty())
+    {
+        computeDesc.CS = { resolveCS.data(), resolveCS.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NaiveTsrResolvePSO)),
+            "Failed to create NaiveTsr Resolve PSO");
+    }
+
+    // Motion vector generation PSO
+    auto motionVecCS = GraphicsHelper::CompileShader("Shaders/MotionVectors.hlsl", "main", "cs_6_6");
+    if (!motionVecCS.empty())
+    {
+        computeDesc.CS = { motionVecCS.data(), motionVecCS.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_MotionVectorsPSO)),
+            "Failed to create Motion Vectors PSO");
+    }
+
+    std::cout << "TAA pipelines created" << std::endl;
+}
+
+void Renderer::GenerateMotionVectors(const FrameConstants& frame)
+{
+    if (!m_MotionVectorsPSO) return;
+
+    // Transition depth to SRV, motion vectors to UAV
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+    m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+    BindlessIndices indices = {};
+    indices.OutputIdx0 = m_NrdMotionVectorsTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+
+    m_CommandList->SetPipelineState(m_MotionVectorsPSO.Get());
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_NrdMotionVectorsTex.resource.Get());
+    m_CommandList->ResourceBarrier(1, &barrier);
+}
+
+void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& inputColor)
+{
+    if (!m_NaiveTsrReprojectPSO || !m_NaiveTsrResolvePSO) return;
+
+    const uint32_t outputW = frame.outputWidth;
+    const uint32_t outputH = frame.outputHeight;
+
+    int currentHistory = m_TaaHistoryIndex;
+    int previousHistory = 1 - currentHistory;
+
+    // ---- Pass 1: Reproject History ----
+    {
+        // Transition inputs to SRV
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaHistoryTex[previousHistory], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // Transition outputs to UAV
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaReprojectedHistoryTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaClosestVelocityTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+        m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+        m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+        m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+        BindlessIndices indices = {};
+        indices.InputIdx0 = m_TaaHistoryTex[previousHistory].srvIndex;
+        indices.InputIdx1 = m_NrdMotionVectorsTex.srvIndex;
+        indices.InputIdx2 = m_GBuffer.depth.srvIndex;
+        indices.OutputIdx0 = m_TaaReprojectedHistoryTex.uavIndex;
+        indices.OutputIdx1 = m_TaaClosestVelocityTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+
+        m_CommandList->SetPipelineState(m_NaiveTsrReprojectPSO.Get());
+        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+
+        // UAV barrier
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaReprojectedHistoryTex.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaClosestVelocityTex.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
+
+    // ---- Pass 2: TAA Resolve ----
+    {
+        // Transition inputs to SRV
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), const_cast<GPUTexture&>(inputColor), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaReprojectedHistoryTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaClosestVelocityTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // Transition outputs to UAV
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaHistoryTex[currentHistory], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaOutputTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BindlessIndices indices = {};
+        indices.InputIdx0 = inputColor.srvIndex;
+        indices.InputIdx1 = m_TaaReprojectedHistoryTex.srvIndex;
+        indices.InputIdx2 = m_TaaClosestVelocityTex.srvIndex;
+        indices.OutputIdx0 = m_TaaHistoryTex[currentHistory].uavIndex;
+        indices.OutputIdx1 = m_TaaOutputTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+
+        m_CommandList->SetPipelineState(m_NaiveTsrResolvePSO.Get());
+        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+
+        // UAV barrier
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaHistoryTex[currentHistory].resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaOutputTex.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
+
+    // Swap history index for next frame
+    m_TaaHistoryIndex = previousHistory;
 }

@@ -14,6 +14,11 @@
     #define ROW_MAJOR row_major
 #endif
 
+// Anti-aliasing / post-processing modes
+#define AA_MODE_NONE          0u  // No AA — single sample, no accumulation, no TAA
+#define AA_MODE_ACCUMULATION  1u  // Progressive accumulation (path tracer converges over time)
+#define AA_MODE_TAA           2u  // Temporal Anti-Aliasing with sub-pixel jitter
+
 #define RESTIR_RESERVOIR_DEBUG_OFF        0u
 #define RESTIR_RESERVOIR_DEBUG_POSITION   1u
 #define RESTIR_RESERVOIR_DEBUG_NORMAL     2u
@@ -63,6 +68,20 @@ struct FrameConstants {
     uint enableNrdRelax;
     uint enableNrdValidation;
     float rtrRoughReuseThreshold; // Roughness above which specular reuses diffuse candidate (default 0.6)
+
+    // TAA / Temporal Super-Resolution
+    float2 taaJitter;           // Sub-pixel jitter in pixel units of internal resolution
+    uint   taaMode;             // 0 = Naive TSR, 1 = Kajiya TAA
+    uint   taaEnabled;          // 1 = TAA active
+    uint   internalWidth;       // Internal render resolution width
+    uint   internalHeight;      // Internal render resolution height
+    uint   outputWidth;         // Output (swap chain) resolution width (1920)
+    uint   outputHeight;        // Output (swap chain) resolution height (1080)
+    uint   taaHistoryIndex;     // Ping-pong index for TAA history (0 or 1)
+    float  taaUpsamplingFactor; // Temporal upsampling factor (1.0 - 4.0)
+    uint   taaFrameCounter;    // Monotonically increasing counter for TAA jitter sequence (never reset)
+    uint   _pad0;              // Padding to align projectionInverseUnjittered to 16 bytes
+    ROW_MAJOR float4x4 projectionInverseUnjittered; // Unjittered projection inverse for motion vectors
 };
 
 struct BindlessIndices {
