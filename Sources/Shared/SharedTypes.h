@@ -88,6 +88,7 @@ struct BindlessIndices {
     uint InputIdx0;
     uint InputIdx1;
     uint InputIdx2;
+    uint InputIdx3;
     uint OutputIdx0;
     uint OutputIdx1;
     uint OutputIdx2;

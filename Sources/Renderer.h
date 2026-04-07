@@ -46,6 +46,7 @@ public:
     void CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH);
     void CreateTaaPipelines();
     void DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& inputColor);
+    void DispatchKajiyaTaa(const FrameConstants& frame, const GPUTexture& inputColor);
     void GenerateMotionVectors(const FrameConstants& frame);
     GPUTexture& GetTaaOutputTex() { return m_TaaOutputTex; }
     GPUTexture& GetNrdMotionVectorsTex() { return m_NrdMotionVectorsTex; }
@@ -279,7 +280,11 @@ private:
     GPUTexture m_TaaOutputTex;               // Output-res: final TAA output
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NaiveTsrReprojectPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NaiveTsrResolvePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_KajiyaTaaResolvePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MotionVectorsPSO;
+    // Kajiya TAA extra textures (output-res)
+    GPUTexture m_TaaSmoothVarHistoryTex[2]; // R16_FLOAT, luminance variance history (ping-pong)
+    int        m_TaaSmoothVarIndex = 0;
 
     // GBuffer resources
     GBuffer m_GBuffer;

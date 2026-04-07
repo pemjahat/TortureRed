@@ -2290,6 +2290,16 @@ void Renderer::CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t i
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // Kajiya TAA: smooth variance history (ping-pong, output-res, luminance only)
+    for (int i = 0; i < 2; ++i)
+    {
+        CreateTexture(m_TaaSmoothVarHistoryTex[i], outputW, outputH,
+            DXGI_FORMAT_R16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    m_TaaSmoothVarIndex = 0;
+
     m_TaaEnabled = true;
     m_TaaHistoryIndex = 0;
 
@@ -2317,6 +2327,15 @@ void Renderer::CreateTaaPipelines()
         computeDesc.CS = { resolveCS.data(), resolveCS.size() };
         CHECK_HR(m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NaiveTsrResolvePSO)),
             "Failed to create NaiveTsr Resolve PSO");
+    }
+
+    // Kajiya TAA PSO
+    auto kajiyaCS = GraphicsHelper::CompileShader("Shaders/KajiyaTaa_Resolve.hlsl", "main", "cs_6_6");
+    if (!kajiyaCS.empty())
+    {
+        computeDesc.CS = { kajiyaCS.data(), kajiyaCS.size() };
+        CHECK_HR(m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_KajiyaTaaResolvePSO)),
+            "Failed to create KajiyaTaa Resolve PSO");
     }
 
     // Motion vector generation PSO
@@ -2355,8 +2374,94 @@ void Renderer::GenerateMotionVectors(const FrameConstants& frame)
     m_CommandList->ResourceBarrier(1, &barrier);
 }
 
+void Renderer::DispatchKajiyaTaa(const FrameConstants& frame, const GPUTexture& inputColor)
+{
+    if (!m_NaiveTsrReprojectPSO || !m_KajiyaTaaResolvePSO) return;
+
+    const uint32_t outputW = frame.outputWidth;
+    const uint32_t outputH = frame.outputHeight;
+
+    int currentHistory  = m_TaaHistoryIndex;
+    int previousHistory = 1 - currentHistory;
+    int currentVar      = m_TaaSmoothVarIndex;
+    int previousVar     = 1 - currentVar;
+
+    // ---- Pass 1: Reproject History (shared with NaiveTsr) ----
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaHistoryTex[previousHistory], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex,            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth,                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaReprojectedHistoryTex,       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaClosestVelocityTex,          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+        m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+        m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+        m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+        BindlessIndices indices = {};
+        indices.InputIdx0  = m_TaaHistoryTex[previousHistory].srvIndex;
+        indices.InputIdx1  = m_NrdMotionVectorsTex.srvIndex;
+        indices.InputIdx2  = m_GBuffer.depth.srvIndex;
+        indices.OutputIdx0 = m_TaaReprojectedHistoryTex.uavIndex;
+        indices.OutputIdx1 = m_TaaClosestVelocityTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+
+        m_CommandList->SetPipelineState(m_NaiveTsrReprojectPSO.Get());
+        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaReprojectedHistoryTex.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaClosestVelocityTex.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(2, barriers);
+    }
+
+    // ---- Pass 2: Kajiya TAA Resolve ----
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), const_cast<GPUTexture&>(inputColor),  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaReprojectedHistoryTex,            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaClosestVelocityTex,               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaSmoothVarHistoryTex[previousVar], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaHistoryTex[currentHistory],       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaOutputTex,                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_TaaSmoothVarHistoryTex[currentVar],  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BindlessIndices indices = {};
+        indices.InputIdx0  = inputColor.srvIndex;
+        indices.InputIdx1  = m_TaaReprojectedHistoryTex.srvIndex;
+        indices.InputIdx2  = m_TaaClosestVelocityTex.srvIndex;
+        indices.InputIdx3  = m_TaaSmoothVarHistoryTex[previousVar].srvIndex;
+        indices.OutputIdx0 = m_TaaHistoryTex[currentHistory].uavIndex;
+        indices.OutputIdx1 = m_TaaOutputTex.uavIndex;
+        indices.OutputIdx2 = m_TaaSmoothVarHistoryTex[currentVar].uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+
+        m_CommandList->SetPipelineState(m_KajiyaTaaResolvePSO.Get());
+        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barriers[3] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaHistoryTex[currentHistory].resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaOutputTex.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_TaaSmoothVarHistoryTex[currentVar].resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(3, barriers);
+    }
+
+    // Swap ping-pong indices
+    m_TaaHistoryIndex   = previousHistory;
+    m_TaaSmoothVarIndex = 1 - m_TaaSmoothVarIndex;
+}
+
 void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& inputColor)
 {
+    // Branch to Kajiya TAA when taaMode == 1
+    if (frame.taaMode == 1)
+    {
+        DispatchKajiyaTaa(frame, inputColor);
+        return;
+    }
+
     if (!m_NaiveTsrReprojectPSO || !m_NaiveTsrResolvePSO) return;
 
     const uint32_t outputW = frame.outputWidth;
