@@ -56,7 +56,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Stable unjittered center
     // ---- Sample current frame with unjitter ----
     // Map output pixel to internal-resolution space, accounting for jitter
-    float2 dst_sample_loc = px + 0.5;
     float2 jitter = g_Frame.taaJitter; // In pixel units of internal resolution
     // The projection jitter shifts rendered content by (+jitter.x, +jitter.y) in internal-res pixels.
     // The unjittered internal-res location for this output pixel is:
@@ -65,7 +64,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // doesn't shift each frame (which would cause jittered output).
     float2 dst_unjittered_internal = (px + 0.5) * input_resolution_scale - jitter;
     int2 base_src_px = int2(dst_unjittered_internal);
-    float2 base_src_sample_loc = (base_src_px + 0.5) / input_resolution_scale;
 
     // Weighted sampling with Gaussian kernel for unjittering
     float4 color_sum = 0;
@@ -73,9 +71,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 ex = 0;
     float3 ex2 = 0;
     float dev_wt_sum = 0;
-
-    // Compute offset in internal-res pixel units for the Gaussian weight
-    float2 dst_sample_loc_internal = (px + 0.5) * input_resolution_scale;
 
     // Compute offset in internal-res pixel units for the Gaussian weight.
     // dst_unjittered_internal is the unjittered position this output pixel maps to.
@@ -86,7 +81,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         for (int x = -k; x <= k; ++x)
         {
             int2 src_px = base_src_px + int2(x, y);
-            float2 src_sample_loc = base_src_sample_loc + float2(x, y) / input_resolution_scale;
 
             float4 col = current_frame_tex[src_px];
             float3 mapped = tonemap(col.rgb);
@@ -97,8 +91,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             float2 sample_center_offset = src_center_internal - dst_unjittered_internal;
             float dist2 = dot(sample_center_offset, sample_center_offset);
 
-            float wt = exp2(-10.0 * dist2);
-            float dev_wt = exp2(-dist2);
+            float wt = exp2(-10.0 * dist2); // thigher kernel for center
+            float dev_wt = exp2(-dist2);    // wider kernel for neighbour
 
             color_sum += float4(mapped, 1) * wt;
             wt_sum += wt;
@@ -109,19 +103,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
     }
 
-    float3 center = color_sum.rgb / max(wt_sum, 1e-6);
-
-    // Replace integer fetch with bilinear sample at unjittered position
-    //float2 unjittered_uv = (base_src_px + 0.5 - jitter) / internal_size;
-    //float4 col = current_frame_tex.SampleLevel(g_LinearClamp, unjittered_uv, 0); 
-    //float3 center = col.rgb;
-
+    
     float coverage = wt_sum;
 
     ex /= max(dev_wt_sum, 1e-6);
     ex2 /= max(dev_wt_sum, 1e-6);
     float3 var = max(0.0, ex2 - ex * ex);
     float3 input_dev = sqrt(var);
+
+    // -- Entire blend operation is in tonemapped space - both center and history --
+    // To avoid bright pixel dominated the blend
+    float3 center = color_sum.rgb / max(wt_sum, 1e-6);
 
     // ---- Read reprojected history ----
     float4 history_packed = reprojected_history_tex[px];
@@ -156,12 +148,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     history_coverage *= saturate(1.0 - clamp_amount * 2.0);
 
     float total_coverage = max(1e-5, history_coverage + coverage);
-    float3 temporal_result = (clamped_history * history_coverage + center) / total_coverage;
-    //float3 temporal_result = center;
 
-    // Cap coverage to TARGET_SAMPLE_COUNT adjusted for upsampling ratio
+    // Cap coverage to TARGET_SAMPLE_COUNT adjusted for upsampling ratio (~effective sample contribution)
     float max_coverage = max(2.0, TARGET_SAMPLE_COUNT / (input_resolution_scale.x * input_resolution_scale.y));
     total_coverage = min(max_coverage, total_coverage);
+
+    float3 temporal_result = (clamped_history * history_coverage + center * coverage) / total_coverage;
 
     // ---- Output ----
     float3 final_color = tonemap_inv(temporal_result);
