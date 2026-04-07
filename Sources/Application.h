@@ -64,7 +64,6 @@ private:
 
     // Anti-aliasing / post-processing mode (AA_MODE_NONE, AA_MODE_ACCUMULATION, AA_MODE_TAA)
     int   m_AntiAliasingMode = AA_MODE_TAA;
-    int   m_TaaMode = 0;              // 0 = Naive TSR, 1 = Kajiya TAA (only used when AA_MODE_TAA)
     float m_TaaUpsamplingFactor = 1.5f;
     bool  m_TaaResetHistory = false;   // Set true when mode/factor changes
     uint32_t m_TaaFrameCounter = 0;   // Monotonically increasing counter for TAA jitter sequence

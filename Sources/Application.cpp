@@ -427,7 +427,6 @@ void Application::Update(float deltaTime)
     m_FrameConstants.screenHeight = m_InternalHeight;
 
     // TAA / Temporal Super-Resolution
-    m_FrameConstants.taaMode = (uint32_t)m_TaaMode;
     m_FrameConstants.taaEnabled = taaActive ? 1u : 0u;
     m_FrameConstants.internalWidth = m_InternalWidth;
     m_FrameConstants.internalHeight = m_InternalHeight;
@@ -931,12 +930,6 @@ void Application::RenderImGui()
         if (!isTaaMode)
             ImGui::BeginDisabled();
 
-        const char* taaModes[] = { "Naive TSR (2-pass, default)", "Kajiya TAA (7-pass, high quality)" };
-        if (ImGui::Combo("TAA Mode", &m_TaaMode, taaModes, IM_ARRAYSIZE(taaModes)))
-        {
-            m_TaaResetHistory = true;
-        }
-
         float prevFactor = m_TaaUpsamplingFactor;
         if (ImGui::SliderFloat("Upsampling Factor", &m_TaaUpsamplingFactor, 1.0f, 4.0f, "%.1f"))
         {
@@ -958,10 +951,9 @@ void Application::RenderImGui()
                 m_InternalWidth, m_InternalHeight, m_TaaUpsamplingFactor);
         }
 
-        ImGui::Text("Internal: %ux%u -> Output: %ux%u [%s]",
+        ImGui::Text("Internal: %ux%u -> Output: %ux%u [Naive TSR]",
             m_InternalWidth, m_InternalHeight,
-            m_OutputWidth, m_OutputHeight,
-            taaModes[m_TaaMode]);
+            m_OutputWidth, m_OutputHeight);
 
         if (!isTaaMode)
             ImGui::EndDisabled();

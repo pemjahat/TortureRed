@@ -71,7 +71,6 @@ struct FrameConstants {
 
     // TAA / Temporal Super-Resolution
     float2 taaJitter;           // Sub-pixel jitter in pixel units of internal resolution
-    uint   taaMode;             // 0 = Naive TSR, 1 = Kajiya TAA
     uint   taaEnabled;          // 1 = TAA active
     uint   internalWidth;       // Internal render resolution width
     uint   internalHeight;      // Internal render resolution height
