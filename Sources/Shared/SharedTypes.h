@@ -79,7 +79,8 @@ struct FrameConstants {
     uint   taaHistoryIndex;     // Ping-pong index for TAA history (0 or 1)
     float  taaUpsamplingFactor; // Temporal upsampling factor (1.0 - 4.0)
     uint   taaFrameCounter;    // Monotonically increasing counter for TAA jitter sequence (never reset)
-    uint   _pad0;              // Padding to align projectionInverseUnjittered to 16 bytes
+    uint   _pad0;              // 8-byte padding (2x uint) to align projectionInverseUnjittered to 16 bytes (offset 512)
+    uint   _pad1;
     ROW_MAJOR float4x4 projectionInverseUnjittered; // Unjittered projection inverse for motion vectors
 };
 
