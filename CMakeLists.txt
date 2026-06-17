@@ -108,6 +108,30 @@ FetchContent_MakeAvailable(nrd)
 # SHaRC (Inlined in Externals/)
 # Since SHaRC is header-only and we've manually placed it, we don't add_subdirectory
 
+# Helper: download and extract a package only when the version changes
+function(CheckAndDownloadPackage NAME VERSION LOCAL_PATH URL)
+    if(NOT EXISTS ${LOCAL_PATH}/${VERSION}.ver)
+        if(EXISTS ${LOCAL_PATH})
+            message(STATUS "Deleting old " ${NAME})
+            file(REMOVE_RECURSE ${LOCAL_PATH})
+        endif()
+        message(STATUS "Obtaining " ${NAME} " " ${VERSION})
+        file(DOWNLOAD ${URL} ${LOCAL_PATH}.zip)
+        message(STATUS "Extracting " ${NAME})
+        file(ARCHIVE_EXTRACT INPUT ${LOCAL_PATH}.zip DESTINATION ${LOCAL_PATH})
+        file(REMOVE ${LOCAL_PATH}.zip)
+        file(WRITE ${LOCAL_PATH}/${VERSION}.ver)
+    endif()
+endfunction()
+
+# Download jsmn (header-only JSON parser)
+CheckAndDownloadPackage(
+    "jsmn"
+    "v1.1.0"
+    "${CMAKE_SOURCE_DIR}/ThirdParty/jsmn"
+    "https://github.com/zserge/jsmn/archive/refs/tags/v1.1.0.zip"
+)
+
 # Create ImGui library
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
