@@ -1,7 +1,5 @@
 #include "pch.h"
 
-#define JSMN_HEADER
-#define JSMN_IMPLEMENTATION
 #include <jsmn.h>
 
 #include "Scene.h"
