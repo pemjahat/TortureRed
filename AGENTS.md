@@ -68,8 +68,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 | Creating...                  | Read first                                                                                                                     |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Any `.md` document           | [markdown_style_guide.md](markdown_style_guide.md)                                                                             |
-| Any Mermaid diagram          | [mermaid_style_guide.md](mermaid_style_guide.md), then the [specific type file](mermaid_diagrams/)                             |
+| Any `.md` document           | [markdown_style_guide.md](agentic/markdown_style_guide.md)                                                                     |
+| Any Mermaid diagram          | [mermaid_style_guide.md](agentic/mermaid_style_guide.md), then the [specific type file](agentic/mermaid_diagrams/)             |
 
 Key rules enforced by the style guides:
 
