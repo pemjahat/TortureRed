@@ -31,6 +31,13 @@
 #define RESTIR_RESERVOIR_DEBUG_SPATIAL_SHIFTED_TARGET_PDF 9u
 #define RESTIR_RESERVOIR_DEBUG_W         10u
 
+// ReSTIR DI debug modes
+#define RESTIR_DI_DEBUG_OFF            0u
+#define RESTIR_DI_DEBUG_LIGHT_INDEX    1u
+#define RESTIR_DI_DEBUG_M_COUNT        2u
+#define RESTIR_DI_DEBUG_WEIGHT         3u
+#define RESTIR_DI_DEBUG_VISIBILITY_AGE 4u
+
 // Core Frame Constants
 struct FrameConstants {
     ROW_MAJOR float4x4 viewProj;
@@ -82,6 +89,12 @@ struct FrameConstants {
     uint   _pad0;              // 8-byte padding (2x uint) to align projectionInverseUnjittered to 16 bytes (offset 512)
     uint   _pad1;
     ROW_MAJOR float4x4 projectionInverseUnjittered; // Unjittered projection inverse for motion vectors
+
+    // ReSTIR DI (Direct Illumination) flags
+    uint enableRestirDI;              // 1 = ReSTIR DI active (direct lighting from local lights)
+    uint restirDIDebugMode;           // RESTIR_DI_DEBUG_* enum
+    uint _diPad0;
+    uint _diPad1;
 };
 
 struct BindlessIndices {
@@ -155,6 +168,19 @@ struct Reservoir {
 
 // Use these helpers (defined in CommonTracing.hlsl) to access historyAge safely.
 #define RESERVOIR_SPECULAR_FLAG 0x80000000u
+
+// Per-pixel DI reservoir — stores the winning local light index from ReSTIR DI.
+// 32 bytes total (8 x uint32).
+struct DIRreservoir {
+    float w_sum;              // Running sum of RIS weights
+    float W;                  // Normalized unbiased weight W = w_sum / (M * p_hat_selected)
+    float M;                  // Effective sample count (history length)
+    float targetPdf;          // Target PDF p_hat of the currently selected light
+    uint  selectedLightIndex; // Index into LightsBuffer of the winning light (bits[0-15])
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
 
 // Per-pixel diffuse candidate data written by RTDGI temporal, read by RTR temporal
 struct DiffuseCandidate {

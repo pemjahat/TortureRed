@@ -90,9 +90,11 @@ void Application::Initialize()
     m_FrameConstants.sharcStaleFrameNum = 32;
     m_FrameConstants.sharcDebug = 0;
     m_FrameConstants.restirReservoirDebugMode = RESTIR_RESERVOIR_DEBUG_OFF;
+    m_FrameConstants.enableRestirDI = 0;
+    m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -585,6 +587,9 @@ void Application::Render()
         // 2.5 Rasterizer Indirect GI Passes
         m_Renderer.DispatchRasterIndirectGI(&m_Model, m_FrameConstants);
 
+        // 2.6 ReSTIR DI Passes (direct illumination from local lights)
+        m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
         // 3. Lighting Pass
@@ -604,6 +609,11 @@ void Application::Render()
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
 
+            if (m_FrameConstants.enableRestirDI)
+            {
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetDIOutputTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+
             // Need this binding for shadow ray in pixel shader
             cmdList->SetGraphicsRootShaderResourceView(1, m_Model.GetMaterialBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
@@ -613,6 +623,10 @@ void Application::Render()
             if (m_FrameConstants.enableRasterIndirectGI)
             {
                 indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;    
+            }
+            if (m_FrameConstants.enableRestirDI)
+            {
+                indices.InputIdx1 = m_Renderer.GetDIOutputTex().srvIndex;
             }
             cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
@@ -804,6 +818,39 @@ void Application::RenderImGui()
             m_FrameConstants.enableRasterIndirectGI = enableRasterIndirectGI ? 1 : 0;
         }
 
+        bool enableRestirDI = (m_FrameConstants.enableRestirDI != 0);
+        if (ImGui::Checkbox("Enable ReSTIR DI (Local Lights)", &enableRestirDI))
+        {
+            m_FrameConstants.enableRestirDI = enableRestirDI ? 1 : 0;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Spatiotemporal reservoir resampling for local light direct illumination.\nWhen off, falls back to single-frame RIS (4 candidates).");
+
+        if (enableRestirDI)
+        {
+            ImGui::Indent();
+            const char* diDebugModes[] = {
+                "Off",
+                "Light Index",
+                "M Count",
+                "Weight (W)",
+                "Visibility Age"
+            };
+            int diDebugMode = static_cast<int>(m_FrameConstants.restirDIDebugMode);
+            ImGui::SetNextItemWidth(180.f);
+            if (ImGui::Combo("DI Debug Vis", &diDebugMode, diDebugModes, IM_ARRAYSIZE(diDebugModes)))
+            {
+                m_FrameConstants.restirDIDebugMode = static_cast<uint32_t>(diDebugMode);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Visualize ReSTIR DI reservoir fields.\nOff = normal rendering.\nLight Index = selected light (normalized).\nM Count = history length.\nWeight (W) = unbiased RIS weight.\nVisibility Age = stale visibility counter.");
+            ImGui::Unindent();
+        }
+        else
+        {
+            // Reset debug mode when DI is disabled
+            m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
+        }
         if (enableRasterIndirectGI)
         {
             bool enableNrdRelax = (m_FrameConstants.enableNrdRelax != 0);

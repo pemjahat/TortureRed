@@ -41,6 +41,9 @@ public:
     void CreateRayTracingPipeline();
     void CreateRasterIndirectGIResources();
     void CreateRasterIndirectGIPipelines();
+    void CreateRestirDIResources();
+    void CreateRestirDIPipelines();
+    void DispatchRestirDI(class Model* model, const FrameConstants& frame);
 
     // TAA / Temporal Super-Resolution
     void CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH);
@@ -102,6 +105,7 @@ public:
     GPUTexture& GetPathTracerOutput() { return m_PathTracerPresentOutput; }
     GPUTexture& GetPathTracerHdrOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
+    GPUTexture& GetDIOutputTex() { return m_DIOutputTex; }
     GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
     ID3D12PipelineState* GetLightingHdrPSO() const { return m_LightingHdrPSO.Get(); }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
@@ -256,6 +260,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPackSignalsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
+
+    // ------- ReSTIR DI buffers and textures -------
+    GPUBuffer  m_DIReservoirBuffer[2];     // Ping-pong DI reservoirs (DIRreservoir per pixel)
+    GPUBuffer  m_DIReservoirIntermediate;  // Post-spatial DI reservoirs
+    GPUTexture m_DIOutputTex;              // Final DI radiance (RGBA16F)
+    int        m_CurrentDIReservoirIndex = 0;
+
+    // ------- ReSTIR DI PSOs -------
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIInitialSamplingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDITemporalPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDISpatialPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIShadePSO;
 
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;

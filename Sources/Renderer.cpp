@@ -282,6 +282,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
     }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
+    CreateRestirDIPipelines();
     SetupShaderTimestamps();
 
 #if 0
@@ -332,6 +333,137 @@ void Renderer::CreateRasterIndirectGIPipelines()
         }
     }
 #endif
+}
+
+// =============================================================================
+// ReSTIR DI — Direct Illumination via spatiotemporal reservoir resampling
+// =============================================================================
+
+void Renderer::CreateRestirDIResources()
+{
+    const UINT pixelCount = m_InternalWidth * m_InternalHeight;
+    for (int i = 0; i < 2; ++i)
+        CreateStructuredBuffer(m_DIReservoirBuffer[i], sizeof(DIRreservoir), pixelCount,
+                               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), pixelCount,
+                           D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_DIOutputTex, m_InternalWidth, m_InternalHeight,
+                  DXGI_FORMAT_R16G16B16A16_FLOAT,
+                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void Renderer::CreateRestirDIPipelines()
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = m_RootSignature.Get();
+
+    auto CompileAndCreate = [&](const char* file, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso)
+    {
+        auto cs = GraphicsHelper::CompileShader(file, "main", "cs_6_6");
+        if (!cs.empty())
+        {
+            desc.CS = { cs.data(), cs.size() };
+            m_Device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso));
+        }
+    };
+
+    CompileAndCreate("Shaders/RestirDI_InitialSampling.hlsl", m_RestirDIInitialSamplingPSO);
+    CompileAndCreate("Shaders/RestirDI_Temporal.hlsl",        m_RestirDITemporalPSO);
+    CompileAndCreate("Shaders/RestirDI_Spatial.hlsl",         m_RestirDISpatialPSO);
+    CompileAndCreate("Shaders/RestirDI_Shade.hlsl",           m_RestirDIShadePSO);
+}
+
+void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
+{
+    if (!frame.enableRestirDI) return;
+
+    const int curr = m_CurrentDIReservoirIndex;
+    const int prev = 1 - curr;
+
+    // Ensure all DI resources are in UAV state
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirBuffer[0],    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirBuffer[1],    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIOutputTex,             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
+
+    m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
+    m_CommandList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
+    m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+    m_CommandList->SetComputeRootShaderResourceView(4, m_TLAS.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
+    m_CommandList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
+    m_CommandList->SetComputeRootShaderResourceView(10, m_LightsBuffer.gpuAddress);
+    m_CommandList->SetComputeRootShaderResourceView(11, m_LightLUTBuffer.gpuAddress);
+
+    const UINT W = m_InternalWidth, H = m_InternalHeight;
+    const UINT gx = (W + 7) / 8, gy = (H + 7) / 8;
+
+    BindlessIndices indices = {};
+
+    // --- Pass 1: Initial Sampling ---
+    // OutputIdx0 = DIRreservoirBuffer[curr]
+    indices = {};
+    indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
+    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_RestirDIInitialSamplingPSO.Get());
+    m_CommandList->Dispatch(gx, gy, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirBuffer[curr].resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+    }
+
+    // --- Pass 2: Temporal Resampling ---
+    // InputIdx0 = DIRreservoirBuffer[prev], OutputIdx0 = DIRreservoirBuffer[curr]
+    indices = {};
+    indices.InputIdx0  = m_DIReservoirBuffer[prev].srvIndex;
+    indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
+    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_RestirDITemporalPSO.Get());
+    m_CommandList->Dispatch(gx, gy, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirBuffer[curr].resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+    }
+
+    // --- Pass 3: Spatial Resampling ---
+    // InputIdx0 = DIRreservoirBuffer[curr], OutputIdx0 = DIRreservoirIntermediate
+    indices = {};
+    indices.InputIdx0  = m_DIReservoirBuffer[curr].srvIndex;
+    indices.OutputIdx0 = m_DIReservoirIntermediate.uavIndex;
+    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_RestirDISpatialPSO.Get());
+    m_CommandList->Dispatch(gx, gy, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirIntermediate.resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+    }
+
+    // --- Pass 4: Shade ---
+    // InputIdx0 = DIRreservoirIntermediate, OutputIdx0 = DIOutputTex
+    indices = {};
+    indices.InputIdx0  = m_DIReservoirIntermediate.srvIndex;
+    indices.OutputIdx0 = m_DIOutputTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_RestirDIShadePSO.Get());
+    m_CommandList->Dispatch(gx, gy, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIOutputTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+    }
+
+    m_CurrentDIReservoirIndex = prev; // Swap for next frame
 }
 
 
@@ -1495,7 +1627,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
     indices.OutputIdx2 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -1515,7 +1647,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
     indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirBuffer[currentReservoir].resource.Get());
@@ -1531,7 +1663,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseReservoirIntermediate.resource.Get());
@@ -1546,7 +1678,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirIntermediate.resource.Get());
@@ -1576,7 +1708,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
     // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).
@@ -1589,7 +1721,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
         // b2 (slot 13) still holds m_SharcIndices from the SHaRC update/resolve above
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
@@ -1616,7 +1748,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
     indices.OutputIdx1 = m_NrdNormalRoughnessTex.uavIndex;
     indices.OutputIdx2 = m_NrdViewZTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER guideBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdMotionVectorsTex.resource.Get()),
@@ -1632,7 +1764,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
     indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER noisyBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisyDiffuseTex.resource.Get()),
@@ -2225,6 +2357,15 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), w * h,
         D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // ---- ReSTIR DI buffers ----
+    for (int i = 0; i < 2; ++i)
+        CreateStructuredBuffer(m_DIReservoirBuffer[i], sizeof(DIRreservoir), w * h,
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), w * h,
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_DIOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // ---- Raster Indirect Lighting + NRD Textures ----
     CreateTexture(m_RasterIndirectLightingTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,

@@ -89,8 +89,23 @@ float4 PSMain(PSInput input) : SV_Target {
     EvaluateBSDF(N, V, L_main, albedo.rgb, metallic, roughness, diff_main, spec_main);
     float3 totalDirectLighting = (diff_main + spec_main) * mainLight.color.rgb * mainLight.intensity * NdotL_main * shadowFactor;
 
-    // 2. Local Lights (Index 1+) via RTXGI-style RIS: a few candidates, one winner, one shadow ray.
-    if (FrameCB.numLights > 1)
+    // 2. Local Lights (Index 1+):
+    //    When ReSTIR DI is active, composite from DIOutputTex (written by the 4-pass pipeline).
+    //    Otherwise fall back to inline RIS (4 candidates, 1 shadow ray).
+    if (FrameCB.enableRestirDI)
+    {
+        Texture2D<float4> diTex = ResourceDescriptorHeap[g_Indices.InputIdx1];
+        float4 diSample = diTex.SampleLevel(g_LinearSampler, input.texCoord, 0);
+
+        // Debug visualization: show DI reservoir field heatmap directly
+        if (FrameCB.restirDIDebugMode != RESTIR_DI_DEBUG_OFF)
+        {
+            return float4(diSample.rgb, 1.0f);
+        }
+
+        totalDirectLighting += diSample.rgb;
+    }
+    else if (FrameCB.numLights > 1)
     {
         const uint localLightRisCandidates = 4;
         totalDirectLighting += GetLocalLightDirectLightingRIS(
