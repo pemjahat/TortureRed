@@ -268,7 +268,6 @@ private:
     int        m_CurrentDIReservoirIndex = 0;
 
     // ------- ReSTIR DI PSOs -------
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIInitialSamplingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDITemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDISpatialPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIShadePSO;

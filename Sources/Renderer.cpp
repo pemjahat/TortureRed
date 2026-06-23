@@ -368,7 +368,6 @@ void Renderer::CreateRestirDIPipelines()
         }
     };
 
-    CompileAndCreate("Shaders/RestirDI_InitialSampling.hlsl", m_RestirDIInitialSamplingPSO);
     CompileAndCreate("Shaders/RestirDI_Temporal.hlsl",        m_RestirDITemporalPSO);
     CompileAndCreate("Shaders/RestirDI_Spatial.hlsl",         m_RestirDISpatialPSO);
     CompileAndCreate("Shaders/RestirDI_Shade.hlsl",           m_RestirDIShadePSO);
@@ -405,22 +404,9 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
 
     BindlessIndices indices = {};
 
-    // --- Pass 1: Initial Sampling ---
+    // --- Pass 1: Combined Initial Sampling + Temporal Resampling ---
+    // InputIdx0 = DIRreservoirBuffer[prev] (previous-frame temporal output)
     // OutputIdx0 = DIRreservoirBuffer[curr]
-    indices = {};
-    indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
-    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->SetPipelineState(m_RestirDIInitialSamplingPSO.Get());
-    m_CommandList->Dispatch(gx, gy, 1);
-
-    {
-        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirBuffer[curr].resource.Get());
-        m_CommandList->ResourceBarrier(1, &b);
-    }
-
-    // --- Pass 2: Temporal Resampling ---
-    // InputIdx0 = DIRreservoirBuffer[prev], OutputIdx0 = DIRreservoirBuffer[curr]
     indices = {};
     indices.InputIdx0  = m_DIReservoirBuffer[prev].srvIndex;
     indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
@@ -434,7 +420,7 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         m_CommandList->ResourceBarrier(1, &b);
     }
 
-    // --- Pass 3: Spatial Resampling ---
+    // --- Pass 2: Spatial Resampling ---
     // InputIdx0 = DIRreservoirBuffer[curr], OutputIdx0 = DIRreservoirIntermediate
     indices = {};
     indices.InputIdx0  = m_DIReservoirBuffer[curr].srvIndex;
@@ -449,8 +435,8 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         m_CommandList->ResourceBarrier(1, &b);
     }
 
-    // --- Pass 4: Shade ---
-    // InputIdx0 = DIRreservoirIntermediate, OutputIdx0 = DIOutputTex
+    // --- Pass 3: Shade + EMA Accumulation ---
+    // InputIdx0 = DIRreservoirIntermediate, OutputIdx0 = DIOutputTex, OutputIdx1 = DIAccumulationTex
     indices = {};
     indices.InputIdx0  = m_DIReservoirIntermediate.srvIndex;
     indices.OutputIdx0 = m_DIOutputTex.uavIndex;
@@ -1316,7 +1302,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
         m_CommandList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
         m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier1);
@@ -1325,7 +1311,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         m_CommandList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
         m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
         m_CommandList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
@@ -1336,7 +1322,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RtxdiRestirReservoirDebugPSO)
         {
@@ -1347,7 +1333,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
             m_CommandList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
             m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+            m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
         }
     }
     else if (frame.enableRestir)
@@ -1360,7 +1346,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barriers1[2] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirBuffer[currentReservoir].resource.Get()),
@@ -1375,7 +1361,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
         m_CommandList->ResourceBarrier(1, &barrier2);
@@ -1386,7 +1372,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
         {
@@ -1403,7 +1389,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
             indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
             m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+            m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
         }
     }
     else
@@ -1413,7 +1399,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         m_CommandList->SetPipelineState(m_PathTracerPSO.Get());
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
@@ -1427,7 +1413,7 @@ m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1
         indices.InputIdx0 = m_PathTracerOutput.srvIndex;
         indices.OutputIdx0 = m_PathTracerPresentOutput.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
     }
 
     // Transition for blitting/Imgui

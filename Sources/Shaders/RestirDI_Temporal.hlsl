@@ -1,6 +1,7 @@
-// RestirDI_Temporal.hlsl — ReSTIR DI Pass 2: Temporal Resampling
-// Reprojects previous-frame reservoirs and merges them into the current frame.
-// No Jacobian needed for light-domain reservoirs.
+// RestirDI_Temporal.hlsl — ReSTIR DI Combined Pass: Initial Sampling + Temporal Resampling
+// Generates NUM_CANDIDATES light candidates via RIS (no shadow rays), then reprojects
+// the previous-frame reservoir and merges it — all in a single dispatch.
+// Eliminates the separate InitialSampling pass, its UAV barrier, and the redundant G-Buffer re-read.
 
 #include "CommonTracing.hlsl"
 
@@ -9,8 +10,8 @@ ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
 StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
+static const uint  NUM_CANDIDATES                        = 4u;
 static const float RESTIR_DI_TEMPORAL_MAX_HISTORY_LENGTH = 20.0f;
-static const uint  RESTIR_DI_TEMPORAL_MAX_AGE            = 30u;
 static const float RESTIR_DI_DEPTH_THRESHOLD             = 0.1f;
 static const float RESTIR_DI_NORMAL_THRESHOLD            = 0.85f;
 
@@ -74,10 +75,45 @@ void main(uint3 DTid : SV_DispatchThreadID)
     StructuredBuffer<DIRreservoir>   prevReservoirs = ResourceDescriptorHeap[g_Indices.InputIdx0];
     RWStructuredBuffer<DIRreservoir> currReservoirs = ResourceDescriptorHeap[g_Indices.OutputIdx0];
 
-    DIRreservoir curr = currReservoirs[pixelIdx]; // Written by Pass 1
-
+    // --- Phase 1: Initial Sampling (4-candidate RIS, in registers) ---
     Surface surf;
     bool hasHit = ReconstructGBufferSurface(screenPos, dims, false, surf);
+
+    DIRreservoir curr = (DIRreservoir)0;
+    float selectedTargetPdf = 0.0f;
+
+    if (hasHit && GetLocalLightCount(g_Frame.numLights) > 0)
+    {
+        RNG rng;
+        seed_rng(rng, screenPos, g_Frame.frameIndex + 7u);
+
+        uint  selectedIdx       = 1u;
+        float weightSum         = 0.0f;
+
+        for (uint i = 0u; i < NUM_CANDIDATES; ++i)
+        {
+            LightSampleResult lsr = SampleSingleLight(next_float(rng), g_Lights, g_Frame.numLights, g_Frame);
+            float tpdf = RIS_TargetPDF(surf.worldPos, surf.normal, surf.viewDir,
+                                       surf.albedo, surf.metallic, surf.roughness,
+                                       lsr.light);
+            float risWeight = (lsr.pdf > 1e-6f) ? (tpdf / lsr.pdf) : 0.0f;
+            weightSum += risWeight;
+            if (next_float(rng) * weightSum <= risWeight)
+            {
+                selectedIdx      = lsr.lightIndex;
+                selectedTargetPdf = tpdf;
+            }
+        }
+
+        if (weightSum > 0.0f && selectedTargetPdf > 0.0f)
+        {
+            curr.w_sum              = weightSum;
+            curr.M                  = float(NUM_CANDIDATES);
+            curr.targetPdf          = selectedTargetPdf;
+            curr.selectedLightIndex = selectedIdx;
+            curr.W                  = curr.w_sum / (curr.M * curr.targetPdf);
+        }
+    }
 
     if (!hasHit || curr.M <= 0.0f)
     {
@@ -85,9 +121,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         return;
     }
 
-    float selectedTargetPdf = curr.targetPdf;
-
-    // Temporal reprojection
+    // --- Phase 2: Temporal Resampling ---
     if (g_Frame.frameIndex > 1u)
     {
         float4 prevClip = mul(float4(surf.worldPos, 1.0f), g_Frame.viewProjPrevious);

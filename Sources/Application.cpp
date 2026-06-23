@@ -581,7 +581,7 @@ void Application::Render()
                 cmdList->SetPipelineState(m_Renderer.GetGBufferWritePSO());
 
             m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
-            m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
+            //m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
         }
         
         // 2.5 Rasterizer Indirect GI Passes
