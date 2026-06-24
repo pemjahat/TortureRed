@@ -604,14 +604,36 @@ void Application::Render()
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             
-            if (m_FrameConstants.enableRasterIndirectGI)
-            {
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            }
+            // Determine whether the unified DI+GI NRD path is active.
+            // Active when NRD is on AND at least one of DI/GI is enabled.
+            // DI-only: NrdUnpackedDiffuse/Specular contain denoised DI, GI reservoirs contribute 0.
+            // GI-only: legacy NrdPackSignals path, NrdUnpackedDiffuse/Specular contain denoised GI.
+            // Both:    NrdMergeSignals merges both into NrdUnpackedDiffuse/Specular.
+            const bool nrdActive = (m_FrameConstants.enableNrdRelax != 0u)
+                                && ((m_FrameConstants.enableRestirDI != 0u) || (m_FrameConstants.enableRasterIndirectGI != 0u));
+            const bool diMergedIntoNrd = nrdActive;
 
-            if (m_FrameConstants.enableRestirDI)
+            if (diMergedIntoNrd)
             {
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetDIOutputTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                // Unified NRD path: NrdUnpackedDiffuse/Specular are already transitioned
+                // to PIXEL_SHADER_RESOURCE by DenoiseRasterIndirectGI (called from either
+                // DispatchRasterIndirectGI or DispatchRestirDI depending on which is active).
+                indices.InputIdx0 = m_Renderer.GetNrdUnpackedDiffuseTex().srvIndex;
+                indices.InputIdx2 = m_Renderer.GetNrdUnpackedSpecularTex().srvIndex;
+            }
+            else
+            {
+                // Legacy path: GI uses pre-modulated RasterIndirectLightingTex, DI uses raw DIOutputTex.
+                if (m_FrameConstants.enableRasterIndirectGI)
+                {
+                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;
+                }
+                if (m_FrameConstants.enableRestirDI)
+                {
+                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetDIOutputTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    indices.InputIdx1 = m_Renderer.GetDIOutputTex().srvIndex;
+                }
             }
 
             // Need this binding for shadow ray in pixel shader
@@ -620,14 +642,6 @@ void Application::Render()
             cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
             cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
 
-            if (m_FrameConstants.enableRasterIndirectGI)
-            {
-                indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;    
-            }
-            if (m_FrameConstants.enableRestirDI)
-            {
-                indices.InputIdx1 = m_Renderer.GetDIOutputTex().srvIndex;
-            }
             cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
             if (rasterTaaActive)
@@ -851,7 +865,9 @@ void Application::RenderImGui()
             // Reset debug mode when DI is disabled
             m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
         }
-        if (enableRasterIndirectGI)
+        // NRD RELAX is available when either ReSTIR GI or ReSTIR DI is enabled
+        const bool anyRestirActive = enableRasterIndirectGI || (m_FrameConstants.enableRestirDI != 0);
+        if (anyRestirActive)
         {
             bool enableNrdRelax = (m_FrameConstants.enableNrdRelax != 0);
             if (ImGui::Checkbox("Enable NRD RELAX", &enableNrdRelax))
@@ -870,7 +886,9 @@ void Application::RenderImGui()
             }
             if (!enableNrdRelax)
                 ImGui::EndDisabled();
-
+        }
+        if (enableRasterIndirectGI)
+        {
             const char* sharcDebugModes[] = { "Off", "SHaRC Output", "Bounce Heatmap" };
             int sharcDebugMode = (int)m_FrameConstants.sharcDebug;
             ImGui::SetNextItemWidth(180.f);

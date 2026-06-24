@@ -106,6 +106,12 @@ public:
     GPUTexture& GetPathTracerHdrOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRasterIndirectLightingTex() { return m_RasterIndirectLightingTex; }
     GPUTexture& GetDIOutputTex() { return m_DIOutputTex; }
+    GPUTexture& GetDIDiffuseIntermediate()  { return m_DIDiffuseIntermediate; }
+    GPUTexture& GetDISpecularIntermediate() { return m_DISpecularIntermediate; }
+    GPUTexture& GetNrdDenoisedDiffuseTex()  { return m_NrdDenoisedDiffuseTex; }
+    GPUTexture& GetNrdDenoisedSpecularTex() { return m_NrdDenoisedSpecularTex; }
+    GPUTexture& GetNrdUnpackedDiffuseTex()  { return m_NrdUnpackedDiffuseTex; }
+    GPUTexture& GetNrdUnpackedSpecularTex() { return m_NrdUnpackedSpecularTex; }
     GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
     ID3D12PipelineState* GetLightingHdrPSO() const { return m_LightingHdrPSO.Get(); }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
@@ -238,6 +244,8 @@ private:
     GPUTexture m_NrdDenoisedDiffuseTex;
     GPUTexture m_NrdDenoisedSpecularTex;
     GPUTexture m_NrdValidationTex;
+    GPUTexture m_NrdUnpackedDiffuseTex;   // Composite output: raw denoised diffuse radiance
+    GPUTexture m_NrdUnpackedSpecularTex;  // Composite output: raw denoised specular radiance
     std::unique_ptr<nrd::Integration> m_NrdIntegration;
     bool m_NrdInitialized = false;
     bool m_NrdWasActiveLastFrame = false; // Tracks whether NRD ran last frame; used to force RESTART on re-enable
@@ -262,15 +270,19 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
 
     // ------- ReSTIR DI buffers and textures -------
-    GPUBuffer  m_DIReservoirBuffer[2];     // Ping-pong DI reservoirs (DIRreservoir per pixel)
-    GPUBuffer  m_DIReservoirIntermediate;  // Post-spatial DI reservoirs
-    GPUTexture m_DIOutputTex;              // Final DI radiance (RGBA16F)
+    GPUBuffer  m_DIReservoirBuffer[2];       // Ping-pong DI reservoirs (DIRreservoir per pixel)
+    GPUBuffer  m_DIReservoirIntermediate;    // Post-spatial DI reservoirs
+    GPUTexture m_DIOutputTex;               // Final DI radiance (RGBA16F) — legacy combined output
+    GPUTexture m_DIDiffuseIntermediate;     // Split DI diffuse (NRD-normalized, RELAX-packed)
+    GPUTexture m_DISpecularIntermediate;    // Split DI specular (NRD-normalized, RELAX-packed)
     int        m_CurrentDIReservoirIndex = 0;
 
     // ------- ReSTIR DI PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDITemporalPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDISpatialPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIShadePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDIShadePSO;       // Legacy combined shade
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RestirDISplitShadePSO;  // Split diffuse/specular shade
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdMergeSignalsPSO;     // Merge DI+GI into NRD inputs
 
     // ------- SHaRC PSOs -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_SharcUpdatePSO;

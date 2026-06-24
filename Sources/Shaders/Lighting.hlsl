@@ -2,6 +2,7 @@
 #include "PBR.hlsl"
 #include "CommonTracing.hlsl"
 #include "IrCache_Lookup.hlsl"
+#include "NRD.hlsli"
 
 struct VSInput {
     uint vertexID : SV_VertexID;
@@ -90,9 +91,19 @@ float4 PSMain(PSInput input) : SV_Target {
     float3 totalDirectLighting = (diff_main + spec_main) * mainLight.color.rgb * mainLight.intensity * NdotL_main * shadowFactor;
 
     // 2. Local Lights (Index 1+):
-    //    When ReSTIR DI is active, composite from DIOutputTex (written by the 4-pass pipeline).
+    //    When ReSTIR DI is active AND NRD is active, DI is merged into the denoised
+    //    indirect channels below — skip the raw DI read in that case.
+    //    When ReSTIR DI is active but NRD is off, composite from DIOutputTex directly.
     //    Otherwise fall back to inline RIS (4 candidates, 1 shadow ray).
-    if (FrameCB.enableRestirDI)
+    // NRD unified path: active when NRD RELAX is on and at least one of DI/GI is enabled.
+    // - Both on:    NrdMergeSignals merged DI+GI into NrdUnpackedDiffuse/Specular.
+    // - DI only:   NrdMergeSignals ran with zero GI contribution.
+    // - GI only:   NrdPackSignals (legacy) ran; NrdUnpackedDiffuse/Specular hold denoised GI.
+    const bool nrdActive = (FrameCB.enableNrdRelax != 0u)
+                        && ((FrameCB.enableRestirDI != 0u) || (FrameCB.enableRasterIndirectGI != 0u));
+    const bool diMergedIntoNrd = nrdActive;
+
+    if (FrameCB.enableRestirDI && !diMergedIntoNrd)
     {
         Texture2D<float4> diTex = ResourceDescriptorHeap[g_Indices.InputIdx1];
         float4 diSample = diTex.SampleLevel(g_LinearSampler, input.texCoord, 0);
@@ -105,7 +116,7 @@ float4 PSMain(PSInput input) : SV_Target {
 
         totalDirectLighting += diSample.rgb;
     }
-    else if (FrameCB.numLights > 1)
+    else if (!FrameCB.enableRestirDI && FrameCB.numLights > 1)
     {
         const uint localLightRisCandidates = 4;
         totalDirectLighting += GetLocalLightDirectLightingRIS(
@@ -118,32 +129,49 @@ float4 PSMain(PSInput input) : SV_Target {
     float3 ambient = 0.03f * albedo.rgb;
     float3 finalColor = ambient + totalDirectLighting;
     
-    if (FrameCB.enableRasterIndirectGI)
+    // Apply indirect lighting: either unified NRD (DI+GI denoised) or legacy per-pipeline.
+    if (nrdActive || FrameCB.enableRasterIndirectGI)
     {
-        // Sample the indirect lighting texture
-        Texture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.InputIdx0];
-        
-        float3 indirectLighting = indirectIrradiance.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
-
-        if (FrameCB.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF)
+        if (diMergedIntoNrd)
         {
-            return float4(indirectLighting, 1.0f);
-        }
+            // ---- Unified denoised path: DI local lights + GI indirect, both denoised ----
+            // NrdCompositeIndirect outputs raw denoised radiance (no material factor).
+            // Re-modulate here using NRD_MaterialFactors() to recover the final lit color.
+            Texture2D<float4> denoisedDiffuseTex  = ResourceDescriptorHeap[g_Indices.InputIdx0];
+            Texture2D<float4> denoisedSpecularTex = ResourceDescriptorHeap[g_Indices.InputIdx2];
 
-        finalColor += indirectLighting;
+            float3 denoisedDiffuse  = denoisedDiffuseTex.SampleLevel(g_LinearSampler,  input.texCoord, 0).rgb;
+            float3 denoisedSpecular = denoisedSpecularTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+
+            float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo.rgb, metallic);
+            float3 diffuseFactor, specularFactor;
+            NRD_MaterialFactors(N, V, albedo.rgb, F0, roughness, diffuseFactor, specularFactor);
+
+            float3 denoisedDiffuseTerm  = denoisedDiffuse  * diffuseFactor;
+            float3 denoisedSpecularTerm = denoisedSpecular * specularFactor;
+
+            if (FrameCB.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF)
+            {
+                // Show raw denoised diffuse for debug
+                return float4(denoisedDiffuse + denoisedSpecular, 1.0f);
+            }
+
+            finalColor += denoisedDiffuseTerm + denoisedSpecularTerm;
+        }
+        else
+        {
+            // ---- Legacy path: GI-only NRD or direct resolve (no DI merge) ----
+            Texture2D<float4> indirectIrradiance = ResourceDescriptorHeap[g_Indices.InputIdx0];
+            float3 indirectLighting = indirectIrradiance.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+
+            if (FrameCB.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF)
+            {
+                return float4(indirectLighting, 1.0f);
+            }
+
+            finalColor += indirectLighting;
+        }
     }
-    
-    // if (FrameCB.debugIrCache != IRCACHE_DEBUG_OFF)
-    // {
-    //     float3 debugVal = float3(0.0f, 0.0f, 0.0f);
-    //     if (FrameCB.debugIrCache == IRCACHE_DEBUG_IRRADIANCE)
-    //         debugVal = SampleIrCache(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz, N);
-    //     else if (FrameCB.debugIrCache == IRCACHE_DEBUG_LIFE)
-    //         debugVal = DebugIrCacheLife(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
-    //     else if (FrameCB.debugIrCache == IRCACHE_DEBUG_CASCADE)
-    //         debugVal = DebugIrCacheCascade(worldPos.xyz, g_IrCache, FrameCB.irCacheCameraPosition.xyz);
-    //     finalColor = debugVal;
-    // }
     
     // When TAA is active, output raw HDR — the TAA resolve shader handles
     // exposure and tonemapping. Otherwise, apply them here for direct display.
