@@ -584,8 +584,8 @@ void Application::Render()
             //m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
         }
         
-        // 2.5 Rasterizer Indirect GI Passes
-        m_Renderer.DispatchRasterIndirectGI(&m_Model, m_FrameConstants);
+        // 2.5 ReSTIR GI Passes
+        m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
 
         // 2.6 ReSTIR DI Passes (direct illumination from local lights)
         m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
@@ -616,8 +616,8 @@ void Application::Render()
             if (diMergedIntoNrd)
             {
                 // Unified NRD path: NrdUnpackedDiffuse/Specular are already transitioned
-                // to PIXEL_SHADER_RESOURCE by DenoiseRasterIndirectGI (called from either
-                // DispatchRasterIndirectGI or DispatchRestirDI depending on which is active).
+                // to PIXEL_SHADER_RESOURCE by NRDDenoise (called from either
+                // DispatchRestirGI or DispatchRestirDI depending on which is active).
                 indices.InputIdx0 = m_Renderer.GetNrdUnpackedDiffuseTex().srvIndex;
                 indices.InputIdx2 = m_Renderer.GetNrdUnpackedSpecularTex().srvIndex;
             }

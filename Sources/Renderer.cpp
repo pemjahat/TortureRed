@@ -491,13 +491,13 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     m_CurrentDIReservoirIndex = prev; // Swap for next frame
 
     // When GI is disabled but NRD is enabled, trigger the NRD denoise pass here.
-    // (When GI is enabled, DenoiseRasterIndirectGI is called from DispatchRasterIndirectGI.)
-    // DispatchRasterIndirectGI already reset m_NrdWasActiveLastFrame to false;
-    // DenoiseRasterIndirectGI will set it back to true if NRD actually ran.
+    // (When GI is enabled, NRDDenoise is called from DispatchRestirGI.)
+    // DispatchRestirGI already reset m_NrdWasActiveLastFrame to false;
+    // NRDDenoise will set it back to true if NRD actually ran.
     if (frame.enableNrdRelax != 0u && !frame.enableRasterIndirectGI)
     {
-        DenoiseRasterIndirectGI(frame);
-        // m_NrdWasActiveLastFrame is set inside DenoiseRasterIndirectGI on success.
+        NRDDenoise(frame);
+        // m_NrdWasActiveLastFrame is set inside NRDDenoise on success.
     }
 }
 
@@ -1469,7 +1469,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_PathTracerPresentOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
 }
 
-void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame)
+void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
 {
     if (!frame.enableRasterIndirectGI)
     {
@@ -1725,7 +1725,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     const bool useNrd = frame.enableNrdRelax != 0
         && frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF
         && frame.sharcDebug == 0;
-    if (useNrd && DenoiseRasterIndirectGI(frame))
+    if (useNrd && NRDDenoise(frame))
     {
         m_CurrentReservoirIndex = previousReservoir;
         return;
@@ -1764,7 +1764,7 @@ void Renderer::DispatchRasterIndirectGI(class Model* model, const FrameConstants
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 }
 
-bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
+bool Renderer::NRDDenoise(const FrameConstants& frame)
 {
     if (!m_NrdPrepareGuidesPSO || !m_NrdCompositePSO || !InitializeNrd())
         return false;
@@ -1808,7 +1808,7 @@ bool Renderer::DenoiseRasterIndirectGI(const FrameConstants& frame)
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIDiffuseIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DISpecularIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         // Transition GI reservoir intermediates to SRV.
-        // When GI is disabled, DispatchRasterIndirectGI was skipped so these may still be in UAV state.
+        // When GI is disabled, DispatchRestirGI was skipped so these may still be in UAV state.
         // The merge pass reads them but W=0 so they contribute nothing.
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

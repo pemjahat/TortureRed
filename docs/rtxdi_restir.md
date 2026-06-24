@@ -438,241 +438,260 @@ flowchart TD
 
 ---
 
-## 11. Plan for TortureRed
+## 11. TortureRed Implementation — ReSTIR DI/GI Diffuse-Specular Pipeline
 
-This section outlines the concrete implementation plan for adopting RTXDI's diffuse/specular split + merged NRD feed pattern in TortureRed.
+This section documents the **actual implemented** ReSTIR DI + GI diffuse/specular split in TortureRed, as built following the RTXDI pattern described in sections 2–10.
 
-### 11.1 Current State vs Target State
+### 11.1 Render Pipeline Order
 
-**Light source breakdown:**
+From [`Application::Render()`](d:/TortureRed/Sources/Application.cpp):
 
-| Source | Current | Target |
-|--------|---------|--------|
-| **Main directional light** | Analytical + ReSTIR DI | **Analytical only** — computed in `Lighting.hlsl` via classic `ShadeSurface()`. Never goes through ReSTIR or NRD. |
-| **Local lights (point/spot/etc.)** | ReSTIR DI (combined diffuse+specular) | ReSTIR DI split into **separate diffuse + specular** → merge → NRD |
-| **Indirect (all lights)** | ReSTIR GI (already split diffuse+specular) | Unchanged — already split diffuse+specular → merge → NRD |
+```
+1. Depth Pre-Pass
+2. G-Buffer Pass (albedo, normal, material, depth)
+3. DispatchRestirGI           ← ReSTIR GI + SHaRC + NRD trigger
+4. DispatchRestirDI           ← ReSTIR DI (local lights) + NRD trigger (if GI disabled)
+5. Lighting Pass              ← fullscreen triangle: analytic dir light + denoised DI/GI
+6. TAA (if enabled)
+7. Transparency Pass
+```
 
-**Pipeline target state:**
+**NRD denoising trigger logic:**
 
-| Aspect | Current TortureRed | Target |
-|--------|-------------------|--------|
-| **GI diffuse/specular** | Already split: `DiffuseReservoirIntermediate` + `SpecularReservoirIntermediate` | No structural change |
-| **DI diffuse/specular** | Combined `(diff+spec) × BSDF` in `DIOutputTex.rgb` | **Split**: produce `DIDiffuseIntermediate` + `DISpecularIntermediate`, sampled from local lights only, BRDF-normalized |
-| **Merge pass** | No merge — DI and GI write separate textures | **New `NrdMergeSignals`**: DI+GI diffuse → `NrdNoisyDiffuseTex`, DI+GI specular → `NrdNoisySpecularTex` |
-| **NRD** | GI-only; 4 sub-passes | **Unified**: same pipeline, but noisy inputs now contain merged DI+GI |
-| **NRD output** | `NrdCompositeIndirect` → single `RasterIndirectLightingTex` | `NrdCompositeIndirect` → **two** outputs: `NrdDenoisedDiffuseRadiance` + `NrdDenoisedSpecularRadiance` (raw radiance, not modulated) |
-| **Lighting pass** | `mainLight + localLights + DIOutputTex` + `RasterIndirectLightingTex` | `mainLight * BSDF` + `denoisedDiffuse * diffuseBRDF` + `denoisedSpecular * specularBRDF` |
+| Condition | Who triggers NRD |
+|-----------|-----------------|
+| Both DI + GI enabled | `DispatchRestirGI` calls `NRDDenoise()` after GI resampling, using merge pass |
+| GI only | `DispatchRestirGI` calls `NRDDenoise()`, using legacy `NrdPackSignals` |
+| DI only | `DispatchRestirDI` calls `NRDDenoise()` after split shade, using merge pass (GI contributes zero) |
+| Neither | NRD not run; GI resolves via `RestirGI_Split_Resolve` to `RasterIndirectLightingTex`; DI shaded to `DIOutputTex` |
 
-### 11.2 Step 1 — Split DI Diffuse/Specular (Local Lights Only)
+### 11.2 Light Source Breakdown
 
-**Goal**: Modify ReSTIR DI shading to output two textures instead of one. DI samples **local lights only** (point, spot, area lights) — the main directional/sun light is excluded from the ReSTIR DI light pool and will be shaded analytically in the lighting pass.
+| Source | Handled by | Goes through |
+|--------|-----------|-------------|
+| **Main directional light** (index 0) | `Lighting.hlsl` — analytic `EvaluateBSDF(N, V, L)` with ray-traced shadow ray | Nothing — stays in lighting pass **only** |
+| **Local lights** (index 1+) | `RestirDI_SplitShade.hlsl` — ReSTIR DI → diffuse/specular intermediates → merge → NRD | Full ReSTIR + NRD pipeline |
+| **Indirect (all lights)** | `RestirGI_Diffuse_*` / `RestirGI_Specular_*` — already split diffuse/specular → merge → NRD | Full ReSTIR + NRD pipeline |
 
-**Current** (`RestirDI_Shade.hlsl`):
+### 11.3 Implemented Shaders and Their Roles
+
+#### DI Pipeline
+
+| Shader | File | Role |
+|--------|------|------|
+| **DI Temporal** | [`RestirDI_Temporal.hlsl`](d:/TortureRed/Sources/Shaders/RestirDI_Temporal.hlsl) | Combined initial sample + temporal resampling → `DIReservoirBuffer[curr]` |
+| **DI Spatial** | [`RestirDI_Spatial.hlsl`](d:/TortureRed/Sources/Shaders/RestirDI_Spatial.hlsl) | Spatial resampling → `DIReservoirIntermediate` |
+| **DI Shade** (legacy) | [`RestirDI_Shade.hlsl`](d:/TortureRed/Sources/Shaders/RestirDI_Shade.hlsl) | Combined BSDF × radiance → `DIOutputTex` (used when NRD off) |
+| **DI Split Shade** ⭐ | [`RestirDI_SplitShade.hlsl`](d:/TortureRed/Sources/Shaders/RestirDI_SplitShade.hlsl) | Per-lobe BSDF × radiance ÷ `NRD_MaterialFactors`, writes `DIDiffuseIntermediate` + `DISpecularIntermediate` |
+
+#### GI Pipeline
+
+| Shader | File | Role |
+|--------|------|------|
+| **SHaRC Update** | [`SHaRC_Update.hlsl`](d:/TortureRed/Sources/Shaders/SHaRC_Update.hlsl) | 5×5 downsampled secondary ray trace → hash table accumulation |
+| **SHaRC Resolve** | [`SHaRC_Resolve.hlsl`](d:/TortureRed/Sources/Shaders/SHaRC_Resolve.hlsl) | EMA blend accumulation → resolved radiance cache |
+| **Diffuse Temporal** | [`RestirGI_Diffuse_Temporal.hlsl`](d:/TortureRed/Sources/Shaders/RestirGI_Diffuse_Temporal.hlsl) | Temporal ReSTIR + SHaRC query + BSDF (second-bounce DI from `DispatchRays`) |
+| **Diffuse Spatial** | [`RestirGI_Diffuse_Spatial.hlsl`](d:/TortureRed/Sources/Shaders/RestirGI_Diffuse_Spatial.hlsl) | 3×3 spatial reuse → `DiffuseReservoirIntermediate` |
+| **Specular Temporal** | [`RestirGI_Specular_Temporal.hlsl`](d:/TortureRed/Sources/Shaders/RestirGI_Specular_Temporal.hlsl) | Temporal ReSTIR for specular lobe |
+| **Specular Spatial** | [`RestirGI_Specular_Spatial.hlsl`](d:/TortureRed/Sources/Shaders/RestirGI_Specular_Spatial.hlsl) | 3×3 spatial reuse → `SpecularReservoirIntermediate` |
+| **Split Resolve** (no NRD) | [`RestirGI_Split_Resolve.hlsl`](d:/TortureRed/Sources/Shaders/RestirGI_Split_Resolve.hlsl) | Resolve diffuse+specular reservoirs → `RasterIndirectLightingTex` |
+
+#### NRD Pipeline
+
+| Shader | File | Role |
+|--------|------|------|
+| **Prepare Guides** | [`NrdPrepareGuides.hlsl`](d:/TortureRed/Sources/Shaders/NrdPrepareGuides.hlsl) | Motion vectors, normal+roughness, viewZ |
+| **Merge Signals** ⭐ | [`NrdMergeSignals.hlsl`](d:/TortureRed/Sources/Shaders/NrdMergeSignals.hlsl) | DI intermediates (raw float4) + GI reservoirs (evaluated per-lobe) → additive blend → RELAX-packed `NrdNoisyDiffuseTex` / `NrdNoisySpecularTex` |
+| **Pack Signals** (legacy) | [`NrdPackRasterIndirect.hlsl`](d:/TortureRed/Sources/Shaders/NrdPackRasterIndirect.hlsl) | GI-only: GI reservoirs → RELAX-packed (used when `enableRestirDI==0`) |
+| **NRD Relax** | NRD SDK | Denoise `IN_DIFF_RADIANCE_HITDIST` + `IN_SPEC_RADIANCE_HITDIST` |
+| **Composite** ⭐ | [`NrdCompositeIndirect.hlsl`](d:/TortureRed/Sources/Shaders/NrdCompositeIndirect.hlsl) | Unpack NRD output → two raw radiance textures: `NrdUnpackedDiffuseTex` + `NrdUnpackedSpecularTex` |
+
+⭐ = new/modified compared to pre-RTXDI-pattern TortureRed.
+
+### 11.4 Key Design: The Merge Pass
+
+[`NrdMergeSignals.hlsl`](d:/TortureRed/Sources/Shaders/NrdMergeSignals.hlsl) is the `StoreShadingOutput` equivalent. It reads:
+
+| Input | Bindless Slot | Format | Source |
+|-------|--------------|--------|--------|
+| `DIDiffuseIntermediate` | `InputIdx0` | `Texture2D<float4>` raw `(normalizedDiffuseRadiance, lightDistance)` | `RestirDI_SplitShade` |
+| `DISpecularIntermediate` | `InputIdx1` | `Texture2D<float4>` raw `(normalizedSpecularRadiance, lightDistance)` | `RestirDI_SplitShade` |
+| `DiffuseReservoirIntermediate` | `InputIdx2` | `StructuredBuffer<Reservoir>` | `RestirGI_Diffuse_Spatial` |
+| `SpecularReservoirIntermediate` | `OutputIdx2` (repurposed) | `StructuredBuffer<Reservoir>` | `RestirGI_Specular_Spatial` |
+
+**Additive merge logic:**
+
 ```hlsl
-// combined: (diffuseBSDF + specularBSDF) * radiance * W
-DIOutputTex[pixel] = float4(combinedBSDF * radiance * W, W);
-```
+// Step 1: DI base radiance + hitT (isFirstPass = true)
+diffuseRadiance  = DIDiffuseIntermediate[pixel].rgb;
+specularRadiance = DISpecularIntermediate[pixel].rgb;
+diffuseHitT      = DIDiffuseIntermediate[pixel].a;   // light distance
+specularHitT     = DISpecularIntermediate[pixel].a;
 
-**Target** — create a new pass (`RestirDI_SplitResolve.hlsl`) or modify the shade pass to produce per-lobe, BRDF-normalized output:
-
-```hlsl
-// Sample local light only (main directional excluded from DI light list)
-float3 L = normalize(lightPos - surface.worldPos);
-float NdotL = max(0, dot(N, L));
-
-// Per-lobe BRDF
-float3 diffuseBRDF  = Lambert(N, L);                // (1/π) * NdotL  - purely diffuse
-float3 specularBRDF = GGX(N, V, L, roughness, F0);  // GGX * Fresnel * NdotL
-
-// NRD material factors for normalization (same as GI side)
-float3 diffuseFactor, specularFactor;
-NRD_MaterialFactors(N, V, albedo, F0, roughness, diffuseFactor, specularFactor);
-
-// BRDF-normalized radiance = (BRDF * radiance * W) / materialFactor
-// This gives NRD the "pure radiance" it expects
-DIDiffuseIntermediate[pixel]  = float4(diffuseBRDF  * radiance * W / max(diffuseFactor,  1e-4), lightDistance);
-DISpecularIntermediate[pixel] = float4(specularBRDF * radiance * W / max(specularFactor, 1e-4), lightDistance);
-```
-
-**Why exclude the main directional light from ReSTIR DI:**
-- The sun/directional light is coherent, bright, and spatially uniform — ReSTIR provides no benefit over analytic shading
-- Keeping it out of NRD avoids unnecessary denoiser blur on sharp directional shadows
-- Local lights benefit from ReSTIR because they are numerous, spatially varying, and would be expensive to shade exhaustively
-
-**Files to create/modify**:
-
-| File | Action |
-|------|--------|
-| `RestirDI_Shade.hlsl` or `RestirDI_SplitResolve.hlsl` | New/modified — per-lobe shading with NRD normalization |
-| `DIDiffuseIntermediate` | New texture (`R16G16B16A16_FLOAT`, interleaved or separate) |
-| `DISpecularIntermediate` | New texture |
-| `Renderer.cpp` | New dispatch call, texture allocation |
-
-### 11.3 Step 2 — Merge Pass (StoreShading Equivalent)
-
-**Goal**: Combine DI and GI diffuse/specular into shared NRD input textures before denoising. This mirrors RTXDI's `StoreShadingOutput()` with `isFirstPass=true` (DI) and `isFirstPass=false` (GI).
-
-**New shader**: `NrdMergeSignals.hlsl`
-
-```
-// Input: DIDiffuseIntermediate, DISpecularIntermediate,
-//        DiffuseReservoirIntermediate, SpecularReservoirIntermediate
-// Output: NrdNoisyDiffuseTex, NrdNoisySpecularTex
-
-// Step 1: Evaluate DI contribution (isFirstPass = true)
-diffuseRadiance  = DIDiffuseIntermediate[pixel].rgb  // already BRDF-normalized
-specularRadiance = DISpecularIntermediate[pixel].rgb
-diffuseHitT      = lightDistanceFromDI               // world-space light distance
-specularHitT     = lightDistanceFromDI
-
-// Step 2: Additive blend GI contribution (isFirstPass = false)
-if (hasValidGI) {
-    // brighter lobe's hitT is preserved
-    if (luminance(GI_diffuse) > luminance(DI_diffuse) || GI_hitT == 0)
-        diffuseHitT = DI_diffuseHitT;  // keep DI's hitT
-    diffuseRadiance += GI_diffuseRadiance;
-
-    if (luminance(GI_specular) > luminance(DI_specular) || GI_hitT == 0)
-        specularHitT = DI_specularHitT;
-    specularRadiance += GI_specularRadiance;
+// Step 2: GI additive blend (isFirstPass = false)
+if (rDiffuse.W > 0 && rDiffuse.firstBounceHitT > 0) {
+    giDiffuse = diffuseBRDF * reservoir.radiance * W / diffuseFactor;
+    if (luminance(giDiffuse) > luminance(diffuseRadiance))
+        diffuseHitT = rDiffuse.firstBounceHitT;   // GI's hitT if brighter
+    diffuseRadiance += giDiffuse;
 }
+// Same pattern for specular...
 
-// Step 3: Pack for NRD
+// Step 3: Pack for NRD Relax
 NrdNoisyDiffuseTex[pixel]  = RELAX_FrontEnd_PackRadianceAndHitDist(diffuseRadiance,  diffuseHitT,  true);
 NrdNoisySpecularTex[pixel] = RELAX_FrontEnd_PackRadianceAndHitDist(specularRadiance, specularHitT, true);
 ```
 
-**Key design decisions from RTXDI to adopt**:
+**hitT selection**: The brighter lobe's hitT is used. GI's `firstBounceHitT` is the path-traced distance to the secondary surface — typically longer and more variable than DI's light distance. When GI is dimmer, DI's crisp light-distance hitT is preserved, giving NRD better spatial hints.
 
-- **hitT selection**: Use the brighter lobe's hitT — DI's light distance provides meaningful spatial hints for NRD's reprojection and disocclusion.
-- **Additive blend**: DI radiance + GI radiance. Already correct because both are BRDF-normalized (divided by the same `NRD_MaterialFactors`).
-- **No MIS for DI+GI merge**: Unlike ReSTIR GI's internal MIS, there's no need to weight DI vs GI. Both contribute valid unbiased radiance; additive is correct.
+### 11.5 Lighting Pass — Three-Term Final Composite
 
-**Pipeline flow change**:
-
-```
-BEFORE:
-  Main Dir Light ──────────────────────────────────────────────────────→ Lighting.hlsl (analytical)
-  DI:  Shade → DIOutputTex (combined) ─────────────────────────────────→ Lighting.hlsl (raw)
-  GI:  Spatial → PackSignals → NRD → Composite → RasterIndirectTex ───→ Lighting.hlsl (modulated)
-
-AFTER:
-  Main Dir Light ──────────────────────────────────────────────────────→ Lighting.hlsl (analytical, Term 1)
-  DI:  SplitResolve → DIDiffuse + DISpecular ─┐
-                                              ├→ Merge → NRD → Composite → DenoisedDiffuse  ──→ Lighting.hlsl (Term 2)
-  GI:  Spatial → DiffuseInter + SpecularInter ┘                       → DenoisedSpecular ──→ Lighting.hlsl (Term 3)
-```
-
-### 11.4 Step 3 — NRD Denoising (Unified)
-
-**Goal**: NRD Relax denoises the merged (DI + GI) signal. No structural change to the NRD dispatch itself — it already handles diffuse + specular channels.
-
-**Unchanged**: `NrdPrepareGuides` (motion vectors, normals, depth), `NRD Relax` dispatch itself.
-
-**Replaced**: `NrdPackRasterIndirect.hlsl` → `NrdMergeSignals.hlsl` from Step 2 (already packs into NRD format, merging DI + GI).
-
-**Modified — NRD Composite Pass** (`NrdCompositeIndirect.hlsl`):
-
-Currently, the composite pass unpacks denoised radiance, multiplies by `NRD_MaterialFactors()`, and produces a single `RasterIndirectLightingTex`:
-```hlsl
-// Current: single output, modulated
-indirectLighting = diffuseRadiance * diffuseFactor + specularRadiance * specularFactor;
-```
-
-Target: the composite pass should output **two separate textures** with **raw (un-modulated) denoised radiance**. The BRDF material factor multiplication moves to the lighting pass:
-
-```hlsl
-// Target: two outputs, RAW radiance (no material factor modulation here)
-NrdDenoisedDiffuseTex[pixel]  = float4(RELAX_BackEnd_UnpackRadiance(diffuseIn),  0);
-NrdDenoisedSpecularTex[pixel] = float4(RELAX_BackEnd_UnpackRadiance(specularIn), 0);
-```
-
-This keeps the composite pass simple (just unpacking), and gives the lighting pass full control over how to apply materials.
-
-### 11.5 Step 4 — Lighting Pass Composite (Final Lit Pass)
-
-**Goal**: `Lighting.hlsl` composes the final lit color from three additive sources:
-
-```
-finalColor = mainDirectionalTerm + denoisedDiffuseTerm + denoisedSpecularTerm
-```
-
-Where each term is:
+[`Lighting.hlsl`](d:/TortureRed/Sources/Shaders/Lighting.hlsl) composes the final lit color from three independent additive terms:
 
 | Term | Source | Computation |
 |------|--------|-------------|
-| **mainDirectionalTerm** | Sun/directional light (analytical) | Classic `ShadeSurface(light, surface) → diffuse + specular` — never goes through ReSTIR or NRD |
-| **denoisedDiffuseTerm** | DI local lights + GI indirect, denoised diffuse channel | `denoisedDiffuseRadiance * diffuseBRDF_factor` where `diffuseBRDF_factor` comes from `NRD_MaterialFactors()` |
-| **denoisedSpecularTerm** | DI local lights + GI indirect, denoised specular channel | `denoisedSpecularRadiance * specularBRDF_factor` where `specularBRDF_factor` comes from `NRD_MaterialFactors()` |
+| **mainDirTerm** | Sun/directional (index 0) | `EvaluateBSDF(N, V, L_main) * lightColor * intensity * NdotL * shadowFactor` — ray-traced shadow ray, no ReSTIR, no NRD |
+| **denoisedDiffuseTerm** | DI local lights + GI indirect, unified NRD diffuse | `NrdUnpackedDiffuseTex.rgb * diffuseBRDFFactor` from `NRD_MaterialFactors()` |
+| **denoisedSpecularTerm** | DI local lights + GI indirect, unified NRD specular | `NrdUnpackedSpecularTex.rgb * specularBRDFFactor` from `NRD_MaterialFactors()` |
 
-**Current** (`Lighting.hlsl`):
+**Actual code pattern:**
+
 ```hlsl
-// Direct: main directional light + local lights + DIOutputTex (raw ReSTIR DI)
-directLighting = mainLight + localLights + DIOutputTex.rgb;
+// Term 1: Main directional (analytic, ray-traced shadows)
+EvaluateBSDF(N, V, L_main, albedo, metallic, roughness, diff_main, spec_main);
+totalDirectLighting = (diff_main + spec_main) * mainLight.color * mainLight.intensity * NdotL * shadowFactor;
 
-// Indirect: from RasterIndirectLightingTex (GI only, pre-modulated)
-indirectLighting = RasterIndirectLightingTex.rgb * aoFactor;
+// Term 2+3: Denoised ReSTIR (DI local lights + GI indirect)
+if (nrdActive) {
+    denoisedDiffuse  = NrdUnpackedDiffuseTex.SampleLevel(...).rgb;
+    denoisedSpecular = NrdUnpackedSpecularTex.SampleLevel(...).rgb;
+    NRD_MaterialFactors(N, V, albedo, F0, roughness, diffuseFactor, specularFactor);
+    denoisedDiffuseTerm  = denoisedDiffuse  * diffuseFactor;
+    denoisedSpecularTerm = denoisedSpecular * specularFactor;
 
-finalColor = directLighting + indirectLighting;
+    finalColor += denoisedDiffuseTerm + denoisedSpecularTerm;
+}
 ```
 
-**Target**:
-```hlsl
-// G-buffer surface reconstruction
-float3 N = ...; float3 V = ...; float3 albedo = ...;
-float3 F0 = lerp(0.04, albedo, metallic); float roughness = ...;
+**Two code paths in Lighting.hlsl:**
 
-// ---- Term 1: Main directional light (analytic, not ReSTIR, not NRD) ----
-float3 mainDirDiffuse, mainDirSpecular;
-ShadeSurface(mainDirLight, surface, mainDirDiffuse, mainDirSpecular);
-float3 mainDirTerm = mainDirDiffuse + mainDirSpecular;
+| Path | Condition | Input textures | Behavior |
+|------|-----------|---------------|----------|
+| Unified NRD | `enableNrdRelax && (enableRestirDI || enableRasterIndirectGI)` | `NrdUnpackedDiffuseTex` + `NrdUnpackedSpecularTex` | Raw radiance × material factors |
+| Legacy | No NRD, or NRD off | `RasterIndirectLightingTex` (modulated) or `DIOutputTex` (raw DI) | Pre-modulated or raw add |
 
-// ---- Term 2+3: Denoised ReSTIR (DI local lights + GI indirect) ----
-float3 diffuseBRDFFactor, specularBRDFFactor;
-NRD_MaterialFactors(N, V, albedo, F0, roughness, diffuseBRDFFactor, specularBRDFFactor);
+### 11.6 Complete TortureRed Data Flow Diagram
 
-// Read raw denoised radiance (not pre-modulated)
-float3 denoisedDiffuse  = NrdDenoisedDiffuseTex[pixel].rgb;
-float3 denoisedSpecular = NrdDenoisedSpecularTex[pixel].rgb;
+```mermaid
+flowchart TD
+    subgraph GBuffer["G-Buffer"]
+        G_Albedo["Albedo"]
+        G_Normal["Normal"]
+        G_Material["Material (roughness, metallic)"]
+        G_Depth["Depth"]
+    end
 
-// Apply material re-modulation here (not in NRD composite)
-float3 denoisedDiffuseTerm  = denoisedDiffuse  * diffuseBRDFFactor;
-float3 denoisedSpecularTerm = denoisedSpecular * specularBRDFFactor;
+    subgraph DI["ReSTIR DI (Local Lights Only)"]
+        DI_Temp["Temporal Resampling<br/>RestirDI_Temporal.hlsl"]
+        DI_Spatial["Spatial Resampling<br/>RestirDI_Spatial.hlsl"]
+        DI_SplitShade["Split Shade<br/>RestirDI_SplitShade.hlsl"]
+        DI_Temp --> DI_Spatial
+        DI_Spatial --> DI_SplitShade
+        DI_SplitShade --> DIDiff["DIDiffuseIntermediate<br/>(raw float4: radiance, lightDist)"]
+        DI_SplitShade --> DISpec["DISpecularIntermediate<br/>(raw float4: radiance, lightDist)"]
+    end
 
-// ---- Final composite ----
-float3 finalColor = mainDirTerm + denoisedDiffuseTerm + denoisedSpecularTerm;
+    subgraph GI["ReSTIR GI (Indirect, All Lights)"]
+        GI_SHARC["SHaRC Update + Resolve<br/>(secondary ray cache)"]
+        GI_DiffT["Diffuse Temporal<br/>RestirGI_Diffuse_Temporal.hlsl"]
+        GI_DiffS["Diffuse Spatial<br/>RestirGI_Diffuse_Spatial.hlsl"]
+        GI_SpecS["Specular Spatial<br/>RestirGI_Specular_Spatial.hlsl"]
+        GI_SHARC --> GI_DiffT
+        GI_DiffT --> GI_DiffS
+        GI_DiffT --> GI_SpecS
+        GI_DiffS --> GIDiff["DiffuseReservoirIntermediate<br/>(StructuredBuffer)"]
+        GI_SpecS --> GISpec["SpecularReservoirIntermediate<br/>(StructuredBuffer)"]
+    end
+
+    subgraph NRD["NRD Denoising (NRDDenoise)"]
+        NRD_Guides["Prepare Guides<br/>NrdPrepareGuides.hlsl"]
+        NRD_Merge["Merge Signals ⭐<br/>NrdMergeSignals.hlsl<br/>DI + GI → additive blend"]
+        NRD_Relax["NRD Relax<br/>(DiffuseSpecular denoiser)"]
+        NRD_Comp["Composite Unpack ⭐<br/>NrdCompositeIndirect.hlsl"]
+        NRD_Guides --> NRD_Merge
+        NRD_Merge --> NRD_Relax
+        NRD_Relax --> NRD_Comp
+        NRD_Comp --> NRD_DiffOut["NrdUnpackedDiffuseTex<br/>(raw radiance)"]
+        NRD_Comp --> NRD_SpecOut["NrdUnpackedSpecularTex<br/>(raw radiance)"]
+    end
+
+    subgraph Lighting["Lighting Pass (Lighting.hlsl)"]
+        L_Dir["Term 1: Analytic Directional<br/>EvaluateBSDF + shadow ray"]
+        L_Diff["Term 2: denoisedDiffuse<br/>× diffuseBRDFFactor"]
+        L_Spec["Term 3: denoisedSpecular<br/>× specularBRDFFactor"]
+        L_Sum["finalColor = Term1 + Term2 + Term3"]
+        L_Dir --> L_Sum
+        L_Diff --> L_Sum
+        L_Spec --> L_Sum
+    end
+
+    GBuffer --> DI_Temp
+    GBuffer --> DI_Spatial
+    GBuffer --> DI_SplitShade
+    GBuffer --> GI_SHARC
+    GBuffer --> GI_DiffT
+    GBuffer --> GI_DiffS
+    GBuffer --> GI_SpecS
+    GBuffer --> NRD_Guides
+
+    DIDiff --> NRD_Merge
+    DISpec --> NRD_Merge
+    GIDiff --> NRD_Merge
+    GISpec --> NRD_Merge
+
+    NRD_DiffOut --> L_Diff
+    NRD_SpecOut --> L_Spec
+    GBuffer --> L_Dir
+    GBuffer --> L_Diff
+    GBuffer --> L_Spec
 ```
 
-**Why material modulation moves to the lighting pass:**
-
-| Location | Pros | Cons |
-|----------|------|------|
-| NRD composite (current) | Single output texture, simpler lighting pass | No flexibility — can't mix denoised channels independently |
-| Lighting pass (target) | Full control — three independent additive terms; main directional is separate from NRD | Lighting pass needs two extra texture reads |
-
-The target approach matches RTXDI's `CompositingPass`: read denoised radiance, apply material factors, composite. It also cleanly separates concerns — NRD only cares about radiance, the lighting pass owns all BRDF/material logic.
-
-### 11.6 Implementation Order
-
-| Phase | Step | Effort | Risk |
-|-------|------|--------|------|
-| **A** | Split DI into diffuse/specular intermediates (`RestirDI_SplitResolve.hlsl`) | Medium | Low — isolated change, no pipeline disruption |
-| **B** | Create merge pass (`NrdMergeSignals.hlsl`) combining DI + GI intermediates | Medium | Medium — replaces `NrdPackRasterIndirect.hlsl`, needs careful hitT logic |
-| **C** | Wire merge pass into NRD pipeline (replace PackSignals) | Small | Low — drop-in replacement |
-| **D** | Update `Lighting.hlsl` to remove separate DI read | Small | Low — DI is now in `RasterIndirectLightingTex` |
-| **E** | Validation: A/B comparison with reference (no NRD path as baseline) | Medium | — |
-
-### 11.7 Textures Summary (Post-Change)
+### 11.7 Textures Summary
 
 | Texture | Format | Produced by | Consumed by |
 |---------|--------|-------------|-------------|
-| `DIDiffuseIntermediate` | `R16G16B16A16_FLOAT` | `RestirDI_SplitResolve` | `NrdMergeSignals` |
-| `DISpecularIntermediate` | `R16G16B16A16_FLOAT` | `RestirDI_SplitResolve` | `NrdMergeSignals` |
-| `DiffuseReservoirIntermediate` | (existing) | `RestirGI_Diffuse_Spatial` | `NrdMergeSignals` |
-| `SpecularReservoirIntermediate` | (existing) | `RestirGI_Specular_Spatial` | `NrdMergeSignals` |
-| `NrdNoisyDiffuseTex` | `R16G16B16A16_FLOAT` | `NrdMergeSignals` (was `NrdPackRasterIndirect`) | NRD Relax |
-| `NrdNoisySpecularTex` | `R16G16B16A16_FLOAT` | `NrdMergeSignals` (was `NrdPackRasterIndirect`) | NRD Relax |
-| `NrdDenoisedDiffuseTex` | `R16G16B16A16_FLOAT` | NRD Relax → `NrdCompositeIndirect` (unpack only) | `Lighting.hlsl` |
-| `NrdDenoisedSpecularTex` | `R16G16B16A16_FLOAT` | NRD Relax → `NrdCompositeIndirect` (unpack only) | `Lighting.hlsl` |
-| `RasterIndirectLightingTex` | removed / repurposed | — | — |
-| `DIOutputTex` | removed / repurposed | — | — |
+| `DIReservoirBuffer[2]` | `StructuredBuffer<DIRreservoir>` | DI Temporal (swap) | DI Spatial |
+| `DIReservoirIntermediate` | `StructuredBuffer<DIRreservoir>` | DI Spatial | DI Split Shade, DI Shade (legacy) |
+| `DIDiffuseIntermediate` | `R16G16B16A16_FLOAT` | DI Split Shade | NrdMergeSignals |
+| `DISpecularIntermediate` | `R16G16B16A16_FLOAT` | DI Split Shade | NrdMergeSignals |
+| `DIOutputTex` | `R16G16B16A16_FLOAT` | DI Shade (legacy) | Lighting.hlsl (no-NRD path) |
+| `DiffuseReservoirBuffer[2]` | `StructuredBuffer<Reservoir>` | Diffuse Temporal (swap) | Diffuse Spatial |
+| `SpecularReservoirBuffer[2]` | `StructuredBuffer<Reservoir>` | Specular Temporal/Resolve | Specular Spatial |
+| `DiffuseReservoirIntermediate` | `StructuredBuffer<Reservoir>` | Diffuse Spatial | NrdMergeSignals / Split Resolve |
+| `SpecularReservoirIntermediate` | `StructuredBuffer<Reservoir>` | Specular Spatial | NrdMergeSignals / Split Resolve |
+| `NrdMotionVectorsTex` | `R16G16_FLOAT` | NrdPrepareGuides | NRD Relax |
+| `NrdNormalRoughnessTex` | `R10G10B10A2_UNORM` | NrdPrepareGuides | NRD Relax |
+| `NrdViewZTex` | `R32_FLOAT` | NrdPrepareGuides | NRD Relax |
+| `NrdNoisyDiffuseTex` | `R16G16B16A16_FLOAT` | NrdMergeSignals / NrdPackSignals | NRD Relax |
+| `NrdNoisySpecularTex` | `R16G16B16A16_FLOAT` | NrdMergeSignals / NrdPackSignals | NRD Relax |
+| `NrdDenoisedDiffuseTex` | `R16G16B16A16_FLOAT` | NRD Relax | NrdCompositeIndirect |
+| `NrdDenoisedSpecularTex` | `R16G16B16A16_FLOAT` | NRD Relax | NrdCompositeIndirect |
+| `NrdUnpackedDiffuseTex` | `R16G16B16A16_FLOAT` | NrdCompositeIndirect | Lighting.hlsl |
+| `NrdUnpackedSpecularTex` | `R16G16B16A16_FLOAT` | NrdCompositeIndirect | Lighting.hlsl |
+| `RasterIndirectLightingTex` | `R16G16B16A16_FLOAT` | Split Resolve (no-NRD) | Lighting.hlsl (legacy) |
+
+### 11.8 Key Differences from RTXDI
+
+| Aspect | RTXDI FullSample | TortureRed |
+|--------|-----------------|-----------|
+| **DI sample payload** | Light index + UV (`RTXDI_DIReservoir`) | Light index + hit position (custom `DIRreservoir`) |
+| **DI sampling** | `RTXDI_StreamSample` / `RTXDI_CombineDIReservoirs` (RIS) | Custom RIS implementation |
+| **DI visibility** | Reused across frames (`packedVisibility`, `age`) | Fresh shadow ray per frame (simpler, higher quality) |
+| **GI radiance source** | Second-bounce surface (path traced) | SHaRC radiance cache (probe-based interpolation) |
+| **GI reservoir type** | `RTXDI_GIReservoir` (position + normal + radiance) | Custom `Reservoir` struct (hitPos + radiance + W + firstBounceHitT) |
+| **NRD format** | RELAX or REBLUR (selectable) | RELAX only |
+| **Confidence inputs** | Gradient-based `DiffuseConfidence` / `SpecularConfidence` | Not used (RELAX operates without explicit confidence) |
+| **Checkerboard** | Half-width interleaved rendering | Not implemented |
+| **PSR** | Primary Surface Replacement for mirrors | Not implemented |
+| **MIS (GI)** | Roughened BRDF MIS for low-roughness surfaces | Not implemented |
+| **Main directional** | Sampled via ReSTIR DI with all other lights | Excluded from ReSTIR, shaded analytically |

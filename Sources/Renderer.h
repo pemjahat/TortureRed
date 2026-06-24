@@ -31,7 +31,7 @@ public:
 
     void BuildAccelerationStructures(class Model* model);
     void DispatchRays(class Model* model, const FrameConstants& frame, const LightConstants& light);
-    void DispatchRasterIndirectGI(class Model* model, const FrameConstants& frame);
+    void DispatchRestirGI(class Model* model, const FrameConstants& frame);
     void CopyTextureToBackBuffer(const GPUTexture& texture);
     void DrawPathVizLines(const FrameConstants& frame);
 
@@ -137,7 +137,7 @@ private:
     void WaitForPreviousFrame();
     bool InitializeNrd();
     void ShutdownNrd();
-    bool DenoiseRasterIndirectGI(const FrameConstants& frame);
+    bool NRDDenoise(const FrameConstants& frame);
 
     // Shader hot-reload helpers
     void SetupShaderTimestamps();

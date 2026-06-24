@@ -20,7 +20,7 @@ This document describes:
 
 | File | Role |
 |---|---|
-| [`Renderer.cpp`](../Sources/Renderer.cpp) — `DenoiseRasterIndirectGI()` | Host-side scheduling: decides NRD vs direct resolve |
+| [`Renderer.cpp`](../Sources/Renderer.cpp) — `NRDDenoise()` | Host-side scheduling: decides NRD vs direct resolve |
 | [`NrdPrepareGuides.hlsl`](../Sources/Shaders/NrdPrepareGuides.hlsl) | Pre-pass: extracts motion vectors, normals, depth for NRD |
 | [`NrdPackRasterIndirect.hlsl`](../Sources/Shaders/NrdPackRasterIndirect.hlsl) | Converts GI reservoir intermediates into NRD-compatible noisy signals |
 | [`NrdCompositeIndirect.hlsl`](../Sources/Shaders/NrdCompositeIndirect.hlsl) | Unpacks NRD output back into `RasterIndirectLightingTex` |
@@ -45,7 +45,7 @@ This document describes:
 
 ### Branching logic (pass 5)
 
-The decision between NRD and direct resolve happens in [`Renderer.cpp`](../Sources/Renderer.cpp) `DispatchRasterIndirectGI()`:
+The decision between NRD and direct resolve happens in [`Renderer.cpp`](../Sources/Renderer.cpp) `DispatchRestirGI()`:
 
 - **NRD path active** when: `enableNrdRelax=1`, no reservoir debug mode, no SHaRC debug
 - **Direct resolve** otherwise
