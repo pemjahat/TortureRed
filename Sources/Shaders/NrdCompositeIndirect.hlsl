@@ -16,12 +16,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // InputIdx0 = NrdDenoisedDiffuseTex (NRD output, RELAX-packed)
     // InputIdx1 = NrdDenoisedSpecularTex (NRD output, RELAX-packed)
     // InputIdx2 = NrdValidationTex (optional, UINT(-1) if unused)
-    // OutputIdx0 = NrdDenoisedDiffuseUnpackedTex (raw denoised diffuse radiance)
-    // OutputIdx1 = NrdDenoisedSpecularUnpackedTex (raw denoised specular radiance)
-    //
-    // In the unified DI+GI path, OutputIdx0/1 are separate "unpacked" textures
-    // (RasterIndirectLightingTex repurposed as diffuse, NrdValidationTex repurposed as specular).
-    // In the legacy GI-only path, OutputIdx0 = RasterIndirectLightingTex (modulated combined).
+    // OutputIdx0 = FinalDiffuseTex  (circular write-back: denoised radiance replaces raw)
+    // OutputIdx1 = FinalSpecularTex (circular write-back: denoised radiance replaces raw)
     Texture2D<float4> diffuseIn  = ResourceDescriptorHeap[g_Indices.InputIdx0];
     Texture2D<float4> specularIn = ResourceDescriptorHeap[g_Indices.InputIdx1];
     RWTexture2D<float4> diffuseOut  = ResourceDescriptorHeap[g_Indices.OutputIdx0];

@@ -584,11 +584,11 @@ void Application::Render()
             //m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
         }
         
-        // 2.5 ReSTIR GI Passes
-        m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
-
-        // 2.6 ReSTIR DI Passes (direct illumination from local lights)
+        // 2.5 ReSTIR DI Passes (direct illumination from local lights)
         m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+
+        // 2.6 ReSTIR GI Passes
+        m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
 
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
@@ -603,37 +603,16 @@ void Application::Render()
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            
-            // Determine whether the unified DI+GI NRD path is active.
-            // Active when NRD is on AND at least one of DI/GI is enabled.
-            // DI-only: NrdUnpackedDiffuse/Specular contain denoised DI, GI reservoirs contribute 0.
-            // GI-only: legacy NrdPackSignals path, NrdUnpackedDiffuse/Specular contain denoised GI.
-            // Both:    NrdMergeSignals merges both into NrdUnpackedDiffuse/Specular.
-            const bool nrdActive = (m_FrameConstants.enableNrdRelax != 0u)
-                                && ((m_FrameConstants.enableRestirDI != 0u) || (m_FrameConstants.enableRasterIndirectGI != 0u));
-            const bool diMergedIntoNrd = nrdActive;
 
-            if (diMergedIntoNrd)
+            // FinalDiffuse/FinalSpecular are the universal interchange textures.
+            // They contain NRD-normalized radiance (raw or denoised) for all active sources.
+            // Lighting always reads from them — no branching on NRD or DI/GI state.
+            if (m_FrameConstants.enableRestirDI || m_FrameConstants.enableRasterIndirectGI)
             {
-                // Unified NRD path: NrdUnpackedDiffuse/Specular are already transitioned
-                // to PIXEL_SHADER_RESOURCE by NRDDenoise (called from either
-                // DispatchRestirGI or DispatchRestirDI depending on which is active).
-                indices.InputIdx0 = m_Renderer.GetNrdUnpackedDiffuseTex().srvIndex;
-                indices.InputIdx2 = m_Renderer.GetNrdUnpackedSpecularTex().srvIndex;
-            }
-            else
-            {
-                // Legacy path: GI uses pre-modulated RasterIndirectLightingTex, DI uses raw DIOutputTex.
-                if (m_FrameConstants.enableRasterIndirectGI)
-                {
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterIndirectLightingTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    indices.InputIdx0 = m_Renderer.GetRasterIndirectLightingTex().srvIndex;
-                }
-                if (m_FrameConstants.enableRestirDI)
-                {
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetDIOutputTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    indices.InputIdx1 = m_Renderer.GetDIOutputTex().srvIndex;
-                }
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalDiffuseTex(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                indices.InputIdx0 = m_Renderer.GetFinalDiffuseTex().srvIndex;
+                indices.InputIdx1 = m_Renderer.GetFinalSpecularTex().srvIndex;
             }
 
             // Need this binding for shadow ray in pixel shader

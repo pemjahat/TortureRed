@@ -176,17 +176,16 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     
-    CreateTexture(m_RasterIndirectLightingTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_RasterHdrOutputTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
     CreateTexture(m_NrdMotionVectorsTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdNormalRoughnessTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdViewZTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisyDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisySpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdDenoisedDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdDenoisedSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdValidationTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdUnpackedDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdUnpackedSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // Universal interchange textures: SSO writes, NrdPackNoise+Lighting read
+    CreateTexture(m_FinalDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_FinalSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     InitializeNrd();
 }
@@ -241,31 +240,36 @@ void Renderer::CreateRasterIndirectGIPipelines()
         }
     }
 
-    auto nrdGuidesCS      = GraphicsHelper::CompileShader("Shaders/NrdPrepareGuides.hlsl",         "main", "cs_6_6");
-    auto nrdPackCS        = GraphicsHelper::CompileShader("Shaders/NrdPackRasterIndirect.hlsl",    "main", "cs_6_6");
-    auto nrdMergeCS       = GraphicsHelper::CompileShader("Shaders/NrdMergeSignals.hlsl",          "main", "cs_6_6");
-    auto nrdCompositeCS   = GraphicsHelper::CompileShader("Shaders/NrdCompositeIndirect.hlsl",     "main", "cs_6_6");
+    auto nrdGuidesCS      = GraphicsHelper::CompileShader("Shaders/NrdPrepareGuides.hlsl",              "main", "cs_6_6");
+    auto nrdCompositeCS   = GraphicsHelper::CompileShader("Shaders/NrdCompositeIndirect.hlsl",          "main", "cs_6_6");
+    auto giResolveCS      = GraphicsHelper::CompileShader("Shaders/RestirGI_ResolveIntermediates.hlsl", "main", "cs_6_6");
+    auto nrdStoreSSO_CS   = GraphicsHelper::CompileShader("Shaders/NrdStoreShadingOutput.hlsl",         "main", "cs_6_6");
+    auto nrdPackNoiseCS   = GraphicsHelper::CompileShader("Shaders/NrdPackNoise.hlsl",                  "main", "cs_6_6");
 
     // ------- Split Diffuse / Specular PSOs -------
     auto diffuseTemporalCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Diffuse_Temporal.hlsl",  "main", "cs_6_6");
     auto specularTemporalCS = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Temporal.hlsl", "main", "cs_6_6");
     auto diffuseSpatialCS   = GraphicsHelper::CompileShader("Shaders/RestirGI_Diffuse_Spatial.hlsl",   "main", "cs_6_6");
     auto specularSpatialCS  = GraphicsHelper::CompileShader("Shaders/RestirGI_Specular_Spatial.hlsl",  "main", "cs_6_6");
-    auto splitResolveCS     = GraphicsHelper::CompileShader("Shaders/RestirGI_Split_Resolve.hlsl",     "main", "cs_6_6");
 
     computeDesc.CS = { nrdGuidesCS.data(), nrdGuidesCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPrepareGuidesPSO));
 
-    computeDesc.CS = { nrdPackCS.data(), nrdPackCS.size() };
-    m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPackSignalsPSO));
-
-    if (!nrdMergeCS.empty()) {
-        computeDesc.CS = { nrdMergeCS.data(), nrdMergeCS.size() };
-        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdMergeSignalsPSO));
-    }
-
     computeDesc.CS = { nrdCompositeCS.data(), nrdCompositeCS.size() };
     m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdCompositePSO));
+
+    if (!giResolveCS.empty()) {
+        computeDesc.CS = { giResolveCS.data(), giResolveCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_GIResolveIntermediatesPSO));
+    }
+    if (!nrdStoreSSO_CS.empty()) {
+        computeDesc.CS = { nrdStoreSSO_CS.data(), nrdStoreSSO_CS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdStoreShadingOutputPSO));
+    }
+    if (!nrdPackNoiseCS.empty()) {
+        computeDesc.CS = { nrdPackNoiseCS.data(), nrdPackNoiseCS.size() };
+        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_NrdPackNoisePSO));
+    }
 
     // ------- Split Diffuse / Specular PSO creation -------
     if (!diffuseTemporalCS.empty()) {
@@ -284,11 +288,6 @@ void Renderer::CreateRasterIndirectGIPipelines()
         computeDesc.CS = { specularSpatialCS.data(), specularSpatialCS.size() };
         m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SpecularSpatialPSO));
     }
-    if (!splitResolveCS.empty()) {
-        computeDesc.CS = { splitResolveCS.data(), splitResolveCS.size() };
-        m_Device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_SplitResolvePSO));
-    }
-
     // Seed file timestamps for hot-reload after all PSOs are initially created.
     CreateRestirDIPipelines();
     SetupShaderTimestamps();
@@ -355,11 +354,7 @@ void Renderer::CreateRestirDIResources()
                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), pixelCount,
                            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_DIOutputTex, m_InternalWidth, m_InternalHeight,
-                  DXGI_FORMAT_R16G16B16A16_FLOAT,
-                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    // Split DI intermediates for NRD merge path
+    // Split DI intermediates for SSO bridge path
     CreateTexture(m_DIDiffuseIntermediate, m_InternalWidth, m_InternalHeight,
                   DXGI_FORMAT_R16G16B16A16_FLOAT,
                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -387,7 +382,6 @@ void Renderer::CreateRestirDIPipelines()
 
     CompileAndCreate("Shaders/RestirDI_Temporal.hlsl",        m_RestirDITemporalPSO);
     CompileAndCreate("Shaders/RestirDI_Spatial.hlsl",         m_RestirDISpatialPSO);
-    CompileAndCreate("Shaders/RestirDI_Shade.hlsl",           m_RestirDIShadePSO);
     CompileAndCreate("Shaders/RestirDI_SplitShade.hlsl",      m_RestirDISplitShadePSO);
 }
 
@@ -402,7 +396,6 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirBuffer[0],    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirBuffer[1],    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIReservoirIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIOutputTex,             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIDiffuseIntermediate,   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DISpecularIntermediate,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -455,21 +448,7 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         m_CommandList->ResourceBarrier(1, &b);
     }
 
-    // --- Pass 3: Shade + EMA Accumulation ---
-    // InputIdx0 = DIRreservoirIntermediate, OutputIdx0 = DIOutputTex, OutputIdx1 = DIAccumulationTex
-    indices = {};
-    indices.InputIdx0  = m_DIReservoirIntermediate.srvIndex;
-    indices.OutputIdx0 = m_DIOutputTex.uavIndex;
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->SetPipelineState(m_RestirDIShadePSO.Get());
-    m_CommandList->Dispatch(gx, gy, 1);
-
-    {
-        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIOutputTex.resource.Get());
-        m_CommandList->ResourceBarrier(1, &b);
-    }
-
-    // --- Pass 3b: Split Shade — per-lobe NRD-normalized output for merge pass ---
+    // --- Pass 3: Split Shade — per-lobe NRD-normalized output ---
     // InputIdx0 = DIRreservoirIntermediate, OutputIdx0 = DIDiffuseIntermediate, OutputIdx1 = DISpecularIntermediate
     if (m_RestirDISplitShadePSO)
     {
@@ -488,16 +467,48 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         m_CommandList->ResourceBarrier(_countof(splitBarriers), splitBarriers);
     }
 
+    // --- Pass 3b: StoreShadingOutput Call 1 (DI base) ---
+    // Writes DI intermediates into FinalDiffuseTex / FinalSpecularTex (overwrite).
+    // Always dispatched when DI is active (regardless of NRD state).
+    if (m_NrdStoreShadingOutputPSO && m_RestirDISplitShadePSO)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIDiffuseIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DISpecularIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        indices = {};
+        indices.InputIdx0  = m_DIDiffuseIntermediate.srvIndex;
+        indices.InputIdx1  = m_DISpecularIntermediate.srvIndex;
+        indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
+        indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        const UINT isFirstPass = 1u;
+        m_CommandList->SetComputeRoot32BitConstants(13, 1, &isFirstPass, 0);
+        m_CommandList->SetPipelineState(m_NrdStoreShadingOutputPSO.Get());
+        m_CommandList->Dispatch(gx, gy, 1);
+
+        D3D12_RESOURCE_BARRIER ssoBarriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_FinalDiffuseTex.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_FinalSpecularTex.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(_countof(ssoBarriers), ssoBarriers);
+    }
+
     m_CurrentDIReservoirIndex = prev; // Swap for next frame
 
     // When GI is disabled but NRD is enabled, trigger the NRD denoise pass here.
     // (When GI is enabled, NRDDenoise is called from DispatchRestirGI.)
-    // DispatchRestirGI already reset m_NrdWasActiveLastFrame to false;
-    // NRDDenoise will set it back to true if NRD actually ran.
     if (frame.enableNrdRelax != 0u && !frame.enableRasterIndirectGI)
     {
         NRDDenoise(frame);
         // m_NrdWasActiveLastFrame is set inside NRDDenoise on success.
+    }
+    else if (frame.enableNrdRelax == 0u && !frame.enableRasterIndirectGI)
+    {
+        // NRD disabled and GI disabled: transition Final* to SRV for Lighting.hlsl
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 }
 
@@ -1487,7 +1498,7 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GBuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    //GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     // Split diffuse/specular buffers
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[0], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirBuffer[1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1725,6 +1736,63 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     const bool useNrd = frame.enableNrdRelax != 0
         && frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF
         && frame.sharcDebug == 0;
+
+    // --- Pass 4b: GI Resolve Intermediates ---
+    // Converts GI reservoir StructuredBuffers → raw float4 intermediates (BRDF eval + NRD normalize).
+    // Always dispatched when GI is active; SSO always needs the intermediates to bridge to Final*.
+    if (m_GIResolveIntermediatesPSO)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GIDiffuseIntermediate,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GISpecularIntermediate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        indices = {};
+        indices.InputIdx0  = m_DiffuseReservoirIntermediate.srvIndex;
+        indices.InputIdx1  = m_SpecularReservoirIntermediate.srvIndex;
+        indices.OutputIdx0 = m_GIDiffuseIntermediate.uavIndex;
+        indices.OutputIdx1 = m_GISpecularIntermediate.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        m_CommandList->SetPipelineState(m_GIResolveIntermediatesPSO.Get());
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER giResolveBarriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_GIDiffuseIntermediate.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_GISpecularIntermediate.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(_countof(giResolveBarriers), giResolveBarriers);
+    }
+
+    // --- Pass 4c: StoreShadingOutput Call 2 (GI contribution) ---
+    // Reads GI intermediates and bridges into FinalDiffuseTex / FinalSpecularTex.
+    // Always dispatched when GI is active (regardless of NRD state).
+    // isFirstPass = 0 if DI ran this frame (additive blend), 1 if DI was off (overwrite).
+    if (m_NrdStoreShadingOutputPSO && m_GIResolveIntermediatesPSO)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GIDiffuseIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_GISpecularIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        indices = {};
+        indices.InputIdx0  = m_GIDiffuseIntermediate.srvIndex;
+        indices.InputIdx1  = m_GISpecularIntermediate.srvIndex;
+        indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
+        indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        // isFirstPass=0 if DI ran this frame (additive blend), 1 if DI was off (overwrite)
+        const UINT isFirstPass = (frame.enableRestirDI != 0u) ? 0u : 1u;
+        m_CommandList->SetComputeRoot32BitConstants(13, 1, &isFirstPass, 0);
+        m_CommandList->SetPipelineState(m_NrdStoreShadingOutputPSO.Get());
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER ssoBarriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_FinalDiffuseTex.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_FinalSpecularTex.resource.Get()),
+        };
+        m_CommandList->ResourceBarrier(_countof(ssoBarriers), ssoBarriers);
+    }
+
     if (useNrd && NRDDenoise(frame))
     {
         m_CurrentReservoirIndex = previousReservoir;
@@ -1734,32 +1802,9 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     // NRD path was not taken this frame — record so next activation can RESTART.
     m_NrdWasActiveLastFrame = false;
 
-    // --- Pass 5: Split Resolve ---
-    // InputIdx0 = diffuse intermediate, InputIdx1 = specular intermediate,
-    // OutputIdx0 = indirect lighting texture
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    m_CommandList->SetPipelineState(m_SplitResolvePSO.Get());
-    indices.InputIdx0  = m_DiffuseReservoirIntermediate.srvIndex;
-    indices.InputIdx1  = m_SpecularReservoirIntermediate.srvIndex;
-    indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
-    indices.OutputIdx1 = UINT(-1);
-    indices.OutputIdx2 = UINT(-1);
-    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
-
-    // --- SHaRC Debug — overwrite indirect irradiance with voxel visualization ---
-    // Dispatched only when sharcDebug is active; queries SHaRC at primary hit (RTXGI pattern).
-    if (frame.sharcDebug && m_SharcDebugPSO)
-    {
-        D3D12_RESOURCE_BARRIER dbgBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RasterIndirectLightingTex.resource.Get());
-        m_CommandList->ResourceBarrier(1, &dbgBarrier);
-
-        m_CommandList->SetPipelineState(m_SharcDebugPSO.Get());
-        indices.OutputIdx0 = m_RasterIndirectLightingTex.uavIndex;
-        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-        // b2 (slot 13) still holds m_SharcIndices from the SHaRC update/resolve above
-        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
-    }
+    // NRD disabled: transition Final* to SRV for Lighting.hlsl
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     m_CurrentReservoirIndex = previousReservoir; // Swap for next frame
 }
@@ -1769,23 +1814,17 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     if (!m_NrdPrepareGuidesPSO || !m_NrdCompositePSO || !InitializeNrd())
         return false;
 
-    // Require either the new merge PSO (DI+GI unified) or the legacy pack PSO (GI-only).
-    const bool useMerge = (m_NrdMergeSignalsPSO != nullptr) && (frame.enableRestirDI != 0u);
-    if (!useMerge && !m_NrdPackSignalsPSO)
+    if (!m_NrdPackNoisePSO)
         return false;
 
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNormalRoughnessTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdViewZTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNoisyDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNoisySpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdMotionVectorsTex,    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdNormalRoughnessTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdViewZTex,            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RasterIndirectLightingTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex,       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // ---- Step 1: NRD Prepare Guides (unchanged) ----
     m_CommandList->SetPipelineState(m_NrdPrepareGuidesPSO.Get());
     BindlessIndices indices = {};
     indices.OutputIdx0 = m_NrdMotionVectorsTex.uavIndex;
@@ -1801,48 +1840,27 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     };
     m_CommandList->ResourceBarrier(_countof(guideBarriers), guideBarriers);
 
-    if (useMerge)
-    {
-        // ---- Unified DI+GI merge pass ----
-        // Transition DI intermediates to SRV (written by DispatchRestirDI)
-        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIDiffuseIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DISpecularIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        // Transition GI reservoir intermediates to SRV.
-        // When GI is disabled, DispatchRestirGI was skipped so these may still be in UAV state.
-        // The merge pass reads them but W=0 so they contribute nothing.
-        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseReservoirIntermediate,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_SpecularReservoirIntermediate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // ---- Step 2: NrdPackNoise — Final* → RELAX format ----
+    // FinalDiffuse/FinalSpecular already contain the merged DI+GI signal (written by SSO calls).
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdRelaxDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdRelaxSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        m_CommandList->SetPipelineState(m_NrdMergeSignalsPSO.Get());
-        indices = {};
-        indices.InputIdx0  = m_DIDiffuseIntermediate.srvIndex;
-        indices.InputIdx1  = m_DISpecularIntermediate.srvIndex;
-        indices.InputIdx2  = m_DiffuseReservoirIntermediate.srvIndex;
-        // OutputIdx2 repurposed as InputIdx3 for SpecularReservoirIntermediate (see NrdMergeSignals.hlsl)
-        indices.OutputIdx2 = m_SpecularReservoirIntermediate.srvIndex;
-        indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
-        indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
-        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
-    }
-    else
-    {
-        // ---- Legacy GI-only pack pass ----
-        m_CommandList->SetPipelineState(m_NrdPackSignalsPSO.Get());
-        indices = {};
-        indices.InputIdx0 = m_DiffuseReservoirIntermediate.srvIndex;
-        indices.InputIdx1 = m_SpecularReservoirIntermediate.srvIndex;
-        indices.OutputIdx0 = m_NrdNoisyDiffuseTex.uavIndex;
-        indices.OutputIdx1 = m_NrdNoisySpecularTex.uavIndex;
-        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
-    }
+    m_CommandList->SetPipelineState(m_NrdPackNoisePSO.Get());
+    indices = {};
+    indices.InputIdx0  = m_FinalDiffuseTex.srvIndex;
+    indices.InputIdx1  = m_FinalSpecularTex.srvIndex;
+    indices.OutputIdx0 = m_NrdRelaxDiffuseTex.uavIndex;
+    indices.OutputIdx1 = m_NrdRelaxSpecularTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
-    D3D12_RESOURCE_BARRIER noisyBarriers[] = {
-        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisyDiffuseTex.resource.Get()),
-        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdNoisySpecularTex.resource.Get())
+    D3D12_RESOURCE_BARRIER relaxBarriers[] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdRelaxDiffuseTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_NrdRelaxSpecularTex.resource.Get()),
     };
-    m_CommandList->ResourceBarrier(_countof(noisyBarriers), noisyBarriers);
+    m_CommandList->ResourceBarrier(_countof(relaxBarriers), relaxBarriers);
 
     DirectX::XMMATRIX projectionInverse = DirectX::XMLoadFloat4x4(&frame.projectionInverse);
     DirectX::XMMATRIX projection = DirectX::XMMatrixInverse(nullptr, projectionInverse);
@@ -1897,8 +1915,9 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     resourceSnapshot.SetResource(nrd::ResourceType::IN_MV, MakeNrdResource(m_NrdMotionVectorsTex));
     resourceSnapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS, MakeNrdResource(m_NrdNormalRoughnessTex));
     resourceSnapshot.SetResource(nrd::ResourceType::IN_VIEWZ, MakeNrdResource(m_NrdViewZTex));
-    resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdNoisyDiffuseTex));
-    resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdNoisySpecularTex));
+    // NRD reads RELAX-packed textures from NrdPackNoise output.
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdRelaxDiffuseTex));
+    resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdRelaxSpecularTex));
     resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedDiffuseTex));
     resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, MakeNrdResource(m_NrdDenoisedSpecularTex));
     if (frame.enableNrdValidation != 0)
@@ -1919,8 +1938,8 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     {
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    //GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    //GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -1928,20 +1947,24 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     m_CommandList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
     m_CommandList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
-    // The composite pass reads NRD output (SRV) and writes unpacked raw radiance to separate textures (UAV).
+    // The composite pass reads NRD output (SRV) and writes denoised radiance back to Final* (UAV).
+    // This is a circular write-back: Final* was read by NrdPackNoise, now overwritten with denoised data.
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     m_CommandList->SetPipelineState(m_NrdCompositePSO.Get());
     indices = {};
     indices.InputIdx0 = m_NrdDenoisedDiffuseTex.srvIndex;
     indices.InputIdx1 = m_NrdDenoisedSpecularTex.srvIndex;
     indices.InputIdx2 = frame.enableNrdValidation != 0 ? m_NrdValidationTex.srvIndex : UINT(-1);
-    indices.OutputIdx0 = m_NrdUnpackedDiffuseTex.uavIndex;
-    indices.OutputIdx1 = m_NrdUnpackedSpecularTex.uavIndex;
+    indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
+    indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
 
-    // Transition unpacked outputs to pixel-shader-readable SRV for Lighting.hlsl
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // Transition Final* to pixel-shader-readable SRV for Lighting.hlsl
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     m_NrdWasActiveLastFrame = true;
     return true;
@@ -2444,17 +2467,13 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
             D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), w * h,
         D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_DIOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    // Split DI intermediates for NRD merge path
+    // Split DI intermediates for SSO bridge path
     CreateTexture(m_DIDiffuseIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_DISpecularIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    // ---- Raster Indirect Lighting + NRD Textures ----
-    CreateTexture(m_RasterIndirectLightingTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // ---- Raster HDR + NRD Textures ----
     // HDR render target for rasterizer lighting when TAA is active
     CreateTexture(m_RasterHdrOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -2465,9 +2484,15 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdViewZTex, w, h, DXGI_FORMAT_R16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisyDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    // GI resolved intermediates (raw float4: NRD-normalized radiance + hitT)
+    CreateTexture(m_GIDiffuseIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNoisySpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    CreateTexture(m_GISpecularIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // RELAX-packed inputs for NRD denoiser (NrdPackNoise output)
+    CreateTexture(m_NrdRelaxDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_NrdRelaxSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdDenoisedDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -2475,9 +2500,10 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateTexture(m_NrdValidationTex, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdUnpackedDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    // Universal interchange textures: SSO writes, NrdPackNoise+Lighting read
+    CreateTexture(m_FinalDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdUnpackedSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    CreateTexture(m_FinalSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // ---- Re-initialize NRD at new resolution ----
