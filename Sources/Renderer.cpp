@@ -1938,8 +1938,6 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     {
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdValidationTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
-    //GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedDiffuseTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    //GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdUnpackedSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
     m_CommandList->SetDescriptorHeaps(_countof(heaps), heaps);
