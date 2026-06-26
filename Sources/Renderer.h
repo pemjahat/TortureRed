@@ -73,6 +73,7 @@ public:
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
     ID3D12GraphicsCommandList* GetCommandList() const { return m_CommandList.Get(); }
     ID3D12CommandQueue* GetCommandQueue() const { return m_CommandQueue.Get(); }
+    ID3D12CommandQueue* GetCopyQueue() const { return m_CopyQueue.Get(); }
     ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12CommandSignature* GetCommandSignature() const { return m_CommandSignature.Get(); }
@@ -145,6 +146,7 @@ private:
     // DirectX 12 objects
     Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CommandQueue;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CopyQueue;
     Microsoft::WRL::ComPtr<IDXGISwapChain4> m_SwapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_RTVHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_RenderTargets[2];

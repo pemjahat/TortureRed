@@ -426,7 +426,10 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->SetPipelineState(m_RestirDITemporalPSO.Get());
-    m_CommandList->Dispatch(gx, gy, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("DI_Temporal", MP_RED);
+        m_CommandList->Dispatch(gx, gy, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirBuffer[curr].resource.Get());
@@ -441,7 +444,10 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->SetPipelineState(m_RestirDISpatialPSO.Get());
-    m_CommandList->Dispatch(gx, gy, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("DI_Spatial", MP_RED);
+        m_CommandList->Dispatch(gx, gy, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_DIReservoirIntermediate.resource.Get());
@@ -458,7 +464,10 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         indices.OutputIdx1 = m_DISpecularIntermediate.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
         m_CommandList->SetPipelineState(m_RestirDISplitShadePSO.Get());
-        m_CommandList->Dispatch(gx, gy, 1);
+        {
+            MICROPROFILE_SCOPEGPUI("DI_SplitShade", MP_RED);
+            m_CommandList->Dispatch(gx, gy, 1);
+        }
 
         D3D12_RESOURCE_BARRIER splitBarriers[] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_DIDiffuseIntermediate.resource.Get()),
@@ -636,6 +645,12 @@ bool Renderer::Initialize(HWND hwnd)
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
     CHECK_HR(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "CreateCommandQueue failed");
+
+    // Create copy queue (used by microprofile GPU timers)
+    D3D12_COMMAND_QUEUE_DESC copyQueueDesc = {};
+    copyQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    copyQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    CHECK_HR(m_Device->CreateCommandQueue(&copyQueueDesc, IID_PPV_ARGS(&m_CopyQueue)), "CreateCommandQueue (copy) failed");
 
     // Create swap chain
     DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -866,6 +881,9 @@ void Renderer::BeginFrame()
     // Record commands
     CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
     CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    // Bind the command list to the microprofile GPU context so MICROPROFILE_SCOPEGPUI works
+    MICROPROFILE_GPU_SET_CONTEXT(m_CommandList.Get(), MicroProfileGetGlobalGpuThreadLog());
 
     // Set descriptor heaps
     ID3D12DescriptorHeap* heaps[] = { GraphicsHelper::GetSRVHeap() };
@@ -1638,7 +1656,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     const UINT sharcUpdateW = (m_InternalWidth  + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
     const UINT sharcUpdateH = (m_InternalHeight + SHARC_UPDATE_DOWNSCALE - 1) / SHARC_UPDATE_DOWNSCALE;
     m_CommandList->SetPipelineState(m_SharcUpdatePSO.Get());
-    m_CommandList->Dispatch((sharcUpdateW + 7) / 8, (sharcUpdateH + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("SHaRC_Update", MP_CYAN);
+        m_CommandList->Dispatch((sharcUpdateW + 7) / 8, (sharcUpdateH + 7) / 8, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -1650,7 +1671,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
 
     // --- Pass 2: SHaRC Resolve — EMA blend accumulation→resolved, clears accumulation ---
     m_CommandList->SetPipelineState(m_SharcResolvePSO.Get());
-    m_CommandList->Dispatch((SHARC_HASH_ENTRIES_NUM + 255) / 256, 1, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("SHaRC_Resolve", MP_CYAN);
+        m_CommandList->Dispatch((SHARC_HASH_ENTRIES_NUM + 255) / 256, 1, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -1675,7 +1699,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
     indices.OutputIdx2 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("GI_Diffuse_Temporal", MP_PURPLE);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -1695,7 +1722,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("GI_Specular_Temporal", MP_PURPLE);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirBuffer[currentReservoir].resource.Get());
@@ -1711,7 +1741,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("GI_Diffuse_Spatial", MP_PURPLE);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_DiffuseReservoirIntermediate.resource.Get());
@@ -1726,7 +1759,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("GI_Specular_Spatial", MP_PURPLE);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_SpecularReservoirIntermediate.resource.Get());
@@ -1754,7 +1790,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
         indices.OutputIdx1 = m_GISpecularIntermediate.uavIndex;
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
         m_CommandList->SetPipelineState(m_GIResolveIntermediatesPSO.Get());
-        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        {
+            MICROPROFILE_SCOPEGPUI("GI_ResolveIntermediates", MP_BLUE);
+            m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        }
 
         D3D12_RESOURCE_BARRIER giResolveBarriers[] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_GIDiffuseIntermediate.resource.Get()),
@@ -1784,7 +1823,10 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
         const UINT isFirstPass = (frame.enableRestirDI != 0u) ? 0u : 1u;
         m_CommandList->SetComputeRoot32BitConstants(13, 1, &isFirstPass, 0);
         m_CommandList->SetPipelineState(m_NrdStoreShadingOutputPSO.Get());
-        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        {
+            MICROPROFILE_SCOPEGPUI("GI_StoreOutput", MP_BLUE);
+            m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        }
 
         D3D12_RESOURCE_BARRIER ssoBarriers[] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_FinalDiffuseTex.resource.Get()),
@@ -1831,7 +1873,10 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     indices.OutputIdx1 = m_NrdNormalRoughnessTex.uavIndex;
     indices.OutputIdx2 = m_NrdViewZTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("NRD_PrepareGuides", MP_GREEN);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     D3D12_RESOURCE_BARRIER guideBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdMotionVectorsTex.resource.Get()),
@@ -1854,7 +1899,10 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     indices.OutputIdx0 = m_NrdRelaxDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdRelaxSpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("NRD_PackNoise", MP_GREEN);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     D3D12_RESOURCE_BARRIER relaxBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_NrdRelaxDiffuseTex.resource.Get()),
@@ -1930,7 +1978,10 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     commandBufferDesc.d3d12CommandAllocator = m_CommandAllocator.Get();
 
     const nrd::Identifier denoisers[] = { kNrdRelaxDiffuseSpecularIdentifier };
-    m_NrdIntegration->DenoiseD3D12(denoisers, _countof(denoisers), commandBufferDesc, resourceSnapshot);
+    {
+        MICROPROFILE_SCOPEGPUI("NRD_RELAX", MP_GREEN);
+        m_NrdIntegration->DenoiseD3D12(denoisers, _countof(denoisers), commandBufferDesc, resourceSnapshot);
+    }
 
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedDiffuseTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_NrdDenoisedSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1958,7 +2009,10 @@ bool Renderer::NRDDenoise(const FrameConstants& frame)
     indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
-    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    {
+        MICROPROFILE_SCOPEGPUI("NRD_Composite", MP_GREEN);
+        m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+    }
 
     // Transition Final* to pixel-shader-readable SRV for Lighting.hlsl
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2644,7 +2698,10 @@ void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& i
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
 
         m_CommandList->SetPipelineState(m_NaiveTsrReprojectPSO.Get());
-        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+        {
+            MICROPROFILE_SCOPEGPUI("TAA_Reproject", MP_YELLOW);
+            m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+        }
 
         // UAV barrier
         D3D12_RESOURCE_BARRIER barriers[2] = {
@@ -2674,7 +2731,10 @@ void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& i
         m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
 
         m_CommandList->SetPipelineState(m_NaiveTsrResolvePSO.Get());
-        m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+        {
+            MICROPROFILE_SCOPEGPUI("TAA_Resolve", MP_YELLOW);
+            m_CommandList->Dispatch((outputW + 7) / 8, (outputH + 7) / 8, 1);
+        }
 
         // UAV barrier
         D3D12_RESOURCE_BARRIER barriers[2] = {

@@ -797,8 +797,8 @@ flowchart TD
 
     subgraph Lighting["Lighting.hlsl<br/>(zero branching)"]
         L_Dir["Term 1: Analytic Directional<br/>EvaluateBSDF + shadow ray"]
-        L_Diff["Term 2: FinalDiffuse<br/>× diffuseFactor"]
-        L_Spec["Term 3: FinalSpecular<br/>× specularFactor"]
+        L_Diff["Term 2: FinalDiffuse × diffuseFactor"]
+        L_Spec["Term 3: FinalSpecular × specularFactor"]
         L_Sum["finalColor = T1 + T2 + T3"]
         L_Dir --> L_Sum
         L_Diff --> L_Sum
@@ -895,4 +895,198 @@ flowchart TD
 | **Main directional** | Sampled via ReSTIR DI with all other lights | Excluded from ReSTIR, shaded analytically |
 | **Lighting branching** | `nrdActive`, `diMergedIntoNrd` checks | **Zero branching** — always reads `FinalDiffuse`/`FinalSpecular` |
 
+---
 
+## 12. 🔧 TODO: Restore SHaRC Debug Visualization
+
+> **Status**: `m_SharcDebugPSO` is compiled (line 239) but never dispatched. The debug shader targets the now-removed `RasterIndirectLightingTex`. Three fixes needed.
+
+### 12.1 Root Cause
+
+| Problem | Detail |
+|---------|--------|
+| **No dispatch** | `m_SharcDebugPSO` created at [Renderer.cpp:239](d:/TortureRed/Sources/Renderer.cpp:239), never dispatched. `sharcDebug` is only used to gate NRD at line 1738 (`&& frame.sharcDebug == 0`). |
+| **Wrong output target** | [SHaRC_Debug.hlsl](d:/TortureRed/Sources/Shaders/SHaRC_Debug.hlsl) writes to `OutputIdx0` only. Its comment says "must point to `RasterIndirectLightingTex`" — removed in §11. |
+| **Only one output** | `Lighting.hlsl` reads **two** textures (`FinalDiffuseTex` × diffuseFactor + `FinalSpecularTex` × specularFactor). The debug shader must fill both to appear in the final composite. |
+
+### 12.2 Three Changes Required
+
+| # | File | Change |
+|---|------|--------|
+| **1** | `Renderer.cpp` — `DispatchRestirGI` | Insert dispatch block **after** SSO Call 2 but **before** NRD. When `sharcDebug != 0` and GI is active: run `m_SharcDebugPSO`, write to `FinalDiffuseTex` + `FinalSpecularTex`, UAV-barrier, transition to SRV, **early-return** (skip NRD). |
+| **2** | `SHaRC_Debug.hlsl` | Write to **both** `OutputIdx0` and `OutputIdx1`. Both receive the same debug color so `Lighting.hlsl` renders it via either `diffuseFactor` or `specularFactor`. Update header comment. |
+| **3** | (none needed) | `m_SharcDebugPSO` already compiled. `m_SharcIndices` already populated. No new allocations required — `FinalDiffuseTex` / `FinalSpecularTex` already exist as universal interchange. |
+
+### 12.3 SHaRC Debug Dispatch Pseudocode
+
+```cpp
+// In DispatchRestirGI, after SSO Call 2 and its UAV barrier on Final*,
+// BEFORE the useNrd / NRDDenoise block:
+
+if (frame.sharcDebug != 0 && m_SharcDebugPSO)
+{
+    // Final* already in UAV state from SSO Call 2 — reuse it.
+    // NrdPackNoise and NRD are skipped; debug visualization replaces the normal GI output.
+
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    indices = {};
+    indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
+    indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_SharcDebugPSO.Get());
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER debugBarriers[] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_FinalDiffuseTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_FinalSpecularTex.resource.Get()),
+    };
+    m_CommandList->ResourceBarrier(_countof(debugBarriers), debugBarriers);
+
+    // Transition Final* to SRV so Lighting.hlsl can sample the debug visualization
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // Skip NRD (already gated by sharcDebug==0) and avoid the normal SRV-transition path
+    m_CurrentReservoirIndex = previousReservoir;
+    return;
+}
+```
+
+**Placement**: insert **immediately after** the SSO Call 2 UAV barrier (line ~1796) and **before** the `if (useNrd && NRDDenoise(frame))` block (line ~1800). The existing `useNrd` already includes `&& frame.sharcDebug == 0` so NRD won't fire, but we need the **early return** to avoid the "NRD disabled" transition path that follows.
+
+### 12.4 SHaRC Debug Shader Changes
+
+Current shader writes only `OutputIdx0`:
+```hlsl
+RWTexture2D<float4> outDebug = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+// ...
+outDebug[screenPos] = float4(debugColor, 1.0f);
+```
+
+Updated to write both outputs:
+```hlsl
+RWTexture2D<float4> outDiffuse  = ResourceDescriptorHeap[g_Indices.OutputIdx0]; // FinalDiffuseTex
+RWTexture2D<float4> outSpecular = ResourceDescriptorHeap[g_Indices.OutputIdx1]; // FinalSpecularTex
+// ...
+float4 result = float4(debugColor, 1.0f);
+outDiffuse[screenPos]  = result;
+outSpecular[screenPos] = result;
+```
+
+Both diffuse and specular receive the same debug color. `Lighting.hlsl` will multiply by `diffuseFactor` for one term and `specularFactor` for the other, then sum them. The resulting visible color will be `debugColor * (diffuseFactor + specularFactor)` — close enough to the intended debug visualization.
+
+### 12.5 Pipeline Flow — SHaRC Debug Active
+
+```mermaid
+flowchart TD
+    subgraph DI["DispatchRestirDI"]
+        DI_Temp["Temporal → Spatial → SplitShade"]
+        DI_SSO["SSO Call 1 → FinalDiffuse/FinalSpecular<br/>(overwrite DI base)"]
+        DI_Temp --> DI_SSO
+    end
+
+    subgraph GI["DispatchRestirGI<br/>(sharcDebug != 0)"]
+        GI_SharcU["SHaRC Update"]
+        GI_SharcR["SHaRC Resolve"]
+        GI_DiffT["Diffuse Temporal + Spatial"]
+        GI_SpecT["Specular Temporal + Spatial"]
+        GI_SharcU --> GI_SharcR --> GI_DiffT
+        GI_SharcR --> GI_SpecT
+
+        GI_Skip["⚠️ GI Resolve Intermediates<br/>AND SSO Call 2<br/>STILL RUN<br/>(need intermediates for debug<br/>if DI+GI merge is desired,<br/>or SKIP if debug-only)"]
+        GI_DiffT --> GI_Skip
+        GI_SpecT --> GI_Skip
+
+        GI_Debug["🟢 SHaRC Debug PSO<br/>sharcDebug=1: SHaRC Output<br/>sharcDebug=2: Bounce Heatmap<br/>→ FinalDiffuseTex<br/>→ FinalSpecularTex<br/>(same debug color to both)"]
+    end
+
+    subgraph FinalPair["FinalDiffuse / FinalSpecular<br/>(overwritten by debug PSO)"]
+        FD["FinalDiffuseTex"]
+        FS["FinalSpecularTex"]
+    end
+
+    subgraph Lighting["Lighting.hlsl"]
+        L_Diff["Term 2: FinalDiffuse × diffuseFactor"]
+        L_Spec["Term 3: FinalSpecular × specularFactor"]
+        L_Sum["finalColor =<br/>dirLight + Σ(debugColor × factors)"]
+        L_Diff --> L_Sum
+        L_Spec --> L_Sum
+    end
+
+    DI_SSO --> FD
+    DI_SSO --> FS
+    GI_Skip -- "may write to" --> FD
+    GI_Skip -- "may write to" --> FS
+    GI_Debug -- "overwrite" --> FD
+    GI_Debug -- "overwrite" --> FS
+    FD --> L_Diff
+    FS --> L_Spec
+
+    style DI_SSO fill:#e1f5fe,stroke:#0288d1
+    style GI_Debug fill:#ffecb3,stroke:#ff8f00
+    style GI_Skip fill:#fff3e0,stroke:#e65100
+    style FinalPair fill:#a5d6a7,stroke:#2e7d32
+    style Lighting fill:#e8f5e9,stroke:#388e3c
+
+    NRD_Skip["🚫 NRD disabled<br/>(useNrd = false when<br/>sharcDebug != 0)"]
+    style NRD_Skip fill:#f5f5f5,stroke:#9e9e9e,stroke-dasharray: 5 5
+```
+
+### 12.6 Decision: Run or Skip GI Resolve + SSO Call 2 Before Debug?
+
+| Option | Effect | Simpler? |
+|--------|--------|:---:|
+| **A: Skip** GI ResolveIntermediates + SSO Call 2 when debug active | Debug shader replaces entire GI output. DI contribution (if any) still present from SSO Call 1. | ✅ Simpler |
+| **B: Run** then overwrite with debug | Extra work that gets immediately overwritten. No benefit. | ❌ |
+
+**Recommendation: Option A** — insert an early-return check at the very top of `DispatchRestirGI`, before SHaRC Update even runs:
+
+```cpp
+// At the TOP of DispatchRestirGI:
+if (frame.sharcDebug != 0 && m_SharcDebugPSO)
+{
+    // Run SHaRC update+resolve (needed for the debug shader to query),
+    // then run debug PSO → Final*, skip everything else.
+    DispatchSharcUpdateAndResolve();       // Pass 1+2 only
+    DispatchSharcDebugToFinal();           // Debug PSO
+    m_CurrentReservoirIndex = previousReservoir;
+    return;
+}
+```
+
+But this means **duplicating** the SHaRC Update+Resolve code. The cleanest approach is to put the debug dispatch **after** SHaRC Resolve but **before** the ReSTIR temporal passes:
+
+```cpp
+// After SHaRC Resolve barrier (line ~1662):
+if (frame.sharcDebug != 0 && m_SharcDebugPSO)
+{
+    // SHaRC cache is fresh. Run debug visualization directly.
+    // Skip all ReSTIR passes, GI intermediate resolve, SSO, and NRD.
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // ... dispatch debug PSO ...
+    // ... barrier + transition to SRV ...
+    m_CurrentReservoirIndex = previousReservoir;
+    return;
+}
+```
+
+**Why this placement wins:**
+- SHaRC Update + Resolve already ran — debug shader can query the cache
+- Skips expensive ReSTIR temporal/spatial passes (waste of GPU time when debug is active)
+- DI contribution (SSO Call 1) already in `Final*` is preserved unless debug overwrites it — the debug color replaces both
+- Minimal code duplication
+
+### 12.7 Implementation Checklist
+
+| Step | Action | Effort |
+|------|--------|:---:|
+| 1 | Insert early-return debug dispatch block after SHaRC Resolve barrier in `DispatchRestirGI` | Small |
+| 2 | In debug dispatch: bind `FinalDiffuseTex` as `OutputIdx0`, `FinalSpecularTex` as `OutputIdx1` | Small |
+| 3 | Update `SHaRC_Debug.hlsl` to write to both `OutputIdx0` and `OutputIdx1` | Small |
+| 4 | Update `SHaRC_Debug.hlsl` header comment — remove `RasterIndirectLightingTex` reference | Trivial |
+| 5 | Test: enable GI, set `sharcDebug=1`, verify SHaRC voxel visualization appears | — |
+| 6 | Test: enable GI, set `sharcDebug=2`, verify bounce heatmap appears | — |
+| 7 | Test: DI-only mode — debug should still be reachable if GI is enabled, unaffected if GI disabled | — |

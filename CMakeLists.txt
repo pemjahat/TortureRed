@@ -105,6 +105,36 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nrd)
 
+# Microprofile — embeddable CPU+GPU profiler
+# Use FetchContent_Populate (not MakeAvailable) to download without running
+# microprofile's own CMakeLists.txt, which would create a conflicting target.
+FetchContent_Declare(
+    microprofile
+    GIT_REPOSITORY https://github.com/jonasmr/microprofile.git
+    GIT_TAG master
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/microprofile
+)
+FetchContent_GetProperties(microprofile)
+if(NOT microprofile_POPULATED)
+    FetchContent_Populate(microprofile)
+endif()
+
+# Microprofile static library (microprofile.cpp must be compiled exactly once)
+add_library(microprofile STATIC
+    ${CMAKE_SOURCE_DIR}/ThirdParty/microprofile/microprofile.cpp
+)
+target_include_directories(microprofile PUBLIC
+    ${CMAKE_SOURCE_DIR}/ThirdParty/microprofile
+)
+if(WIN32)
+    # microprofile uses Winsock for socket-based dump (MicroProfileSocketDumpState)
+    target_link_libraries(microprofile PUBLIC ws2_32.lib)
+endif()
+if(MSVC)
+    # microprofile.cpp is large; disable some warnings to keep build output clean
+    target_compile_options(microprofile PRIVATE /W0 /bigobj)
+endif()
+
 # SHaRC (Inlined in Externals/)
 # Since SHaRC is header-only and we've manually placed it, we don't add_subdirectory
 
@@ -165,6 +195,7 @@ include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/jsmn/jsmn-1.1.0)
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
+include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/microprofile)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -205,6 +236,7 @@ target_link_libraries(${PROJECT_NAME}
     NRD
     NRDIntegration
     NRI
+    microprofile
 )
 
 # Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)

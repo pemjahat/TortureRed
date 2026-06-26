@@ -4,7 +4,39 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-## 1. Think Before Coding
+## 1. First action: repository discovery
+
+Before editing, map these project. Use fast search commands similar to these, adjusted for the host shell and available tools:
+
+```bash
+pwd
+git status --short
+find . -maxdepth 3 -type f \( -iname "*path*trace*" -o -iname "*ray*trace*" -o -iname "*shader*" -o -iname "*.hlsl" -o -iname "*.hlsli" -o -iname "CMakeLists.txt" \) | sort
+rg -n "PathTrace|PathTracer|Pathtracer|TraceRay|DispatchRays|DispatchRay|RayGen|closesthit|miss|bouncesMax|samplesPerPixel" .
+rg -n "BindingSet|Descriptor|DescriptorSet|RootSignature|register\(|space[0-9]|UAV|SRV|StructuredBuffer|RWStructuredBuffer|ByteAddressBuffer" .
+rg -n "ShaderTable|Pipeline|Permutation|Define|Macro|CompileShader|DXC|Slang|CMake|add_shader|shader compile" .
+rg -n "SHARC|Sharc|HashGrid|NRC|NRD|RTXGI" .
+```
+
+Find these project-specific locations:
+
+- build system files
+- shader include directories
+- shader permutation/define setup
+- ray tracing pipeline creation
+- shader binding table creation
+- render loop or render graph pass scheduling
+- output render target writing
+- descriptor/register-space definitions
+- global/per-frame constant buffer definitions
+- existing debug UI, runtime settings, config files, and command-line parsing
+- path tracer ray generation shader
+- path tracing bounce loop
+- material sampling and direct lighting evaluation
+- denoiser input generation, if present
+- GPU resource creation and clear/barrier helpers
+
+## 2. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
@@ -14,7 +46,7 @@ Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
-## 2. Simplicity First
+## 3. Simplicity First
 
 **Minimum code that solves the problem. Nothing speculative.**
 
@@ -26,7 +58,7 @@ Before implementing:
 
 Ask yourself: "Would a expert engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+## 4. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
 
@@ -42,7 +74,7 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+## 5. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 
@@ -62,7 +94,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 --
 
-## 5. Documentation standards
+## 6. Documentation standards
 
 > 📌 **Before creating ANY markdown document or Mermaid diagram, you MUST read the relevant style guide.** These are not optional — they define the formatting, structure, citation, accessibility, and visual standards for this project.
 

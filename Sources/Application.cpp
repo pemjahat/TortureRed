@@ -67,6 +67,17 @@ void Application::Initialize()
     HWND hwnd = wmInfo.info.win.window;
 
     CHECK_BOOL(m_Renderer.Initialize(hwnd), "Renderer initialization failed");
+
+    // Initialize microprofile
+    MicroProfileOnThreadCreate("Main");
+    MicroProfileSetEnableAllGroups(true);
+    MicroProfileSetForceMetaCounters(true);
+    void* commandQueue = m_Renderer.GetCommandQueue();
+    void* copyQueue = m_Renderer.GetCopyQueue();
+    MicroProfileGpuInitD3D12(m_Renderer.GetDevice(), 1, &commandQueue, &copyQueue);
+    MICROPROFILE_CONDITIONAL(MICROPROFILE_GPU_INIT_QUEUE("GPU-Graphics-Queue"));
+    MicroProfileSetCurrentNodeD3D12(0);
+
     m_Renderer.CreateLightsBuffer();
     m_Renderer.CreateLightLUTBuffer();
 
@@ -94,7 +105,7 @@ void Application::Initialize()
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -191,6 +202,9 @@ void Application::Shutdown()
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
+
+    // Shutdown microprofile
+    MicroProfileShutdown();
 
     // Shutdown renderer (this will handle GPU cleanup)
     m_Renderer.Shutdown();
@@ -515,24 +529,47 @@ void Application::Render()
         GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-        m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
+        {
+            MICROPROFILE_SCOPEI("Render", "PathTrace", MP_BLUE);
+            MICROPROFILE_SCOPEGPUI("PathTrace", MP_BLUE);
+            m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
+        }
 
         if (m_AntiAliasingMode == AA_MODE_TAA && m_Renderer.IsTaaEnabled())
         {
             // Generate motion vectors from depth + viewProj matrices
-            m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            {
+                MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
+                MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
+                m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            }
             // Run TAA on the HDR path tracer output, then copy TAA output to back buffer
-            m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetPathTracerHdrOutput());
-            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+            {
+                MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
+                MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
+                m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetPathTracerHdrOutput());
+            }
+            {
+                MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+                m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+            }
         }
         else
         {
-            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+            {
+                MICROPROFILE_SCOPEI("Render", "PTPresent", MP_WHITE);
+                MICROPROFILE_SCOPEGPUI("PTPresent", MP_WHITE);
+                m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
+            }
         }
 
         // Draw path visualization lines on top of the PT output (non-RTXDI ReSTIR only)
         if (m_PathVizEverCaptured && m_FrameConstants.enableRestir && !m_FrameConstants.useRTXDI)
+        {
+            MICROPROFILE_SCOPEI("Render", "PathViz", MP_ORANGE);
+            MICROPROFILE_SCOPEGPUI("PathViz", MP_ORANGE);
             m_Renderer.DrawPathVizLines(m_FrameConstants);
+        }
 
         // Setup viewport and RTV for ImGui rendering on top of PT output
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
@@ -542,6 +579,8 @@ void Application::Render()
     {
         // 1. Depth Pre-Pass
         {
+            MICROPROFILE_SCOPEI("Render", "DepthPrePass", MP_GREY);
+            MICROPROFILE_SCOPEGPUI("DepthPrePass", MP_GREY);
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
 
@@ -553,6 +592,8 @@ void Application::Render()
         }
         // 2. G-Buffer Pass
         {
+            MICROPROFILE_SCOPEI("Render", "GBuffer", MP_BLUE);
+            MICROPROFILE_SCOPEGPUI("GBuffer", MP_BLUE);
             // Transition G-Buffer targets to RTV state
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -585,10 +626,18 @@ void Application::Render()
         }
         
         // 2.5 ReSTIR DI Passes (direct illumination from local lights)
-        m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+        {
+            MICROPROFILE_SCOPEI("Render", "ReSTIR_DI", MP_RED);
+            MICROPROFILE_SCOPEGPUI("ReSTIR_DI", MP_RED);
+            m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+        }
 
         // 2.6 ReSTIR GI Passes
-        m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
+        {
+            MICROPROFILE_SCOPEI("Render", "ReSTIR_GI", MP_PURPLE);
+            MICROPROFILE_SCOPEGPUI("ReSTIR_GI", MP_PURPLE);
+            m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
+        }
 
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
@@ -596,6 +645,8 @@ void Application::Render()
         // When TAA is active: render to internal-res HDR texture (no tonemapping).
         // When TAA is off:    render directly to output-res back buffer (with tonemapping).
         {
+            MICROPROFILE_SCOPEI("Render", "Lighting", MP_CYAN);
+            MICROPROFILE_SCOPEGPUI("Lighting", MP_CYAN);
             BindlessIndices indices = {};
 
             // Transition G-Buffer targets to SRV state
@@ -665,10 +716,21 @@ void Application::Render()
         if (rasterTaaActive)
         {
             // Generate motion vectors from depth + viewProj matrices
-            m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            {
+                MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
+                MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
+                m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            }
             // Run TAA on the HDR rasterizer output, then copy TAA output to back buffer
-            m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
-            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+            {
+                MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
+                MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
+                m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
+            }
+            {
+                MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+                m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+            }
 
             // Setup RTV for transparency pass on top of TAA output
             m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -676,6 +738,8 @@ void Application::Render()
 
         // 4. Transparency Pass (Forward)
         {
+            MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
+            MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
             D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
 
@@ -719,7 +783,10 @@ void Application::Render()
     ImGui::NewFrame();
 
     // Render ImGui UI
-    RenderImGui();
+    {
+        MICROPROFILE_SCOPEI("UI", "ImGui", MP_YELLOW);
+        RenderImGui();
+    }
 
     // Render ImGui draw data
     ImGui::Render();
@@ -729,6 +796,9 @@ void Application::Render()
 
     // End frame rendering (includes present)
     m_Renderer.EndFrame();
+
+    // Advance microprofile to the next frame
+    MicroProfileFlip(m_Renderer.GetCommandList());
 }
 
 void Application::RenderImGui()
@@ -1174,6 +1244,39 @@ void Application::RenderImGui()
     ImGui::Text("Total Nodes Read: %zu", m_Model.GetTotalNodes());
     ImGui::Text("Total Root Nodes: %zu", m_Model.GetTotalRootNodes());
     ImGui::Text("Nodes Survive Frustum: %zu", m_Model.GetNodesSurviveFrustum());
+
+    ImGui::Separator();
+
+    // --- Profiler section ---
+    ImGui::SeparatorText("Profiler");
+
+    static bool profilerEnabled = true;
+    if (ImGui::Checkbox("Enable Microprofile", &profilerEnabled))
+    {
+        MicroProfileSetEnableAllGroups(profilerEnabled);
+    }
+
+    if (profilerEnabled)
+    {
+        // ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Server: http://localhost:1338");
+        // if (ImGui::SmallButton("Open in Browser"))
+        // {
+        //     ShellExecuteA(nullptr, "open", "http://localhost:1338", nullptr, nullptr, SW_SHOWNORMAL);
+        // }
+
+        // ImGui::Separator();
+
+        if (ImGui::Button("Dump Frame to HTML"))
+        {
+            MicroProfileDumpFileImmediately("microprofile_dump.html", nullptr, nullptr);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(saves to Bin/microprofile_dump.html)");
+    }
+    else
+    {
+        ImGui::TextDisabled("Profiling disabled (zero overhead)");
+    }
 
     ImGui::Separator();
     ImGui::Checkbox("Show ImGui Demo Window", &m_ShowDemoWindow);
