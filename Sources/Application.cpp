@@ -483,6 +483,9 @@ void Application::Render()
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
+    MICROPROFILE_SCOPEI("Render", "FrameCpu", MP_RED);
+    MICROPROFILE_SCOPEGPUI("FrameGpu", MP_RED);
+
     // Apply deferred resolution change (must happen after BeginFrame but before any rendering)
     if (m_PendingResolutionChange)
     {
@@ -1256,24 +1259,7 @@ void Application::RenderImGui()
         MicroProfileSetEnableAllGroups(profilerEnabled);
     }
 
-    if (profilerEnabled)
-    {
-        // ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Server: http://localhost:1338");
-        // if (ImGui::SmallButton("Open in Browser"))
-        // {
-        //     ShellExecuteA(nullptr, "open", "http://localhost:1338", nullptr, nullptr, SW_SHOWNORMAL);
-        // }
-
-        // ImGui::Separator();
-
-        if (ImGui::Button("Dump Frame to HTML"))
-        {
-            MicroProfileDumpFileImmediately("microprofile_dump.html", nullptr, nullptr);
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(saves to Bin/microprofile_dump.html)");
-    }
-    else
+    if (!profilerEnabled)
     {
         ImGui::TextDisabled("Profiling disabled (zero overhead)");
     }
@@ -1282,6 +1268,38 @@ void Application::RenderImGui()
     ImGui::Checkbox("Show ImGui Demo Window", &m_ShowDemoWindow);
 
     ImGui::End();
+
+    // --- Separate MicroProfile Stats window ---
+    if (profilerEnabled)
+    {
+        ImGui::SetNextWindowSize(ImVec2(320, 180), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("MicroProfile Stats", &profilerEnabled))
+        {
+            float gpuMs = MicroProfileGetTime("GPU", "FrameGpu");
+            float cpuMs = MicroProfileGetTime("Render", "FrameCpu");
+            float totalMs = gpuMs + cpuMs;
+
+            ImGui::Text("GPU frame: %.2f ms", gpuMs);
+            ImGui::Text("CPU frame: %.2f ms", cpuMs);
+            ImGui::Text("Total:      %.2f ms", totalMs);
+
+            ImGui::Separator();
+
+            float safeTotal = totalMs > 0.0f ? totalMs : 1.0f;
+            ImGui::ProgressBar(gpuMs / safeTotal, ImVec2(-1, 0), "GPU");
+            ImGui::ProgressBar(cpuMs / safeTotal, ImVec2(-1, 0), "CPU");
+
+            ImGui::Separator();
+
+            if (ImGui::Button("Dump Frame to HTML"))
+            {
+                MicroProfileDumpFileImmediately("microprofile_dump.html", nullptr, nullptr);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(saves to Bin/)");
+        }
+        ImGui::End();
+    }
 
     if (m_ShowDemoWindow)
         ImGui::ShowDemoWindow(&m_ShowDemoWindow);
