@@ -37,26 +37,38 @@ Find these project-specific locations:
 - denoiser input generation, if present
 - GPU resource creation and clear/barrier helpers
 
-## 2. Skills
+## 2. Documentation standards
 
-Skills follow the [Agent Skills Specification](https://agentskills.io/specification). Every skill lives under `agentic/skills/<skill-name>/` and is a self-contained folder.
+When writing any `.md` document, Mermaid diagram, `README`, or documentation output, follow these rules.
 
-### Structure
+### Style guides — read before creating
 
-```
-agentic/skills/<skill-name>/
-├── SKILL.md              # Required: YAML frontmatter (name, description) + instructions
-```
+| Creating...                  | Read first                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| Any `.md` document           | [markdown_style_guide.md](agentic/markdown_style_guide.md)                   |
+| Any Mermaid diagram          | [mermaid_style_guide.md](agentic/mermaid_style_guide.md), then the specific diagram type in [mermaid_diagrams/](agentic/mermaid_diagrams/) |
+| A specific document type     | Check [markdown_templates/](agentic/markdown_templates/) for a template first |
 
-**Rules:**
-- `SKILL.md` is the entry point — starts with `---` delimited YAML containing `name` and `description`
-- All files referenced by `SKILL.md` must reside within the skill's own folder
-- The `description` field determines when the skill is matched and loaded
+### Key rules
 
-### Installed Skills
+- **Diagrams** — `accTitle` + `accDescr` on every diagram, `classDef` color classes (no inline `style`), emoji on key nodes
+- **Structure** — one H1, emoji on H2 only, no H5+, horizontal rules after `</details>` blocks
+- **Naming** — all markdown files in `docs/taskNNN-{short-description}.md`
 
-| Skill | Path | Purpose |
-| ----- | ---- | ------- |
-| documentation-writer | [SKILL.md](agentic/skills/documentation-writer/SKILL.md) | Write `.md` documents and Mermaid diagrams following project style guides |
+### Workflow
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+1. Identify whether the task requires a `.md` document, a Mermaid diagram, or both.
+2. Read the relevant style guide(s) listed in the table above **before writing anything**.
+3. Compose the output following the style guide's formatting, structure, and accessibility rules.
+4. Place output files in the correct directory (`docs/` for markdown, or wherever the style guide mandates).
+
+### Available templates
+
+| Template | Use for |
+| -------- | ------- |
+| [decision_record.md](agentic/markdown_templates/decision_record.md) | Architectural decisions |
+| [how_to_guide.md](agentic/markdown_templates/how_to_guide.md) | Step-by-step guides |
+| [project_documentation.md](agentic/markdown_templates/project_documentation.md) | Project overview docs |
+| [status_report.md](agentic/markdown_templates/status_report.md) | Progress reports |
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, clarifying questions come before implementation rather than after mistakes, and **all documentation output follows the project style guides from the first draft.**
