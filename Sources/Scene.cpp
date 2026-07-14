@@ -27,7 +27,7 @@ static float cgltf_json_to_float(const jsmntok_t* tok, const uint8_t* json_chunk
     return (float)atof(tmp);
 }
 
-static int cgltf_skip_json(const jsmntok_t* tokens, int i)
+static int cgltf_skip_json(const jsmntok_t* tokens, int i, int tokenCount)
 {
     // Use the token's byte range (start/end) for OBJECT and ARRAY to reliably
     // skip all children, since JSMN's size field can be undercounted when
@@ -39,7 +39,7 @@ static int cgltf_skip_json(const jsmntok_t* tokens, int i)
     {
         // All child tokens have start < end_pos of their parent container.
         // Tokens following this container have start >= end_pos.
-        while (tokens[i].start < end_pos)
+        while (i < tokenCount && tokens[i].start < end_pos)
         {
             i++;
         }
@@ -66,7 +66,7 @@ static std::string JsonString(const uint8_t* json, const jsmntok_t* token)
 }
 
 // Forward declaration
-static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* tokens, int nodeIndex);
+static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* tokens, int nodeIndex, int tokenCount);
 
 Scene::Scene()
 {
@@ -128,39 +128,39 @@ bool Scene::ParseJson(const char* json, size_t length)
                 // Take first model
                 m_ModelPath = JsonString(json_ptr, &tokens[arrayIndex + 1]);
             }
-            i = cgltf_skip_json(tokens.data(), arrayIndex);
+            i = cgltf_skip_json(tokens.data(), arrayIndex, tokenCount);
         }
         else if (cgltf_json_strcmp(&tokens[i], json_ptr, "graph") == 0)
         {
              // generic graph parser
              int graphIndex = i + 1;
-             int graphEnd = cgltf_skip_json(tokens.data(), graphIndex);
+             int graphEnd = cgltf_skip_json(tokens.data(), graphIndex, tokenCount);
              
              int currentNodeIdx = graphIndex + 1;
              while (currentNodeIdx < graphEnd)
              {
-                 currentNodeIdx = ParseGraphNode(this, json_ptr, tokens.data(), currentNodeIdx);
+                 currentNodeIdx = ParseGraphNode(this, json_ptr, tokens.data(), currentNodeIdx, tokenCount);
              }
              i = graphEnd;
         }
         else
         {
             // Unknown key, skip value
-            i = cgltf_skip_json(tokens.data(), i + 1);
+            i = cgltf_skip_json(tokens.data(), i + 1, tokenCount);
         }
     }
 
     return true;
 }
 
-static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* tokens, int nodeIndex)
+static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* tokens, int nodeIndex, int tokenCount)
 {
     // nodeIndex points to Object { ... }
     // NOTE: We cannot rely on tokens[nodeIndex].size for the key count because
     // JSMN with JSMN_PARENT_LINKS may undercount keys when nested arrays exist
     // inside an object that is itself inside an array. Instead, compute the end
     // of this node and iterate until we reach it.
-    int nodeEnd = cgltf_skip_json(tokens, nodeIndex);
+    int nodeEnd = cgltf_skip_json(tokens, nodeIndex, tokenCount);
     int cur = nodeIndex + 1;
     
     // Properties to extract
@@ -218,21 +218,21 @@ static int ParseGraphNode(Scene* scene, const uint8_t* json, const jsmntok_t* to
         {
             if (valueToken->type == JSMN_ARRAY)
             {
-                int arrayEnd = cgltf_skip_json(tokens, cur + 1);
+                int arrayEnd = cgltf_skip_json(tokens, cur + 1, tokenCount);
                 int childIdx = cur + 2; // first element in the array
                 while (childIdx < arrayEnd)
                 {
-                    childIdx = ParseGraphNode(scene, json, tokens, childIdx);
+                    childIdx = ParseGraphNode(scene, json, tokens, childIdx, tokenCount);
                 }
             }
             else if (valueToken->type == JSMN_OBJECT)
             {
-                 ParseGraphNode(scene, json, tokens, cur + 1);
+                 ParseGraphNode(scene, json, tokens, cur + 1, tokenCount);
             }
         }
 
         // Advance past the key token, then skip the value
-        cur = cgltf_skip_json(tokens, cur + 1);
+        cur = cgltf_skip_json(tokens, cur + 1, tokenCount);
     }
     
     // Create Light if type matches

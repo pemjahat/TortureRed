@@ -105,7 +105,7 @@ void Application::Initialize()
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -1224,25 +1224,6 @@ void Application::RenderImGui()
         // exposure doesn't require reset as it's just post-process
     }
 
-    ImGui::Separator();
-
-    // Display current FPS (basic implementation)
-    static float lastTime = 0.0f;
-    static int frameCount = 0;
-    static float fps = 0.0f;
-
-    float currentTime = SDL_GetTicks() / 1000.0f;
-    frameCount++;
-
-    if (currentTime - lastTime >= 1.0f)
-    {
-        fps = frameCount / (currentTime - lastTime);
-        frameCount = 0;
-        lastTime = currentTime;
-    }
-
-    ImGui::Text("FPS: %.1f", fps);
-
     // Debug values from Model
     ImGui::Text("Total Nodes Read: %zu", m_Model.GetTotalNodes());
     ImGui::Text("Total Root Nodes: %zu", m_Model.GetTotalRootNodes());
@@ -1282,6 +1263,8 @@ void Application::RenderImGui()
             ImGui::Text("GPU frame: %.2f ms", gpuMs);
             ImGui::Text("CPU frame: %.2f ms", cpuMs);
             ImGui::Text("Total:      %.2f ms", totalMs);
+            float fps = totalMs > 0.0f ? 1000.0f / totalMs : 0.0f;
+            ImGui::Text("FPS:        %.1f", fps);
 
             ImGui::Separator();
 
