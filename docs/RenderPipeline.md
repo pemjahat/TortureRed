@@ -72,18 +72,27 @@ _Chain-of-passes reference for the non-path-tracer (`!usePathTracingFrame`) rend
 ```mermaid
 flowchart TB
     accTitle: Per-Frame Raster Rendering Pipeline
-    accDescr: High-level chain of rendering passes from G-Buffer through raster indirect GI, lighting, TAA, transparency, and ImGui to final presentation
+    accDescr: High-level chain of rendering passes from G-Buffer through raster indirect GI, ReSTIR DI, lighting, TAA, transparency, and ImGui to final presentation
 
     subgraph gbuffer ["🎨 G-Buffer"]
         depth_pre[📏 Depth pre-pass] --> gbuffer_pass[🖼️ G-Buffer pass]
     end
 
     subgraph gi ["💡 Raster Indirect GI"]
-        sharc[🔍 SHaRC update → resolve] --> restir_temp[⏳ ReSTIR temporal]
-        restir_temp --> restir_spatial[🌐 ReSTIR spatial]
-        restir_spatial --> denoise{🔧 Denoise?}
-        denoise -->|NRD RELAX| nrd[🧹 NRD denoise → composite]
-        denoise -->|Fallback| split[🔀 Split resolve]
+        sharc[🔍 SHaRC update → resolve] --> restir_temp[⏳ ReSTIR GI temporal]
+        restir_temp --> restir_spatial[🌐 ReSTIR GI spatial]
+        restir_spatial --> resolve_gi[📦 ResolveIntermediates]
+        resolve_gi --> sso[🔗 StoreShadingOutput → Final*]
+        sso --> denoise{🔧 Denoise?}
+        denoise -->|NRD RELAX| nrd[🧹 NRD denoise → Final*]
+        denoise -->|Skip| lighting
+        nrd --> lighting
+    end
+
+    subgraph di ["🔦 ReSTIR Direct Illumination"]
+        di_init[🎯 DI initial sampling] --> di_temp[⏳ DI temporal]
+        di_temp --> di_spatial[🌐 DI spatial]
+        di_spatial --> di_split[✂️ DI split shade]
     end
 
     subgraph forward ["☀️ Forward rendering"]
@@ -94,7 +103,9 @@ flowchart TB
     end
 
     gbuffer --> gi
+    gbuffer --> di
     gi --> lighting
+    di --> lighting
     lighting --> taa
     taa --> transparency
     transparency --> imgui
@@ -102,11 +113,13 @@ flowchart TB
 
     classDef gbuffer_c fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
     classDef gi_c fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef di_c fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f
     classDef forward_c fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
     classDef decision_c fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
 
     class depth_pre,gbuffer_pass gbuffer_c
-    class sharc,restir_temp,restir_spatial,nrd,split gi_c
+    class sharc,restir_temp,restir_spatial,resolve_gi,sso,nrd gi_c
+    class di_init,di_temp,di_spatial,di_split di_c
     class lighting,taa,transparency,imgui forward_c
     class denoise decision_c
 ```
@@ -199,12 +212,82 @@ Outputs (all at internal resolution):
 - Reads diffuse and specular intermediate reservoirs directly
 - Resolves and composites them into the indirect lighting output texture without denoising
 
-#### SHaRC debug
+#### FullScreenDebug — unified debug pipeline
 
-> 📌 **Conditional** — overwrites output when `sharcDebug` is active.
+> 📌 **Replaces Lighting.hlsl entirely** when any debug mode is active.  
+> Outputs raw debug data to screen — no BRDF, no shadow rays, no NRD material factors.  
+> All debug data is written directly to `FullScreenDebugTex` (`R16G16B16A16_FLOAT`) by the debug-producing shaders.
+> `RestirDebugHeatmap` (`R16_FLOAT`) remains PT-only (`DispatchRays`).
 
-- Overwrites the indirect lighting output with a voxel/heatmap visualization of the SHaRC hash table
-- Modes: SHaRC output, bounce heatmap
+##### Architecture
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│               Debug-Producing Shaders                         │
+│  (have debug-mode checks, write debug-specific data)          │
+│  → all write FullScreenDebugTex (R16G16B16A16) directly       │
+│                                                               │
+│  SHaRC_Debug.hlsl ────────→ OutputIdx0                        │
+│  DiffuseTemporal.hlsl ────→ OutputIdx2                        │
+│  SpecularTemporal.hlsl ───→ OutputIdx1                        │
+│  DI_Temporal.hlsl ────────→ OutputIdx1                        │
+│  DI_Spatial.hlsl ─────────→ OutputIdx1                        │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│           FullScreenDebug.hlsl (pixel shader)                  │
+│  Reads FullScreenDebugTex (InputIdx0) → screen                 │
+│  Sky pixel rejection via depth check                           │
+│  Reinhard tonemapping (when TAA is off)                        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+##### Debug-producing shaders
+
+These shaders contain `if (debugMode != OFF)` branches and write debug-specific data.
+They write `float4` directly to `FullScreenDebugTex` (R16G16B16A16). No intermediate formats, no combine pass.
+
+| Debug Mode | Shader | Pipeline | Output Slot | Data |
+|---|---|---|---|---|
+| **SHaRC voxel** (sharcDebug=1) | [`SHaRC_Debug.hlsl`](../Sources/Shaders/SHaRC_Debug.hlsl) | GI | OutputIdx0 | RGB voxel color |
+| **SHaRC bounce** (sharcDebug=2) | [`SHaRC_Debug.hlsl`](../Sources/Shaders/SHaRC_Debug.hlsl) | GI | OutputIdx0 | Bounce heatmap (blue/green/red) |
+| **GI heatmap** (modes 5-10) | [`RestirGI_Diffuse_Temporal.hlsl`](../Sources/Shaders/RestirGI_Diffuse_Temporal.hlsl) | GI | OutputIdx2 | `selectedPDF` (grayscale) |
+| 〃 | [`RestirGI_Specular_Temporal.hlsl`](../Sources/Shaders/RestirGI_Specular_Temporal.hlsl) | GI | OutputIdx1 | `selectedPDF` (grayscale) |
+| **DI debug** | [`RestirDI_Temporal.hlsl`](../Sources/Shaders/RestirDI_Temporal.hlsl) | DI | OutputIdx1 | M count or W weight (grayscale) |
+| 〃 | [`RestirDI_Spatial.hlsl`](../Sources/Shaders/RestirDI_Spatial.hlsl) | DI | OutputIdx1 | M count or W weight (grayscale) |
+
+##### Not debug — normal pipeline passes
+
+`ResolveIntermediates.hlsl`, `SplitShade.hlsl`, and `StoreShadingOutput.hlsl` are always-on
+pipeline passes with zero debug logic. They never write to `FullScreenDebugTex`.
+
+##### PT-only — not available in raster
+
+GI field debug modes 1-4 (`POSITION`, `NORMAL`, `RADIANCE`, `WEIGHTSUM`) are handled
+by [`RestirGI_ReservoirDebug.hlsl`](../Sources/Shaders/RestirGI_ReservoirDebug.hlsl) →
+`PathTracerOutput` — `DispatchRays` only. The raster pipeline has no equivalent.
+
+##### Host dispatch (Renderer.cpp)
+
+| Dispatch Location | Trigger | Action |
+|---|---|---|
+| `DispatchRestirDI` start | `restirDIDebugMode != OFF` | Transition `FullScreenDebugTex` → UAV, bind as OutputIdx1 |
+| `DispatchRestirGI` before temporal | `restirReservoirDebugMode >= SOURCE_PDF` | Transition `FullScreenDebugTex` → UAV, bind as OutputIdx2 / OutputIdx1 |
+| `DispatchRestirGI` after SHaRC Resolve | `sharcDebug != 0` | Dispatch `m_SharcDebugPSO` → `FullScreenDebugTex`, UAV→SRV, **early return** |
+| `DispatchRestirDI` end (GI off) | `restirDIDebugMode != OFF && !GI` | FullScreenDebugTex UAV→SRV |
+| `DispatchRestirGI` after SSO, before NRD | `useCustomRestirHeatmap \|\| DI debug` | FullScreenDebugTex UAV→SRV (covers NRD + non-NRD paths) |
+| `Application.cpp` Lighting pass | `debugActive == true` | Bind `FullScreenDebugTex` as InputIdx0, dispatch `FullScreenDebugPSO`/`FullScreenDebugHdrPSO` |
+
+##### Adding a new debug mode
+
+1. **Source shader**: Write `float4` debug data to one of the existing OutputIdx[1-2] slots
+2. **Host dispatch**: Bind `m_FullScreenDebugTex.uavIndex` to that slot when the debug flag is active
+3. **debugActive check**: Add the flag to `debugActive` in `Application.cpp`
+4. **FullScreenDebug.hlsl**: No changes needed — it reads the unified `FullScreenDebugTex`2. **Combine pass**: If using `RestirDebugHeatmap`, no changes needed — the shader only does R16_FLOAT → RGBA
+3. **Host dispatch**: Add transition + dispatch in `DispatchRestirGI`/`DI` NRD-disabled path (or early-return for direct writes like SHaRC)
+4. **debugActive check**: Add the flag to `debugActive` in `Application.cpp`
+5. **FullScreenDebug.hlsl**: No changes needed — it reads the unified `FullScreenDebugTex`
 
 #### Output
 

@@ -1,5 +1,6 @@
 #include "CommonTracing.hlsl"
 
+// Path tracing mode, not raster
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 

@@ -22,10 +22,10 @@ This document describes:
 |---|---|
 | [`Renderer.cpp`](../Sources/Renderer.cpp) — `NRDDenoise()` | Host-side scheduling: decides NRD vs direct resolve |
 | [`NrdPrepareGuides.hlsl`](../Sources/Shaders/NrdPrepareGuides.hlsl) | Pre-pass: extracts motion vectors, normals, depth for NRD |
-| [`NrdPackRasterIndirect.hlsl`](../Sources/Shaders/NrdPackRasterIndirect.hlsl) | Converts GI reservoir intermediates into NRD-compatible noisy signals |
-| [`NrdCompositeIndirect.hlsl`](../Sources/Shaders/NrdCompositeIndirect.hlsl) | Unpacks NRD output back into `RasterIndirectLightingTex` |
-| [`RestirGI_Split_Resolve.hlsl`](../Sources/Shaders/RestirGI_Split_Resolve.hlsl) | Fallback: direct resolve when NRD is off or debug mode active |
-| [`RestirDI_Shade.hlsl`](../Sources/Shaders/RestirDI_Shade.hlsl) | Final DI resolve — writes `DIOutputTex` |
+| [`NrdPackNoise.hlsl`](../Sources/Shaders/NrdPackNoise.hlsl) | Converts Final* signals into NRD RELAX-compatible packed format |
+| [`NrdCompositeIndirect.hlsl`](../Sources/Shaders/NrdCompositeIndirect.hlsl) | Unpacks NRD output back into `FinalDiffuseTex` / `FinalSpecularTex` |
+| [`RestirGI_ResolveIntermediates.hlsl`](../Sources/Shaders/RestirGI_ResolveIntermediates.hlsl) | Converts GI reservoir buffers → NRD-normalized float4 intermediates |
+| [`NrdStoreShadingOutput.hlsl`](../Sources/Shaders/NrdStoreShadingOutput.hlsl) | Bridges DI/GI intermediates → `FinalDiffuseTex` / `FinalSpecularTex` (overwrite + additive blend) |
 | [`Lighting.hlsl`](../Sources/Shaders/Lighting.hlsl) | Composites all lighting terms for final frame |
 
 ---
@@ -40,8 +40,10 @@ This document describes:
 | 2 | Specular Temporal | `RestirGI_Specular_Temporal.hlsl` | `SpecularReservoirBuffer[curr]` (reads `DiffuseCandidateBuffer` for rough-surface reuse) |
 | 3 | Diffuse Spatial | `RestirGI_Diffuse_Spatial.hlsl` | `DiffuseReservoirIntermediate` |
 | 4 | Specular Spatial | `RestirGI_Specular_Spatial.hlsl` | `SpecularReservoirIntermediate` |
-| 5a | **NRD Denoise** | PrepareGuides → PackSignals → NRD Relax → Composite | `RasterIndirectLightingTex` (denoised) |
-| 5b | **Direct Resolve** (fallback) | `RestirGI_Split_Resolve.hlsl` | `RasterIndirectLightingTex` (noisy, from intermediates directly) |
+| 5 | Resolve Intermediates | `RestirGI_ResolveIntermediates.hlsl` | `GIDiffuseIntermediate` + `GISpecularIntermediate` (NRD-normalized float4) |
+| 6 | Store Shading Output | `NrdStoreShadingOutput.hlsl` (SSO Call 2) | `FinalDiffuseTex` + `FinalSpecularTex` (additive blend on DI base) |
+| 7a | **NRD Denoise** | NrdPackNoise → NRD RELAX → Composite | `FinalDiffuseTex` / `FinalSpecularTex` (denoised in-place) |
+| 7b | **Skip NRD** (fallback) | _(none — SSO output is final)_ | `FinalDiffuseTex` / `FinalSpecularTex` (raw, no denoising) |
 
 ### Branching logic (pass 5)
 
@@ -111,6 +113,135 @@ In [`Lighting.hlsl`](../Sources/Shaders/Lighting.hlsl), `DIOutputTex` is sampled
 | **BRDF representation** | Evaluated per-lobe in PackSignals, normalized by NRD material factors | Full `(diff+spec) × BSDF` pre-multiplied, no normalization |
 | **Sample type** | Scene hit point (`hitPos`, `hitNormal`) | Light index into `LightsBuffer` |
 | **Denoising** | Via NRD Relax (temporal + spatial) | None — raw single-frame output |
+
+---
+
+## 🔧 SHaRC Debug Visualization — Fixed with FullScreenDebug Pass
+
+### Status: ✅ FIXED
+
+`m_SharcDebugPSO` is compiled and dispatched. The debug output is displayed via a dedicated `FullScreenDebug.hlsl` full-screen pass — **not** through `Lighting.hlsl`. This avoids NRD material factor distortion and is reusable for any full-screen debug mode.
+
+### Design: Why a Dedicated Full-Screen Debug Pass?
+
+The old approach (overlaying debug colors on `FinalDiffuseTex`/`FinalSpecularTex` and relying on `Lighting.hlsl` to composite them) had two fundamental problems:
+
+1. **NRD material factor distortion**: `Lighting.hlsl` multiplies `FinalDiffuseTex` by `NRD_MaterialFactors().diffuseFactor` and `FinalSpecularTex` by `specularFactor`. Debug colors are not radiance — multiplying them by these physically-based factors produces incorrect, dim, or perceptually skewed visuals.
+
+2. **Wasted GPU work**: `Lighting.hlsl` evaluates BSDFs, traces shadow rays, and computes tonemapping for pixels that only need a debug color passthrough.
+
+**Solution**: [`FullScreenDebug.hlsl`](../Sources/Shaders/FullScreenDebug.hlsl) is a dedicated full-screen triangle pixel shader that **replaces `Lighting.hlsl` entirely** when any debug mode is active. It reads debug source textures and outputs directly to the screen — no BSDF, no shadow rays, no NRD material factors.
+
+This is a **general-purpose** debug pass, not exclusive to SHaRC. It currently handles:
+
+| Debug Mode | Flag | Source |
+|---|---|---|
+| Reservoir field debug (GI) | `restirReservoirDebugMode != OFF` | `FinalDiffuseTex` + `FinalSpecularTex` |
+| SHaRC voxel visualization | `sharcDebug == 1` | `FinalDiffuseTex` (pre-filled by `SHaRC_Debug.hlsl`) |
+| SHaRC bounce heatmap | `sharcDebug == 2` | `FinalDiffuseTex` (pre-filled by `SHaRC_Debug.hlsl`) |
+| DI reservoir debug | `restirDIDebugMode != OFF` | `FinalDiffuseTex` + `FinalSpecularTex` |
+
+### Root Cause — What Was Broken
+
+| # | Problem | Detail |
+|---|---------|--------|
+| **1** | **No dispatch** | `m_SharcDebugPSO` was created at line 239 but never dispatched. |
+| **2** | **Wrong output target** | `SHaRC_Debug.hlsl` header referenced removed `RasterIndirectLightingTex`. |
+| **3** | **NRD factor distortion** | Passing debug colors through `Lighting.hlsl` applied `diffuseFactor` and `specularFactor` multiplicative weights, distorting the visualization. |
+
+### Pipeline Flow — SHaRC Debug Active
+
+```mermaid
+flowchart TD
+    A["DI: Temporal → Spatial → SplitShade"] --> B["SSO Call 1: DI → FinalDiffuse/FinalSpecular"]
+
+    C["GI: SHaRC Update + Resolve"] --> D{"sharcDebug != 0?"}
+
+    D -- "YES" --> E["SHaRC_Debug.hlsl (compute)<br/>traces rays, queries SHaRC<br/>→ FinalDiffuseTex + FinalSpecularTex"]
+    E --> F["UAV barrier → SRV transition"]
+    F --> G["early return (skip ReSTIR + NRD)"]
+
+    G --> H["FullScreenDebug.hlsl (pixel shader)<br/>reads FinalDiffuseTex<br/>→ direct output to screen<br/>no NRD factors, no BSDF"]
+
+    D -- "NO" --> I["Normal ReSTIR GI pipeline"]
+
+    style E fill:#c8e6c9,stroke:#2e7d32
+    style H fill:#a5d6a7,stroke:#1b5e20
+```
+
+### Three Changes Required
+
+| # | File | Change |
+|---|------|--------|
+| **1** | `Renderer.cpp` → `DispatchRestirGI` | Insert SHaRC debug dispatch block **after** SHaRC Resolve but **before** ReSTIR temporal passes. When `sharcDebug != 0`: bind `FinalDiffuseTex.uavIndex` → `OutputIdx0`, `FinalSpecularTex.uavIndex` → `OutputIdx1`, dispatch debug PSO, UAV-barrier, SRV-transition, **early-return** (skip all ReSTIR + NRD). |
+| **2** | `SHaRC_Debug.hlsl` | Write to **both** `OutputIdx0` and `OutputIdx1`. Both receive the same debug color. Update header comment (remove `RasterIndirectLightingTex` reference). |
+| **3** | `FullScreenDebug.hlsl` (NEW) + `Application.cpp` | When any debug mode is active, dispatch `FullScreenDebug.hlsl` instead of `Lighting.hlsl`. This reads `FinalDiffuseTex` / `FinalSpecularTex` as SRVs and outputs directly to the render target. |
+
+### SHaRC Debug Dispatch Pseudocode
+
+```cpp
+// Place AFTER SHaRC Resolve barrier (~Renderer.cpp line that dispatches SHaRC Resolve),
+// BEFORE ReSTIR Diffuse Temporal dispatch.
+
+if (frame.sharcDebug != 0 && m_SharcDebugPSO)
+{
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    BindlessIndices indices = {};
+    indices.OutputIdx0 = m_FinalDiffuseTex.uavIndex;
+    indices.OutputIdx1 = m_FinalSpecularTex.uavIndex;
+    m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    m_CommandList->SetPipelineState(m_SharcDebugPSO.Get());
+    m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER debugBarriers[] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_FinalDiffuseTex.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_FinalSpecularTex.resource.Get()),
+    };
+    m_CommandList->ResourceBarrier(_countof(debugBarriers), debugBarriers);
+
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    m_CurrentReservoirIndex = previousReservoir;
+    return;
+}
+```
+
+### FullScreenDebug.hlsl — Key Design Points
+
+1. **Full-screen triangle**: Same VS as `Lighting.hlsl` — generates a full-screen quad from 3 vertices.
+2. **Zero lighting math**: No `EvaluateBSDF`, no shadow rays, no `NRD_MaterialFactors`.
+3. **Sky pixel rejection**: Reads depth from G-Buffer, outputs transparent black for sky pixels.
+4. **Tonemapping passthrough**: When TAA is active, outputs raw HDR (TAA resolve handles tonemapping). When TAA is off, applies Reinhard tonemapping in-shader.
+5. **Extensible**: New debug modes add `else if` branches — no changes needed to `Application.cpp` or `Renderer.cpp`.
+
+### FullScreenDebug Dispatch (Application.cpp)
+
+```cpp
+// In Application::Render, Lighting Pass section:
+
+const bool debugActive =
+    (frame.sharcDebug != 0) ||
+    (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
+    (frame.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
+
+// TAA path:
+cmdList->SetPipelineState(debugActive
+    ? m_Renderer.GetFullScreenDebugHdrPSO()
+    : m_Renderer.GetLightingHdrPSO());
+
+// Direct-to-backbuffer path:
+cmdList->SetPipelineState(
+    m_DebugShadowMap ? m_Renderer.GetDebugPSO() :
+    debugActive      ? m_Renderer.GetFullScreenDebugPSO() :
+                       m_Renderer.GetLightingPSO());
+```
+
+### Why the NRD Gate Alone Wasn't Enough
+
+The NRD gate (`&& frame.sharcDebug == 0` in `useNrd`) correctly prevents NRD from running during debug mode. But it doesn't **replace** NRD's output with anything. The SSO Call 2 writes normal GI radiance into `FinalDiffuseTex` / `FinalSpecularTex`, the NRD path returns early, and `Lighting.hlsl` reads those textures. The result is normal (noisy) GI lighting — not the debug visualization. The missing piece was both the dispatch of `m_SharcDebugPSO` **and** the `FullScreenDebug.hlsl` pass to display the result without NRD material factor distortion.
 
 ---
 

@@ -644,7 +644,15 @@ void Application::Render()
 
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
-        // 3. Lighting Pass
+        // Determine if any full-screen debug mode is active.
+        // When true, FullScreenDebug.hlsl replaces Lighting.hlsl entirely —
+        // no BSDF evaluation, no shadow rays, no NRD material factors.
+        const bool debugActive =
+            (m_FrameConstants.sharcDebug != 0) ||
+            (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
+            (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
+
+        // 3. Lighting Pass (or FullScreenDebug Pass when debug is active)
         // When TAA is active: render to internal-res HDR texture (no tonemapping).
         // When TAA is off:    render directly to output-res back buffer (with tonemapping).
         {
@@ -661,12 +669,22 @@ void Application::Render()
             // FinalDiffuse/FinalSpecular are the universal interchange textures.
             // They contain NRD-normalized radiance (raw or denoised) for all active sources.
             // Lighting always reads from them — no branching on NRD or DI/GI state.
-            if (m_FrameConstants.enableRestirDI || m_FrameConstants.enableRasterIndirectGI)
+            if ((m_FrameConstants.enableRestirDI || m_FrameConstants.enableRasterIndirectGI) && !debugActive)
             {
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalDiffuseTex(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 indices.InputIdx0 = m_Renderer.GetFinalDiffuseTex().srvIndex;
                 indices.InputIdx1 = m_Renderer.GetFinalSpecularTex().srvIndex;
+            }
+
+            // When any full-screen debug mode is active, FullScreenDebug.hlsl
+            // reads the unified FullScreenDebugTex (R16G16B16A16) via InputIdx0.
+            // All debug data is pre-combined into this texture by upstream passes.
+            if (debugActive)
+            {
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFullScreenDebugTex(),
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                indices.InputIdx0 = m_Renderer.GetFullScreenDebugTex().srvIndex;
             }
 
             // Need this binding for shadow ray in pixel shader
@@ -689,8 +707,10 @@ void Application::Render()
                 cmdList->ClearRenderTargetView(hdrRtvHandle, clearColor, 0, nullptr);
 
                 // Keep viewport at internal resolution (already set above)
-                // Use HDR lighting PSO (debug shadow map doesn't support HDR, skip TAA for it)
-                cmdList->SetPipelineState(m_Renderer.GetLightingHdrPSO());
+                // Use debug or HDR lighting PSO
+                cmdList->SetPipelineState(debugActive
+                    ? m_Renderer.GetFullScreenDebugHdrPSO()
+                    : m_Renderer.GetLightingHdrPSO());
             }
             else
             {
@@ -709,7 +729,11 @@ void Application::Render()
                 const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
                 cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
-                cmdList->SetPipelineState(m_DebugShadowMap ? m_Renderer.GetDebugPSO() : m_Renderer.GetLightingPSO());
+                // Select appropriate PSO: shadow-map debug → lighting → full-screen debug
+                cmdList->SetPipelineState(
+                    m_DebugShadowMap ? m_Renderer.GetDebugPSO() :
+                    debugActive      ? m_Renderer.GetFullScreenDebugPSO() :
+                                       m_Renderer.GetLightingPSO());
             }
 
             cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle

@@ -399,6 +399,12 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DIDiffuseIntermediate,   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DISpecularIntermediate,  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    const bool diDebugActive = frame.restirDIDebugMode != RESTIR_DI_DEBUG_OFF;
+    if (diDebugActive)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
     m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     m_CommandList->SetComputeRootSignature(m_RootSignature.Get());
 
@@ -423,7 +429,7 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     indices = {};
     indices.InputIdx0  = m_DIReservoirBuffer[prev].srvIndex;
     indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
-    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
+    indices.OutputIdx1 = diDebugActive ? m_FullScreenDebugTex.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->SetPipelineState(m_RestirDITemporalPSO.Get());
     {
@@ -441,7 +447,7 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
     indices = {};
     indices.InputIdx0  = m_DIReservoirBuffer[curr].srvIndex;
     indices.OutputIdx0 = m_DIReservoirIntermediate.uavIndex;
-    indices.OutputIdx1 = m_RestirDebugHeatmap.uavIndex;
+    indices.OutputIdx1 = diDebugActive ? m_FullScreenDebugTex.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     m_CommandList->SetPipelineState(m_RestirDISpatialPSO.Get());
     {
@@ -518,6 +524,16 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
         // NRD disabled and GI disabled: transition Final* to SRV for Lighting.hlsl
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalSpecularTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+
+    // DI debug: FullScreenDebugTex UAV → SRV (only when GI is off;
+    // when GI is on, DispatchRestirGI handles the SRV transition).
+    if (diDebugActive && !frame.enableRasterIndirectGI)
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_FullScreenDebugTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 }
 
@@ -728,6 +744,12 @@ bool Renderer::Initialize(HWND hwnd)
         if (!CreateTexture(m_RestirDebugHeatmap, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
         {
             std::cerr << "Failed to create ReSTIR debug heatmap texture" << std::endl;
+            return false;
+        }
+
+        if (!CreateTexture(m_FullScreenDebugTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        {
+            std::cerr << "Failed to create full-screen debug texture" << std::endl;
             return false;
         }
 
@@ -1117,6 +1139,34 @@ void Renderer::CreatePipelineState()
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingHdrPSO));
+    }
+
+    // 3.15 FullScreenDebug PSO (LDR — renders to R8G8B8A8_UNORM back buffer with tonemapping)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/FullScreenDebug.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/FullScreenDebug.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_FullScreenDebugPSO));
+    }
+
+    // 3.16 FullScreenDebug HDR PSO (renders to R16G16B16A16_FLOAT for TAA input — no tonemapping)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/FullScreenDebug.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/FullScreenDebug.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_FullScreenDebugHdrPSO));
     }
 
     // 3.5 Debug PSO
@@ -1527,7 +1577,7 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     GraphicsHelper::TransitionResource(m_CommandList.Get(), m_DiffuseCandidateBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (useCustomRestirHeatmap)
     {
-        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_RestirDebugHeatmap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
 
     m_CommandList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
@@ -1684,6 +1734,33 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
         m_CommandList->ResourceBarrier(2, barriers);
     }
 
+    // --- SHaRC Debug Visualization ---
+    // When sharcDebug != 0, skip all ReSTIR + NRD and render the SHaRC debug
+    // overlay directly. The debug color is written to FullScreenDebugTex
+    // and displayed by FullScreenDebug.hlsl (replacing Lighting.hlsl).
+    if (frame.sharcDebug != 0 && m_SharcDebugPSO)
+    {
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BindlessIndices debugIndices = {};
+        debugIndices.OutputIdx0 = m_FullScreenDebugTex.uavIndex;
+        m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &debugIndices, 0);
+        m_CommandList->SetPipelineState(m_SharcDebugPSO.Get());
+        {
+            MICROPROFILE_SCOPEGPUI("SHaRC_Debug", MP_CYAN);
+            m_CommandList->Dispatch((m_InternalWidth + 7) / 8, (m_InternalHeight + 7) / 8, 1);
+        }
+
+        D3D12_RESOURCE_BARRIER debugBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_FullScreenDebugTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &debugBarrier);
+
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        m_NrdWasActiveLastFrame = false;
+        m_CurrentReservoirIndex = previousReservoir;
+        return;
+    }
+
     // -----------------------------------------------------------------------
     // Split Diffuse / Specular ReSTIR passes
     // (1) RTDGI Temporal → (2) RTR Temporal → (3) Diffuse Spatial →
@@ -1697,7 +1774,7 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.InputIdx0  = m_DiffuseReservoirBuffer[previousReservoir].srvIndex;
     indices.OutputIdx0 = m_DiffuseReservoirBuffer[currentReservoir].uavIndex;
     indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
-    indices.OutputIdx2 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
+    indices.OutputIdx2 = useCustomRestirHeatmap ? m_FullScreenDebugTex.uavIndex : UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("GI_Diffuse_Temporal", MP_PURPLE);
@@ -1719,7 +1796,7 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
     indices.InputIdx0  = m_SpecularReservoirBuffer[previousReservoir].srvIndex;
     indices.InputIdx1  = m_DiffuseCandidateBuffer.srvIndex;
     indices.OutputIdx0 = m_SpecularReservoirBuffer[currentReservoir].uavIndex;
-    indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
+    indices.OutputIdx1 = useCustomRestirHeatmap ? m_FullScreenDebugTex.uavIndex : UINT(-1);
     indices.OutputIdx2 = UINT(-1);
     m_CommandList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
     {
@@ -1833,6 +1910,19 @@ void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
             CD3DX12_RESOURCE_BARRIER::UAV(m_FinalSpecularTex.resource.Get()),
         };
         m_CommandList->ResourceBarrier(_countof(ssoBarriers), ssoBarriers);
+    }
+
+    // FullScreenDebugTex UAV → SRV for raster debug (GI heatmap + DI debug).
+    // GI field debug modes 1-4 are PT-only.
+    // SHaRC debug was already handled in the early-return above.
+    const bool rasterDebugActive = useCustomRestirHeatmap
+        || frame.restirDIDebugMode != RESTIR_DI_DEBUG_OFF;
+    if (rasterDebugActive)
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_FullScreenDebugTex.resource.Get());
+        m_CommandList->ResourceBarrier(1, &b);
+        GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FullScreenDebugTex,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
     if (useNrd && NRDDenoise(frame))
@@ -2479,6 +2569,9 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         CreateTexture(m_PathTracerPresentOutput, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
         CreateTexture(m_RestirDebugHeatmap, w, h, DXGI_FORMAT_R16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+
+        CreateTexture(m_FullScreenDebugTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
 
         // ReSTIR-DI Reservoirs

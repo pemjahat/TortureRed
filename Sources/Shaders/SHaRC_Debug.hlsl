@@ -9,9 +9,13 @@
 //       maps the geometric bounce count to a cyan→red color ramp so you can
 //       see path depth distribution across the screen.
 //
-// Dispatched at full resolution ONLY when sharcDebug != 0, replacing the
-// ReSTIR-resolved indirect irradiance with the debug visualization.
-// OutputIdx0 must point to m_RasterIndirectLightingTex UAV.
+// Dispatched at full resolution ONLY when sharcDebug != 0, after SHaRC
+// Update+Resolve but before ReSTIR temporal/spatial passes.
+//
+// Writes debugColor to OutputIdx0 (FullScreenDebugTex, R16G16B16A16_FLOAT).
+// FullScreenDebug.hlsl reads this texture as a single InputIdx0 and outputs
+// directly to the screen — no NRD material factor modulation, no BSDF
+// evaluation, no shadow rays.
 
 #define SHARC_ENABLE_DEBUG 1
 #include "SharcCommon.h"
@@ -46,7 +50,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
     if (screenPos.x >= launchDims.x || screenPos.y >= launchDims.y) return;
 
-    RWTexture2D<float4> outDebug = ResourceDescriptorHeap[g_Indices.OutputIdx0];
+    RWTexture2D<float4> outDebug = ResourceDescriptorHeap[g_Indices.OutputIdx0]; // FullScreenDebugTex
 
     RNG rng;
     seed_rng(rng, screenPos, g_Frame.frameIndex);

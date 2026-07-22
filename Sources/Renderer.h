@@ -114,7 +114,11 @@ public:
     GPUTexture& GetFinalDiffuseTex()        { return m_FinalDiffuseTex; }
     GPUTexture& GetFinalSpecularTex()       { return m_FinalSpecularTex; }
     GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
+    GPUTexture& GetRestirDebugHeatmap()       { return m_RestirDebugHeatmap; }
+    GPUTexture& GetFullScreenDebugTex()       { return m_FullScreenDebugTex; }
     ID3D12PipelineState* GetLightingHdrPSO() const { return m_LightingHdrPSO.Get(); }
+    ID3D12PipelineState* GetFullScreenDebugPSO() const { return m_FullScreenDebugPSO.Get(); }
+    ID3D12PipelineState* GetFullScreenDebugHdrPSO() const { return m_FullScreenDebugHdrPSO.Get(); }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
     const IrCacheBindlessIndices& GetIrCacheBindlessIndices() const { return m_IrCacheIndices; }
     void DrawProbeSpheresDebug();
@@ -249,6 +253,7 @@ private:
     GPUTexture m_NrdValidationTex;
     GPUTexture m_FinalDiffuseTex;          // Universal interchange: SSO writes, NrdPackNoise+Lighting read
     GPUTexture m_FinalSpecularTex;         // Universal interchange: SSO writes, NrdPackNoise+Lighting read
+    GPUTexture m_FullScreenDebugTex;       // Unified debug output: SHaRC/heatmap/field debug → FullScreenDebug.hlsl
     std::unique_ptr<nrd::Integration> m_NrdIntegration;
     bool m_NrdInitialized = false;
     bool m_NrdWasActiveLastFrame = false; // Tracks whether NRD ran last frame; used to force RESTART on re-enable
@@ -269,6 +274,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdPrepareGuidesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdCompositePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_FullScreenDebugPSO;    // Debug PSO targeting R8G8B8A8_UNORM (LDR, with tonemapping)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_FullScreenDebugHdrPSO; // Debug PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
 
     // ------- ReSTIR DI buffers and textures -------
     GPUBuffer  m_DIReservoirBuffer[2];       // Ping-pong DI reservoirs (DIRreservoir per pixel)
