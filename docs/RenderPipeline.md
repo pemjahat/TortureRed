@@ -139,7 +139,8 @@ flowchart TB
 - Depth buffer cleared to 1.0 if pre-pass was skipped
 - **Pre-pass enabled:** render opaque geometry with G-Buffer PSO (depth-test equals, depth-write off)
 - **Pre-pass disabled:** render opaque and masked geometry with G-BufferWrite PSO (depth-test less, depth-write on)
-- Masked geometry always rendered
+- **Only opaque (`AlphaMode::Opaque`) and masked (`AlphaMode::Mask`) geometry is rendered** — transparent/blended objects are explicitly excluded from the G-Buffer (see [transparency pass](#transparency-pass))
+- Masked geometry uses `discard` in the pixel shader when the sampled alpha is below `alphaCutoff` (`material.alphaMode == 1` check in [Gbuffer.hlsl](../Sources/Shaders/Gbuffer.hlsl))
 
 Outputs (all at internal resolution):
 
@@ -257,41 +258,11 @@ They write `float4` directly to `FullScreenDebugTex` (R16G16B16A16). No intermed
 | **DI debug** | [`RestirDI_Temporal.hlsl`](../Sources/Shaders/RestirDI_Temporal.hlsl) | DI | OutputIdx1 | M count or W weight (grayscale) |
 | 〃 | [`RestirDI_Spatial.hlsl`](../Sources/Shaders/RestirDI_Spatial.hlsl) | DI | OutputIdx1 | M count or W weight (grayscale) |
 
-##### Not debug — normal pipeline passes
-
-`ResolveIntermediates.hlsl`, `SplitShade.hlsl`, and `StoreShadingOutput.hlsl` are always-on
-pipeline passes with zero debug logic. They never write to `FullScreenDebugTex`.
-
 ##### PT-only — not available in raster
 
 GI field debug modes 1-4 (`POSITION`, `NORMAL`, `RADIANCE`, `WEIGHTSUM`) are handled
 by [`RestirGI_ReservoirDebug.hlsl`](../Sources/Shaders/RestirGI_ReservoirDebug.hlsl) →
 `PathTracerOutput` — `DispatchRays` only. The raster pipeline has no equivalent.
-
-##### Host dispatch (Renderer.cpp)
-
-| Dispatch Location | Trigger | Action |
-|---|---|---|
-| `DispatchRestirDI` start | `restirDIDebugMode != OFF` | Transition `FullScreenDebugTex` → UAV, bind as OutputIdx1 |
-| `DispatchRestirGI` before temporal | `restirReservoirDebugMode >= SOURCE_PDF` | Transition `FullScreenDebugTex` → UAV, bind as OutputIdx2 / OutputIdx1 |
-| `DispatchRestirGI` after SHaRC Resolve | `sharcDebug != 0` | Dispatch `m_SharcDebugPSO` → `FullScreenDebugTex`, UAV→SRV, **early return** |
-| `DispatchRestirDI` end (GI off) | `restirDIDebugMode != OFF && !GI` | FullScreenDebugTex UAV→SRV |
-| `DispatchRestirGI` after SSO, before NRD | `useCustomRestirHeatmap \|\| DI debug` | FullScreenDebugTex UAV→SRV (covers NRD + non-NRD paths) |
-| `Application.cpp` Lighting pass | `debugActive == true` | Bind `FullScreenDebugTex` as InputIdx0, dispatch `FullScreenDebugPSO`/`FullScreenDebugHdrPSO` |
-
-##### Adding a new debug mode
-
-1. **Source shader**: Write `float4` debug data to one of the existing OutputIdx[1-2] slots
-2. **Host dispatch**: Bind `m_FullScreenDebugTex.uavIndex` to that slot when the debug flag is active
-3. **debugActive check**: Add the flag to `debugActive` in `Application.cpp`
-4. **FullScreenDebug.hlsl**: No changes needed — it reads the unified `FullScreenDebugTex`2. **Combine pass**: If using `RestirDebugHeatmap`, no changes needed — the shader only does R16_FLOAT → RGBA
-3. **Host dispatch**: Add transition + dispatch in `DispatchRestirGI`/`DI` NRD-disabled path (or early-return for direct writes like SHaRC)
-4. **debugActive check**: Add the flag to `debugActive` in `Application.cpp`
-5. **FullScreenDebug.hlsl**: No changes needed — it reads the unified `FullScreenDebugTex`
-
-#### Output
-
-`RasterIndirectLightingTex` (`R16G16B16A16_FLOAT`, internal resolution) — indirect irradiance ready for the lighting pass.
 
 ### Lighting pass
 
@@ -346,13 +317,17 @@ Per-pixel computation:
 
 ### Transparency pass
 
-Forward alpha-blended rendering.
+Forward rasterization pass for `AlphaMode::Blend` geometry. Runs **after TAA** so transparent surfaces composite on top of the fully resolved, upscaled opaque frame.
 
-- Depth buffer transitioned to depth-read state
-- Viewport set to output resolution
-- Back buffer bound as render target with depth stencil from G-Buffer
-- Alpha-blended geometry rendered on top of the opaque scene
-- Uses transparent PSO with standard alpha blending
+- Reads: G-Buffer depth (read-only DSV), resolved opaque color already in the RTV
+- Writes: alpha-blended color into the active RTV
+
+| AA mode | RTV | DSV | Viewport |
+|---------|-----|-----|----------|
+| TAA on  | `RasterHdrOutputTex` (internal res, HDR) | G-Buffer depth (internal res) | Internal resolution |
+| TAA off | Back buffer (output res, LDR) | G-Buffer depth (output res — internal == output when TAA is off) | Output resolution |
+
+Depth write is disabled; depth test is enabled (read-only) so transparent geometry is correctly occluded by opaque surfaces without corrupting the depth buffer.
 
 ### ImGui overlay
 

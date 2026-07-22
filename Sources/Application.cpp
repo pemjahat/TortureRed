@@ -105,7 +105,7 @@ void Application::Initialize()
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
     // Load Scene
-    if (!m_Scene.LoadScene("Content/Scenes/sponza.scene.json"))
+    if (!m_Scene.LoadScene("Content/Scenes/bistro.scene.json"))
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene");
         // Fallback or exit? For now just log
@@ -149,11 +149,14 @@ void Application::Initialize()
 
     // Initialize TAA / Temporal Super-Resolution
     // Output is always 1920x1080 (WINDOW_WIDTH x WINDOW_HEIGHT).
-    // Internal resolution is derived from the upsampling factor.
+    // Internal resolution equals output resolution unless TAA upscaling is active.
+    // When TAA is disabled there is no upscaler, so rendering at a lower internal
+    // resolution would produce a mismatched depth buffer and incorrect depth tests.
     m_OutputWidth = WINDOW_WIDTH;
     m_OutputHeight = WINDOW_HEIGHT;
-    m_InternalWidth = std::max(320u, std::min((uint32_t)(m_OutputWidth / m_TaaUpsamplingFactor), m_OutputWidth));
-    m_InternalHeight = std::max(180u, std::min((uint32_t)(m_OutputHeight / m_TaaUpsamplingFactor), m_OutputHeight));
+    const bool taaDefaultOn = (m_AntiAliasingMode == AA_MODE_TAA);
+    m_InternalWidth  = taaDefaultOn ? std::max(320u, std::min((uint32_t)(m_OutputWidth  / m_TaaUpsamplingFactor), m_OutputWidth))  : m_OutputWidth;
+    m_InternalHeight = taaDefaultOn ? std::max(180u, std::min((uint32_t)(m_OutputHeight / m_TaaUpsamplingFactor), m_OutputHeight)) : m_OutputHeight;
 
     // Create all internal-resolution resources (GBuffer, path tracer, NRD, reservoirs, etc.)
     m_Renderer.CreateInternalResolutionResources(m_InternalWidth, m_InternalHeight);
@@ -739,6 +742,57 @@ void Application::Render()
             cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
         }
 
+        // 4. Transparency Pass (Forward)
+        // Runs BEFORE TAA so that transparent geometry is temporally accumulated.
+        // In the TAA path: renders into RasterHdrOutputTex at internal resolution,
+        //   depth-tested against the G-buffer depth (also at internal resolution).
+        // In the non-TAA path: renders directly to the back buffer at output resolution.
+        {
+            MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
+            MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
+
+            // Ensure depth is in read state for forward pass
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+
+            if (rasterTaaActive)
+            {
+                // Render into the HDR intermediate texture (same target as the lighting pass).
+                // Viewport stays at internal resolution — already set at the top of Render().
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
+                cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
+            }
+            else
+            {
+                // Non-TAA: render directly to the back buffer at output resolution.
+                // Internal resolution == output resolution in this path (enforced at
+                // initialization and on AA mode toggle), so the G-buffer depth covers
+                // the full viewport and can be bound as DSV safely.
+                D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+                D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+                cmdList->RSSetViewports(1, &outputViewport);
+                cmdList->RSSetScissorRects(1, &outputScissor);
+
+                m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+                cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+            }
+
+            // TAA path: use HDR PSO (R16G16B16A16_FLOAT, no tonemapping) to match RasterHdrOutputTex.
+            // Non-TAA path: use LDR PSO (R8G8B8A8_UNORM, with tonemapping) to match back buffer.
+            ID3D12PipelineState* transparentPSO = rasterTaaActive
+                ? m_Renderer.GetTransparentHdrPSO()
+                : m_Renderer.GetTransparentPSO();
+
+            if (transparentPSO)
+            {
+                cmdList->SetPipelineState(transparentPSO);
+                m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
+            }
+        }
+
         // 3.5 TAA post-processing for rasterizer path
         if (rasterTaaActive)
         {
@@ -748,7 +802,8 @@ void Application::Render()
                 MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
                 m_Renderer.GenerateMotionVectors(m_FrameConstants);
             }
-            // Run TAA on the HDR rasterizer output, then copy TAA output to back buffer
+            // Run TAA on the HDR rasterizer output (which now includes transparency),
+            // then copy TAA output to back buffer
             {
                 MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
                 MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
@@ -757,34 +812,6 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
                 m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
-            }
-
-            // Setup RTV for transparency pass on top of TAA output
-            m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
-        }
-
-        // 4. Transparency Pass (Forward)
-        {
-            MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
-            MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-
-            // Ensure depth is in read state for forward pass
-            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
-
-            // Set output resolution viewport for transparency (always renders to back buffer)
-            D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
-            D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
-            cmdList->RSSetViewports(1, &outputViewport);
-            cmdList->RSSetScissorRects(1, &outputScissor);
-
-            cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-
-            if (m_Renderer.GetTransparentPSO())
-            {
-                cmdList->SetPipelineState(m_Renderer.GetTransparentPSO());
-                m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
             }
         }
     }
@@ -1055,6 +1082,19 @@ void Application::RenderImGui()
         {
             m_TaaResetHistory = true;
             m_FrameConstants.frameIndex = 0;
+
+            // Internal resolution must match output resolution when TAA is off
+            // (no upscaler available). When TAA is re-enabled, restore the
+            // upsampling-factor-derived resolution.
+            const bool nowTaa = (m_AntiAliasingMode == AA_MODE_TAA);
+            uint32_t newW = nowTaa ? std::max(320u, std::min((uint32_t)(m_OutputWidth  / m_TaaUpsamplingFactor), m_OutputWidth))  : m_OutputWidth;
+            uint32_t newH = nowTaa ? std::max(180u, std::min((uint32_t)(m_OutputHeight / m_TaaUpsamplingFactor), m_OutputHeight)) : m_OutputHeight;
+            if (newW != m_InternalWidth || newH != m_InternalHeight)
+            {
+                m_PendingResolutionChange = true;
+                m_PendingInternalWidth  = newW;
+                m_PendingInternalHeight = newH;
+            }
         }
         if (ImGui::IsItemHovered())
         {

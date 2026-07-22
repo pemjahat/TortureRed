@@ -78,6 +78,7 @@ public:
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12CommandSignature* GetCommandSignature() const { return m_CommandSignature.Get(); }
     ID3D12PipelineState* GetTransparentPSO() const { return m_TransparentPSO.Get(); }
+    ID3D12PipelineState* GetTransparentHdrPSO() const { return m_TransparentHdrPSO.Get(); }
     ID3D12PipelineState* GetDepthPrePassPSO() const { return m_DepthPrePassPSO.Get(); }
     ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
     ID3D12PipelineState* GetGBufferWritePSO() const { return m_GBufferWritePSO.Get(); }
@@ -160,7 +161,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
 
     // Pipeline States
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentPSO;    // LDR: R8G8B8A8_UNORM (non-TAA path)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentHdrPSO; // HDR: R16G16B16A16_FLOAT (TAA path)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthPrePassPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;

@@ -1233,6 +1233,40 @@ void Renderer::CreatePipelineState()
         CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_TransparentPSO)), "CreateGraphicsPipelineState for Transparent PSO failed");
     }
 
+    // 5.1 Transparent HDR PSO (Forward — renders to R16G16B16A16_FLOAT for TAA input, no tonemapping)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+
+        D3D12_RENDER_TARGET_BLEND_DESC blendDesc = {};
+        blendDesc.BlendEnable = TRUE;
+        blendDesc.LogicOpEnable = FALSE;
+        blendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        blendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+        blendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
+        blendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        psoDesc.BlendState.RenderTarget[0] = blendDesc;
+
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+        psoDesc.DepthStencilState.DepthEnable = TRUE;
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR intermediate texture format
+        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+
+        CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_TransparentHdrPSO)), "CreateGraphicsPipelineState for Transparent HDR PSO failed");
+    }
+
     if (m_RayTracingSupported)
     {
         CreateRayTracingPipeline();

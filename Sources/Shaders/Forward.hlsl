@@ -115,6 +115,13 @@ float4 PSMain(PSInput input) : SV_Target0 {
     float3 ambient = 0.03f * albedo.rgb;
     float3 finalColor = ambient + totalDirectLighting;
     
+    // When TAA is active, output raw HDR — the TAA resolve shader handles
+    // exposure and tonemapping. Otherwise, apply them here for direct display.
+    if (FrameCB.taaEnabled)
+    {
+        return float4(max(finalColor, 0.0f), albedo.a);
+    }
+
     // Basic Tone Mapping
     float3 exposedColor = finalColor * FrameCB.exposure;
     float3 ldrColor = exposedColor / (exposedColor + 1.0f);
