@@ -4,6 +4,12 @@ _Planning document for replacing the unified vertex/index buffer rasterization p
 
 ---
 
+# Phase 1 — Core Meshlet Pipeline (Previously Completed)
+
+_The following sections (Pre-reqs A–E and Steps 1–8) constitute Phase 1: the foundational meshlet generation, culling, and rasterization pipeline._
+
+---
+
 ## 🎯 Goals & Constraints
 
 | Goal | Detail |
@@ -514,22 +520,18 @@ Once the meshlet path is verified working:
 
 ## 🔢 Implementation Order
 
-```mermaid
-flowchart TD
-    A[Pre-req A\nAdd meshoptimizer to CMake] --> E
-    B[Pre-req B\nCheck Mesh Shader support] --> E
-    D[Pre-req D\nBindless descriptor heap] --> E
-    E[Pre-req E\nSeparate StructuredBuffer streams] --> S1
-
-    S1[Step 1\nDefine shared structs] --> S2
-    S2[Step 2\nMeshlet cache .bin format] --> S3
-    S3[Step 3\nCPU meshlet generation] --> S4
-    S4[Step 4\nGPU buffer upload] --> S5
-    S5[Step 5\nCull compute shader] --> S6
-    S6[Step 6\nMesh Shader rasterize] --> S7
-    S7[Step 7\nIntegrate into Renderer] --> S8
-    S8[Step 8\nRemove old VB/IB path]
-```
+1. **Pre-req A** — Add meshoptimizer to CMake
+2. **Pre-req B** — Check Mesh Shader support
+3. **Pre-req D** — Bindless descriptor heap
+4. **Pre-req E** — Separate StructuredBuffer streams
+5. **Step 1** — Define shared structs
+6. **Step 2** — Meshlet cache `.bin` format
+7. **Step 3** — CPU meshlet generation
+8. **Step 4** — GPU buffer upload
+9. **Step 5** — Cull compute shader
+10. **Step 6** — Mesh Shader rasterize
+11. **Step 7** — Integrate into Renderer
+12. **Step 8** — Remove old VB/IB path
 
 ---
 
@@ -543,3 +545,17 @@ flowchart TD
 | **Animation / skinning** | Skinned meshes need a separate skinned-position stream; defer animated mesh support to a follow-up task |
 | **No occlusion culling** | Frustum-only culling will over-draw compared to D3D12_Research's HZB approach; acceptable for initial implementation |
 | **Bin invalidation** | The `.meshlet.bin` cache must be invalidated when `MESHLET_MAX_VERTICES` / `MESHLET_MAX_TRIANGLES` constants change; embed them in the bin header |
+
+---
+
+## 📎 Next: Phase 2
+
+Phase 2 (debug view for meshlet rendering — instance/meshlet/primitive/overdraw visualization) has been moved to its own document:
+
+➡️ **[plan001-meshletdebug.md](plan001-meshletdebug.md)** — Debug View for Meshlet Rendering
+
+## 📎 Next: Phase 3
+
+Phase 3 (mesh shader meshlet rasterization + wiring into RT lighting pipeline) has its own document:
+
+➡️ **[plan002-meshletmeshshader.md](plan002-meshletmeshshader.md)** — Mesh Shader Meshlet Rendering & RT Pipeline Wiring
