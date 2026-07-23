@@ -655,6 +655,16 @@ bool Renderer::Initialize(HWND hwnd)
     }
     std::cout << "Ray Tracing Supported: " << (m_RayTracingSupported ? "Yes" : "No") << std::endl;
 
+    // Check for Mesh Shader support
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
+        if (SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
+        {
+            m_MeshShaderSupported = (options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1);
+        }
+    }
+    std::cout << "Mesh Shader Supported: " << (m_MeshShaderSupported ? "Yes" : "No") << std::endl;
+
     // Create command queue
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
     queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
@@ -864,6 +874,11 @@ bool Renderer::Initialize(HWND hwnd)
     }
 
     std::cout << "Renderer initialized successfully!" << std::endl;
+
+    // Meshlet pipeline resources and PSOs
+    CreateMeshletResources();
+    CreateMeshletPipelines();
+
     return true;
 }
 
@@ -996,7 +1011,10 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3_2;
     srvRangeSpace3_2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 3); // t1 space3: IrCache Debug
 
-    CD3DX12_ROOT_PARAMETER rootParameters[14];
+    CD3DX12_DESCRIPTOR_RANGE srvRangeMeshletSpace3;
+    srvRangeMeshletSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 3); // t0-t15 space3: Meshlet stream buffers
+
+    CD3DX12_ROOT_PARAMETER rootParameters[15];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -1011,6 +1029,7 @@ void Renderer::CreateRootSignature()
     rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
     rootParameters[12].InitAsConstants(sizeof(BindlessIndices) / 4, 1, 0); // b1: Bindless indices
     rootParameters[13].InitAsConstants(sizeof(IrCacheBindlessIndices) / 4, 2, 0); // b2: IrCache bindless indices
+    rootParameters[14].InitAsDescriptorTable(1, &srvRangeMeshletSpace3); // t0-t15 space3: Meshlet streams
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -2873,4 +2892,274 @@ void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& i
 
     // Swap history index for next frame
     m_TaaHistoryIndex = previousHistory;
+}
+
+// =============================================================================
+// Meshlet Pipeline Implementation
+// =============================================================================
+
+void Renderer::CreateMeshletResources()
+{
+    static constexpr UINT MAX_VISIBLE_MESHLETS = 1 << 20; // 1M meshlet candidates
+
+    // Visible meshlets list (RW)
+    if (!CreateStructuredBuffer(m_VisibleMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create VisibleMeshlets buffer" << std::endl;
+        return;
+    }
+
+    // Counter buffer (UAV)
+    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true))
+    {
+        std::cerr << "[Meshlet] Failed to create VisibleMeshletsCounter buffer" << std::endl;
+        return;
+    }
+
+    // Indirect dispatch args for cull pass
+    if (!CreateBuffer(m_CullDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true))
+    {
+        std::cerr << "[Meshlet] Failed to create CullDispatchArgs buffer" << std::endl;
+        return;
+    }
+
+    // Indirect draw args for rasterize pass
+    if (!CreateBuffer(m_RasterizeDispatchArgs, sizeof(D3D12_DRAW_ARGUMENTS),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true))
+    {
+        std::cerr << "[Meshlet] Failed to create RasterizeDispatchArgs buffer" << std::endl;
+        return;
+    }
+
+    // Cull constants buffer (total meshlets)
+    if (!CreateBuffer(m_CullConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
+                      D3D12_RESOURCE_STATE_GENERIC_READ))
+    {
+        std::cerr << "[Meshlet] Failed to create CullConstants buffer" << std::endl;
+        return;
+    }
+
+    std::cout << "[Meshlet] Resources created (max " << MAX_VISIBLE_MESHLETS << " visible meshlets)" << std::endl;
+}
+
+void Renderer::CreateMeshletPipelines()
+{
+    // --- Meshlet Root Signature ---
+    // Bind all SRV/UAV resources by GPU virtual address (root SRV/UAV) to avoid
+    // descriptor table layout dependencies — descriptor tables require a contiguous
+    // heap range starting at a known base, but our buffers are allocated at scattered
+    // heap slots. Root SRV/UAV binds directly by VA, which is always correct.
+    //
+    // Layout:
+    //   [0] CBV  b0        — FrameConstants
+    //   [1] CBV  b1        — CullConstants
+    //   [2] SRV  t0 space3 — GlobalMeshletBounds
+    //   [3] SRV  t1 space3 — GlobalMeshData
+    //   [4] SRV  t2 space3 — GlobalInstanceData
+    //   [5] UAV  u0        — VisibleMeshlets
+    //   [6] UAV  u1        — VisibleMeshletsCounter
+    {
+        CD3DX12_ROOT_PARAMETER rootParams[7];
+        rootParams[0].InitAsConstantBufferView(0);              // b0: FrameConstants
+        rootParams[1].InitAsConstantBufferView(1);              // b1: CullConstants
+        rootParams[2].InitAsShaderResourceView(0, 3);           // t0 space3: GlobalMeshletBounds
+        rootParams[3].InitAsShaderResourceView(1, 3);           // t1 space3: GlobalMeshData
+        rootParams[4].InitAsShaderResourceView(2, 3);           // t2 space3: GlobalInstanceData
+        rootParams[5].InitAsUnorderedAccessView(0);             // u0: VisibleMeshlets
+        rootParams[6].InitAsUnorderedAccessView(1);             // u1: VisibleMeshletsCounter
+
+        CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
+        rsDesc.Init(7, rootParams, 0, nullptr,
+                    D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+        Microsoft::WRL::ComPtr<ID3DBlob> signature;
+        Microsoft::WRL::ComPtr<ID3DBlob> error;
+        HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+        if (FAILED(hr))
+        {
+            if (error)
+                std::cerr << "[Meshlet] Root signature error: " << (char*)error->GetBufferPointer() << std::endl;
+            return;
+        }
+        CHECK_HR(m_Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_MeshletRootSignature)), "[Meshlet] CreateRootSignature failed");
+    }
+
+    // --- Meshlet Cull PSO (CS) ---
+    {
+        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6");
+        if (!cullCS.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_MeshletRootSignature.Get();
+            desc.CS = { cullCS.data(), cullCS.size() };
+            CHECK_HR(m_Device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_MeshletCullPSO)),
+                     "[Meshlet] CreateComputePipelineState (cull) failed");
+        }
+    }
+
+    // --- Meshlet Rasterize PSO (VS+PS) using MAIN root signature ---
+    {
+        auto vs = GraphicsHelper::CompileShader("Shaders/MeshletRasterize.hlsl", "VSMain", "vs_6_6");
+        auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterize.hlsl", "PSMain", "ps_6_6");
+        if (!vs.empty() && !ps.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_RootSignature.Get();  // main RS (has bindless + meshlet space3)
+            desc.VS = { vs.data(), vs.size() };
+            desc.PS = { ps.data(), ps.size() };
+            desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            desc.RasterizerState.FrontCounterClockwise = TRUE;
+            desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+            desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            desc.SampleMask = UINT_MAX;
+            desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            desc.NumRenderTargets = 1;
+            desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR output
+            desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+            desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // reverse-Z
+
+            CHECK_HR(m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_MeshletRasterizePSO)),
+                     "[Meshlet] CreateGraphicsPipelineState (rasterize) failed");
+
+            // Alpha-masked variant — CULL_NONE so both sides visible for cutouts
+            desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            CHECK_HR(m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_MeshletRasterizeMaskPSO)),
+                     "[Meshlet] CreateGraphicsPipelineState (rasterize mask) failed");
+        }
+    }
+
+    // --- Command signature for DispatchMesh / DrawInstanced indirect ---
+    // For now, use DrawInstanced with VertexCountPerInstance = max vertices (64)
+    // and InstanceCount = 1 per meshlet. This requires a different indirect buffer layout.
+    // Simplification: use direct dispatch (not indirect) for initial implementation.
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC drawArg = {};
+        drawArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+
+        D3D12_COMMAND_SIGNATURE_DESC cmdSigDesc = {};
+        cmdSigDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+        cmdSigDesc.NumArgumentDescs = 1;
+        cmdSigDesc.pArgumentDescs = &drawArg;
+
+        CHECK_HR(m_Device->CreateCommandSignature(&cmdSigDesc, nullptr,
+                 IID_PPV_ARGS(&m_MeshletCommandSignature)),
+                 "[Meshlet] CreateCommandSignature failed");
+    }
+
+    std::cout << "[Meshlet] Pipelines created" << std::endl;
+}
+
+void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
+{
+    if (!m_MeshletCullPSO || !model->IsMeshletReady())
+        return;
+
+    size_t totalMeshlets = model->GetTotalMeshletCount();
+    if (totalMeshlets == 0) return;
+
+    auto* cmdList = m_CommandList.Get();
+
+    // Update cull constants
+    {
+        struct { uint totalMeshlets; uint pad[3]; } cullConsts;
+        cullConsts.totalMeshlets = static_cast<uint>(totalMeshlets);
+        memcpy(m_CullConstantsBuffer.cpuPtr, &cullConsts, sizeof(cullConsts));
+    }
+
+    cmdList->SetComputeRootSignature(m_MeshletRootSignature.Get());
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+
+    // Bind CBVs
+    cmdList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    cmdList->SetComputeRootConstantBufferView(1, m_CullConstantsBuffer.gpuAddress);
+
+    // Bind SRVs by GPU virtual address — no descriptor table / heap layout dependency
+    cmdList->SetComputeRootShaderResourceView(2, model->GetGlobalMeshletBoundsBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(3, model->GetMeshDataBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(4, model->GetInstanceDataBufferAddress());
+
+    // Transition UAV resources
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Zero counter (ClearUnorderedAccessViewUint requires shader-visible GPU handle + CPU-only heap handle)
+    const UINT zeroes[4] = { 0, 0, 0, 0 };
+    cmdList->ClearUnorderedAccessViewUint(
+        GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
+        GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
+        m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
+
+    // Bind UAVs by GPU virtual address
+    cmdList->SetComputeRootUnorderedAccessView(5, m_VisibleMeshlets.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(6, m_VisibleMeshletsCounter.gpuAddress);
+
+    cmdList->SetPipelineState(m_MeshletCullPSO.Get());
+    {
+        MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
+        UINT threadGroups = static_cast<UINT>((totalMeshlets + 63) / 64);
+        cmdList->Dispatch(threadGroups, 1, 1);
+    }
+
+    // UAV barriers
+    D3D12_RESOURCE_BARRIER barriers[1] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshlets.resource.Get()),
+    };
+    cmdList->ResourceBarrier(1, barriers);
+}
+
+void Renderer::DispatchMeshletRasterize(Model* model)
+{
+    if (!model->IsMeshletReady())
+        return;
+
+    auto* cmdList = m_CommandList.Get();
+    //ID3D12PipelineState* pso = (mode == AlphaMode::Mask) ? m_MeshletRasterizeMaskPSO.Get() : m_MeshletRasterizePSO.Get();
+    ID3D12PipelineState* pso = m_MeshletRasterizePSO.Get();
+    if (!pso) return;
+
+    // Use MAIN root signature — the meshlet VS+PS accesses bindless textures (space0),
+    // MaterialBuffer (t0 space1), Lights (t0 space2), and meshlet streams (t0-t8 space3).
+    cmdList->SetGraphicsRootSignature(m_RootSignature.Get());
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+
+    // Bind per-frame constants
+    cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+
+    // Bind MaterialBuffer at root param 1 (t0 space1)
+    cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
+
+    // Bind bindless texture table at root param 3 (t0 space0)
+    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+    // Bind meshlet stream buffer descriptor table at root param 14 (t0-t15 space3)
+    // The meshlet shader expects these SRV indices (in the global heap, space3):
+    //   t0: GlobalPositions, t1: GlobalNormals, t2: GlobalUVs, t3: GlobalMeshlets,
+    //   t4: GlobalMeshletVertices, t5: GlobalMeshletTriangles,
+    //   t6: GlobalMeshData, t7: GlobalInstanceData, t8: VisibleMeshlets
+    // We set the table base to the first meshlet SRV in the heap.
+    D3D12_GPU_DESCRIPTOR_HANDLE meshletBase = GraphicsHelper::GetSRVGPUHandle(
+        model->GetGlobalPositionsBufferAddress() ? 0 : 0  // all buffers share contiguous SRV indices
+    );
+    // The meshlet buffers were allocated sequentially via AllocateSRV().
+    // We pass the GPU handle at the start of the heap; the table range covers t0-t15 space3.
+    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle(0));
+
+    cmdList->SetPipelineState(pso);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Draw: one instance per meshlet, MESHLET_MAX_VERTICES vertices per instance.
+    // The VS uses SV_InstanceID to index into VisibleMeshlets[] and SV_VertexID
+    // for per-vertex data within the meshlet. Degenerate vertices (beyond the
+    // meshlet's actual VertexCount) produce zero-area triangles.
+    size_t totalMeshlets = model->GetTotalMeshletCount();
+    if (totalMeshlets > 0)
+    {
+        cmdList->DrawInstanced(MESHLET_MAX_VERTICES, static_cast<UINT>(totalMeshlets), 0, 0);
+    }
 }

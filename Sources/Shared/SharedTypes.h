@@ -212,4 +212,62 @@ struct IrCacheBindlessIndices {
     uint ReproposalCountBufIdx;
 };
 
+// =============================================================================
+// Meshlet Pipeline Types (shared CPU/GPU)
+// =============================================================================
+
+// Maximum meshlet sizes (compile-time constants, must match bin cache embedding)
+static const uint MESHLET_MAX_VERTICES  = 64;
+static const uint MESHLET_MAX_TRIANGLES = 124;
+
+struct Meshlet {
+    uint VertexOffset;      // Offset into MeshletVertexBuffer (uint32 indices)
+    uint TriangleOffset;    // Offset into MeshletTriangleBuffer (packed triangles)
+    uint VertexCount;       // Number of unique vertices (max 64)
+    uint TriangleCount;     // Number of triangles (max 124)
+};
+
+struct MeshletTriangle {
+    uint V0 : 10;
+    uint V1 : 10;
+    uint V2 : 10;
+    uint    : 2;  // padding
+};
+
+struct MeshletBounds {
+    float3 LocalCenter;
+    float3 LocalExtents;
+};
+
+// Replaces DrawNodeData for the meshlet path
+// Each *Offset field is an element offset into the corresponding global StructuredBuffer<T>
+struct MeshData {
+    uint PositionOffset;        // Element offset into GlobalPositions[]  (float3)
+    uint NormalOffset;          // Element offset into GlobalNormals[]    (uint, RGB10A2_SNORM)
+    uint UVOffset;              // Element offset into GlobalUVs[]        (uint, RG16_FLOAT)
+    uint MeshletOffset;         // Element offset into GlobalMeshlets[]   (Meshlet)
+    uint MeshletVertexOffset;   // Element offset into GlobalMeshletVertices[] (uint)
+    uint MeshletTriangleOffset; // Element offset into GlobalMeshletTriangles[] (MeshletTriangle)
+    uint MeshletBoundsOffset;   // Element offset into GlobalMeshletBounds[]   (MeshletBounds)
+    uint MeshletCount;
+    uint MaterialIndex;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+struct InstanceData {
+    ROW_MAJOR float4x4 LocalToWorld;
+    uint MeshDataIndex;         // Index into global MeshData[] buffer
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+// Culling token — the unit of work through the cull pipeline
+struct MeshletCandidate {
+    uint InstanceID;    // Index into InstanceData[]
+    uint MeshletIndex;  // Per-mesh meshlet index
+};
+
 #endif // SHARED_TYPES_H

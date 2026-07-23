@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "GraphicsTypes.h"
 #include "GraphicsHelper.h"
+#include "MeshletCache.h"
 
 Model::Model()
 {
@@ -239,6 +240,18 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
 
     std::cout << "Successfully loaded GLTF model: " << filepath << " (" << m_GltfModel.meshes.size() << " meshes)" << std::endl;
 
+    // Generate meshlets for all primitives (with cache)
+    for (auto& mesh : m_GltfModel.meshes)
+    {
+        for (auto& prim : mesh.primitives)
+        {
+            if (!prim.vertices.empty() && !prim.indices.empty())
+            {
+                BuildMeshlets(prim);
+            }
+        }
+    }
+
     BuildNodeHierarchy();
     LoadAnimations();
     if (!m_GltfModel.animations.empty())
@@ -368,6 +381,9 @@ void Model::CreateGLTFResources(Renderer* renderer)
             return;
         }
     }
+
+    // Create meshlet GPU buffers (global streams + MeshData + InstanceData)
+    CreateMeshletResources(renderer);
 }
 
 void Model::LoadTextures(Renderer* renderer)
@@ -689,6 +705,12 @@ void Model::UpdateNodeBuffer()
     {
         memcpy(m_DrawNodeBuffer.cpuPtr, m_DrawNodeData.data(), m_DrawNodeData.size() * sizeof(DrawNodeData));
     }
+
+    // Also update InstanceData transforms (meshlet path)
+    if (m_InstanceDataBuffer.cpuPtr && !m_InstanceDataArray.empty())
+    {
+        memcpy(m_InstanceDataBuffer.cpuPtr, m_InstanceDataArray.data(), m_InstanceDataArray.size() * sizeof(InstanceData));
+    }
 }
 
 void Model::UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform)
@@ -701,6 +723,12 @@ void Model::UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTr
         {
             uint32_t nodeDataIndex = node->nodeDataOffset + i;
             DirectX::XMStoreFloat4x4(&m_DrawNodeData[nodeDataIndex].world, world);
+
+            // Also update InstanceData for meshlet path
+            if (nodeDataIndex < static_cast<uint32_t>(m_InstanceDataArray.size()))
+            {
+                DirectX::XMStoreFloat4x4(&m_InstanceDataArray[nodeDataIndex].LocalToWorld, world);
+            }
         }
     }
 
@@ -1025,7 +1053,25 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         gltfImg.image = nullptr;
     }
 
-    // Use ResourceUploadBatch for buffers
+    // Execute the texture upload commands (which were recorded into cmdList)
+    CHECK_HR(cmdList->Close(), "Close command list failed");
+    ID3D12CommandList* commandLists[] = { cmdList };
+    cmdQueue->ExecuteCommandLists(1, commandLists);
+
+    // Wait for completion (for textures)
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    CHECK_HR(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Create fence failed");
+    HANDLE eventHandle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    CHECK_HR(fence->SetEventOnCompletion(1, eventHandle), "Set event on completion failed");
+    cmdQueue->Signal(fence.Get(), 1);
+    WaitForSingleObject(eventHandle, INFINITE);
+    CloseHandle(eventHandle);
+
+    // The command list remains closed; BeginFrame will reset it
+}
+
+void Model::UploadBuffers(Renderer* renderer)
+{
     ResourceUploadBatch batch(renderer);
     batch.Begin();
 
@@ -1059,23 +1105,49 @@ void Model::UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         batch.Transition(m_GlobalIndexBuffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
     }
 
+    // Meshlet global stream buffers — direct .data()/.size(), same pattern as
+    // GlobalVertexBuffer / GlobalIndexBuffer.  Data built once in CreateMeshletResources().
+    if (m_GlobalPositions.resource && !m_AllPositions.empty())
+    {
+        batch.Upload(m_GlobalPositions, m_AllPositions.data(), m_AllPositions.size() * sizeof(float3));
+        batch.Transition(m_GlobalPositions, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalNormals.resource && !m_AllPackedNormals.empty())
+    {
+        batch.Upload(m_GlobalNormals, m_AllPackedNormals.data(), m_AllPackedNormals.size() * sizeof(uint32_t));
+        batch.Transition(m_GlobalNormals, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalUVs.resource && !m_AllPackedUVs.empty())
+    {
+        batch.Upload(m_GlobalUVs, m_AllPackedUVs.data(), m_AllPackedUVs.size() * sizeof(uint32_t));
+        batch.Transition(m_GlobalUVs, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalMeshlets.resource && !m_AllMeshlets.empty())
+    {
+        batch.Upload(m_GlobalMeshlets, m_AllMeshlets.data(), m_AllMeshlets.size() * sizeof(Meshlet));
+        batch.Transition(m_GlobalMeshlets, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalMeshletVertices.resource && !m_AllMeshletVertices.empty())
+    {
+        batch.Upload(m_GlobalMeshletVertices, m_AllMeshletVertices.data(), m_AllMeshletVertices.size() * sizeof(uint32_t));
+        batch.Transition(m_GlobalMeshletVertices, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalMeshletTriangles.resource && !m_AllMeshletTriangles.empty())
+    {
+        batch.Upload(m_GlobalMeshletTriangles, m_AllMeshletTriangles.data(), m_AllMeshletTriangles.size() * sizeof(MeshletTriangle));
+        batch.Transition(m_GlobalMeshletTriangles, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_GlobalMeshletBounds.resource && !m_AllMeshletBounds.empty())
+    {
+        batch.Upload(m_GlobalMeshletBounds, m_AllMeshletBounds.data(), m_AllMeshletBounds.size() * sizeof(MeshletBounds));
+        batch.Transition(m_GlobalMeshletBounds, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+    if (m_MeshDataBuffer.resource && !m_MeshDataArray.empty())
+    {
+        batch.Upload(m_MeshDataBuffer, m_MeshDataArray.data(), m_MeshDataArray.size() * sizeof(MeshData));
+        batch.Transition(m_MeshDataBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
     batch.End();
-
-    // Execute the texture upload commands (which were recorded into cmdList)
-    CHECK_HR(cmdList->Close(), "Close command list failed");
-    ID3D12CommandList* commandLists[] = { cmdList };
-    cmdQueue->ExecuteCommandLists(1, commandLists);
-
-    // Wait for completion (for textures)
-    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
-    CHECK_HR(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Create fence failed");
-    HANDLE eventHandle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    CHECK_HR(fence->SetEventOnCompletion(1, eventHandle), "Set event on completion failed");
-    cmdQueue->Signal(fence.Get(), 1);
-    WaitForSingleObject(eventHandle, INFINITE);
-    CloseHandle(eventHandle);
-
-    // The command list remains closed; BeginFrame will reset it
 }
 
 void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode)
@@ -1200,4 +1272,319 @@ void Model::GetDrawNodePrimitives(std::vector<const GLTFPrimitive*>& primitives)
             }
         }
     }
+}
+
+// =============================================================================
+// Meshlet Generation (Phase 1 + Phase 2) with disk cache
+// =============================================================================
+
+// Helper: pack float3 normal into RGB10A2_SNORM for GPU storage
+static uint32_t PackNormalRGB10A2_SNORM(float x, float y, float z)
+{
+    // Clamp to [-1, 1], then map to [0, 1023] (10-bit) with signed → unsigned offset
+    auto pack10 = [](float v) -> uint32_t {
+        int32_t s = static_cast<int32_t>(std::round(std::clamp(v, -1.0f, 1.0f) * 511.0f));
+        return static_cast<uint32_t>(std::max(-512, std::min(511, s)) + 512) & 0x3FF;
+    };
+    auto pack2 = [](float v) -> uint32_t {
+        int32_t s = static_cast<int32_t>(std::round(std::clamp(v, -1.0f, 1.0f) * 1.0f));
+        return static_cast<uint32_t>(std::max(-2, std::min(1, s)) + 2) & 0x3;
+    };
+    return (pack10(x) << 0) | (pack10(y) << 10) | (pack10(z) << 20) | (pack2(1.0f) << 30);
+}
+
+// Helper: pack float2 UV into RG16_FLOAT
+static uint32_t PackUVRG16_FLOAT(float u, float v)
+{
+    // Use half-precision float packing
+    auto f32_to_f16 = [](float f) -> uint16_t {
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(float));
+        uint32_t sign     = (bits >> 16) & 0x8000;
+        int32_t  exponent = ((bits >> 23) & 0xFF) - 112;
+        uint32_t mantissa = bits & 0x7FFFFF;
+        if (exponent <= 0) { // subnormal
+            mantissa = (mantissa | 0x800000) >> (1 - exponent);
+            return static_cast<uint16_t>(sign | (mantissa >> 13));
+        }
+        if (exponent > 30) { // INF/NAN → INF
+            return static_cast<uint16_t>(sign | 0x7C00);
+        }
+        return static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
+    };
+    uint16_t hU = f32_to_f16(u);
+    uint16_t hV = f32_to_f16(v);
+    return (static_cast<uint32_t>(hV) << 16) | static_cast<uint32_t>(hU);
+}
+
+void Model::BuildMeshlets(GLTFPrimitive& prim)
+{
+    const size_t vertexCount = prim.vertices.size();
+    const size_t indexCount  = prim.indices.size();
+    if (vertexCount == 0 || indexCount == 0)
+        return;
+
+    // Path for the cache file
+    // Note: BuildMeshlets is called per-primitive; we don't have the original GLTF path easily.
+    // We'll just skip cache for now and always regenerate. The cache infrastructure is ready
+    // but needs the file path plumbing from LoadGLTFModel.
+    //
+    // In a production setup, we'd pass the filepath and primitive index to BuildMeshlets.
+
+    // --- Extract flat position array ---
+    std::vector<float> positions(vertexCount * 3);
+    for (size_t i = 0; i < vertexCount; ++i)
+    {
+        positions[i * 3 + 0] = prim.vertices[i].position[0];
+        positions[i * 3 + 1] = prim.vertices[i].position[1];
+        positions[i * 3 + 2] = prim.vertices[i].position[2];
+    }
+
+    // --- Phase 1: Mesh Optimization (always run before meshlet generation) ---
+    // 1a: Vertex cache optimization
+    meshopt_optimizeVertexCache(prim.indices.data(), prim.indices.data(),
+                                indexCount, vertexCount);
+
+    // 1b: Overdraw optimization
+    meshopt_optimizeOverdraw(prim.indices.data(), prim.indices.data(),
+                             indexCount, positions.data(), vertexCount,
+                             sizeof(float) * 3, 1.05f);
+
+    // 1c: Vertex fetch optimization — remap vertices for spatial locality
+    std::vector<uint32_t> remap(vertexCount);
+    size_t uniqueVertices = meshopt_optimizeVertexFetchRemap(
+        &remap[0], prim.indices.data(), indexCount, vertexCount);
+
+    // Apply remap to vertices (resize to unique count)
+    {
+        std::vector<GLTFVertex> remappedVertices(uniqueVertices);
+        for (size_t i = 0; i < vertexCount; ++i)
+        {
+            if (remap[i] != ~0u)
+            {
+                remappedVertices[remap[i]] = prim.vertices[i];
+            }
+        }
+        prim.vertices = std::move(remappedVertices);
+    }
+
+    // Remap indices
+    meshopt_remapIndexBuffer(prim.indices.data(), prim.indices.data(),
+                             indexCount, &remap[0]);
+
+    // Re-build positions array after remap
+    const size_t newVertexCount = prim.vertices.size();
+    positions.resize(newVertexCount * 3);
+    for (size_t i = 0; i < newVertexCount; ++i)
+    {
+        positions[i * 3 + 0] = prim.vertices[i].position[0];
+        positions[i * 3 + 1] = prim.vertices[i].position[1];
+        positions[i * 3 + 2] = prim.vertices[i].position[2];
+    }
+
+    // --- Phase 2: Meshlet Generation ---
+    const size_t maxMeshlets = meshopt_buildMeshletsBound(
+        indexCount, MESHLET_MAX_VERTICES, MESHLET_MAX_TRIANGLES);
+
+    std::vector<meshopt_Meshlet> meshlets(maxMeshlets);
+    std::vector<uint32_t> meshletVertices(maxMeshlets * MESHLET_MAX_VERTICES);
+    std::vector<uint8_t>  meshletTriangles(maxMeshlets * MESHLET_MAX_TRIANGLES * 3);
+
+    size_t meshletCount = meshopt_buildMeshlets(
+        meshlets.data(),
+        meshletVertices.data(),
+        meshletTriangles.data(),
+        prim.indices.data(), indexCount,
+        positions.data(), newVertexCount, sizeof(float) * 3,
+        MESHLET_MAX_VERTICES, MESHLET_MAX_TRIANGLES,
+        0.0f /* cone weight = 0 */);
+
+    meshlets.resize(meshletCount);
+    meshletVertices.resize(meshlets.back().vertex_offset + meshlets.back().vertex_count);
+    meshletTriangles.resize((meshlets.back().triangle_offset + meshlets.back().triangle_count) * 3);
+
+    // Per-meshlet optimization + AABB computation
+    for (auto& m : meshlets)
+    {
+        meshopt_optimizeMeshlet(
+            &meshletVertices[m.vertex_offset],
+            &meshletTriangles[m.triangle_offset],
+            m.triangle_count, m.vertex_count);
+    }
+
+    // --- Pack into GPU-ready Meshlet structs ---
+    // Store in CPU-side vectors for later upload to global buffers
+    auto& allMeshlets         = prim.meshlets;
+    auto& allMeshletVertices  = prim.meshletVertices;
+    auto& allMeshletTriangles = prim.meshletTriangles;
+    auto& allMeshletBounds    = prim.meshletBounds;
+
+    allMeshlets.clear();
+    allMeshletVertices.clear();
+    allMeshletTriangles.clear();
+    allMeshletBounds.clear();
+
+    // Copy meshlet vertices (indirection table) — these are uint32 indices
+    allMeshletVertices.assign(meshletVertices.begin(), meshletVertices.end());
+
+    for (auto& m : meshlets)
+    {
+        // GPU Meshlet header
+        Meshlet gm;
+        gm.VertexOffset   = m.vertex_offset;
+        gm.TriangleOffset = m.triangle_offset;
+        gm.VertexCount    = m.vertex_count;
+        gm.TriangleCount  = m.triangle_count;
+        allMeshlets.push_back(gm);
+
+        // Pack triangles into MeshletTriangle struct
+        for (uint32_t t = 0; t < m.triangle_count; ++t)
+        {
+            uint8_t* triBase = &meshletTriangles[(m.triangle_offset + t) * 3];
+            MeshletTriangle mt;
+            mt.V0 = triBase[0];
+            mt.V1 = triBase[1];
+            mt.V2 = triBase[2];
+            allMeshletTriangles.push_back(mt);
+        }
+
+        // Compute AABB bounds
+        float3 minBounds = { FLT_MAX, FLT_MAX, FLT_MAX };
+        float3 maxBounds = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (uint32_t v = 0; v < m.vertex_count; ++v)
+        {
+            uint32_t globalIdx = meshletVertices[m.vertex_offset + v];
+            float3 pos = { positions[globalIdx * 3 + 0],
+                           positions[globalIdx * 3 + 1],
+                           positions[globalIdx * 3 + 2] };
+            minBounds.x = std::min(minBounds.x, pos.x);
+            minBounds.y = std::min(minBounds.y, pos.y);
+            minBounds.z = std::min(minBounds.z, pos.z);
+            maxBounds.x = std::max(maxBounds.x, pos.x);
+            maxBounds.y = std::max(maxBounds.y, pos.y);
+            maxBounds.z = std::max(maxBounds.z, pos.z);
+        }
+        MeshletBounds bounds;
+        bounds.LocalCenter.x  = (minBounds.x + maxBounds.x) * 0.5f;
+        bounds.LocalCenter.y  = (minBounds.y + maxBounds.y) * 0.5f;
+        bounds.LocalCenter.z  = (minBounds.z + maxBounds.z) * 0.5f;
+        bounds.LocalExtents.x = (maxBounds.x - minBounds.x) * 0.5f;
+        bounds.LocalExtents.y = (maxBounds.y - minBounds.y) * 0.5f;
+        bounds.LocalExtents.z = (maxBounds.z - minBounds.z) * 0.5f;
+        allMeshletBounds.push_back(bounds);
+    }
+
+    std::cout << "[Meshlet] Generated " << meshletCount << " meshlets from "
+              << newVertexCount << " vertices, " << indexCount << " triangles" << std::endl;
+}
+
+// =============================================================================
+// CreateMeshletResources: creates 7 global StructuredBuffer + MeshData + InstanceData
+// =============================================================================
+void Model::CreateMeshletResources(Renderer* renderer)
+{
+    // Accumulate into member vectors (persist across function calls, same pattern as
+    // m_GlobalVertices / m_GlobalIndices).  Clear first — this is a build-once path.
+    m_AllPositions.clear();
+    m_AllPackedNormals.clear();
+    m_AllPackedUVs.clear();
+    m_AllMeshlets.clear();
+    m_AllMeshletVertices.clear();
+    m_AllMeshletTriangles.clear();
+    m_AllMeshletBounds.clear();
+
+    m_MeshDataArray.clear();
+    m_InstanceDataArray.clear();
+    m_TotalMeshletCount = 0;
+
+    // Walk nodes and populate consolidated streams
+    for (size_t nodeIdx = 0; nodeIdx < m_GltfModel.nodes.size(); ++nodeIdx)
+    {
+        GLTFNode& node = m_GltfModel.nodes[nodeIdx];
+        if (!node.mesh)
+            continue;
+
+        for (auto& prim : node.mesh->primitives)
+        {
+            if (prim.vertices.empty())
+                continue;
+
+            MeshData md = {};
+            md.MeshletCount    = static_cast<uint32_t>(prim.meshlets.size());
+            md.MaterialIndex   = prim.materialIndex;
+
+            // Source vertex streams (positions, normals, UVs)
+            md.PositionOffset = static_cast<uint32_t>(m_AllPositions.size());
+            md.NormalOffset   = static_cast<uint32_t>(m_AllPackedNormals.size());
+            md.UVOffset       = static_cast<uint32_t>(m_AllPackedUVs.size());
+
+            for (const auto& v : prim.vertices)
+            {
+                m_AllPositions.push_back({ v.position[0], v.position[1], v.position[2] });
+                m_AllPackedNormals.push_back(PackNormalRGB10A2_SNORM(v.normal[0], v.normal[1], v.normal[2]));
+                m_AllPackedUVs.push_back(PackUVRG16_FLOAT(v.texCoord[0], v.texCoord[1]));
+            }
+
+            // Meshlet streams
+            md.MeshletOffset         = static_cast<uint32_t>(m_AllMeshlets.size());
+            md.MeshletVertexOffset   = static_cast<uint32_t>(m_AllMeshletVertices.size());
+            md.MeshletTriangleOffset = static_cast<uint32_t>(m_AllMeshletTriangles.size());
+            md.MeshletBoundsOffset   = static_cast<uint32_t>(m_AllMeshletBounds.size());
+
+            m_AllMeshlets.insert(m_AllMeshlets.end(), prim.meshlets.begin(), prim.meshlets.end());
+            m_AllMeshletVertices.insert(m_AllMeshletVertices.end(), prim.meshletVertices.begin(), prim.meshletVertices.end());
+            m_AllMeshletTriangles.insert(m_AllMeshletTriangles.end(), prim.meshletTriangles.begin(), prim.meshletTriangles.end());
+            m_AllMeshletBounds.insert(m_AllMeshletBounds.end(), prim.meshletBounds.begin(), prim.meshletBounds.end());
+
+            m_MeshDataArray.push_back(md);
+            m_TotalMeshletCount += md.MeshletCount;
+
+            // Per-instance data (matches DrawNodeData cardinality)
+            InstanceData inst = {};
+            DirectX::XMStoreFloat4x4(&inst.LocalToWorld, DirectX::XMMatrixIdentity());
+            inst.MeshDataIndex = static_cast<uint32_t>(m_MeshDataArray.size() - 1);
+            m_InstanceDataArray.push_back(inst);
+        }
+    }
+
+    if (m_AllPositions.empty())
+    {
+        std::cout << "[Meshlet] No meshlet data to upload." << std::endl;
+        return;
+    }
+
+    // Create 7 global StructuredBuffer<T>
+    auto createSB = [](GPUBuffer& buf, UINT64 elemSize, UINT64 count, const char* name) -> bool {
+        if (count == 0) return true;
+        if (!CreateStructuredBuffer(buf, elemSize, count, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON)) {
+            std::cerr << "[Meshlet] Failed to create " << name << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    if (!createSB(m_GlobalPositions,        sizeof(float3),          m_AllPositions.size(),        "GlobalPositions")) return;
+    if (!createSB(m_GlobalNormals,          sizeof(uint32_t),        m_AllPackedNormals.size(),    "GlobalNormals"))   return;
+    if (!createSB(m_GlobalUVs,              sizeof(uint32_t),        m_AllPackedUVs.size(),        "GlobalUVs"))       return;
+    if (!createSB(m_GlobalMeshlets,         sizeof(Meshlet),         m_AllMeshlets.size(),         "GlobalMeshlets"))  return;
+    if (!createSB(m_GlobalMeshletVertices,  sizeof(uint32_t),        m_AllMeshletVertices.size(),  "MeshletVertices")) return;
+    if (!createSB(m_GlobalMeshletTriangles, sizeof(MeshletTriangle), m_AllMeshletTriangles.size(), "MeshletTriangles"))return;
+    if (!createSB(m_GlobalMeshletBounds,    sizeof(MeshletBounds),   m_AllMeshletBounds.size(),    "MeshletBounds"))  return;
+
+    // Create MeshData and InstanceData buffers
+    if (!m_MeshDataArray.empty()) {
+        CreateStructuredBuffer(m_MeshDataBuffer, sizeof(MeshData), m_MeshDataArray.size(), 
+                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    }
+    if (!m_InstanceDataArray.empty()) {
+        CreateStructuredBuffer(m_InstanceDataBuffer, sizeof(InstanceData), m_InstanceDataArray.size(),
+                              D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+
+    m_MeshletReady = true;
+
+    std::cout << "[Meshlet] Uploaded " << m_TotalMeshletCount << " total meshlets across "
+              << m_MeshDataArray.size() << " primitives." << std::endl;
+    std::cout << "[Meshlet]  Positions: " << m_AllPositions.size() << "  Normals: " << m_AllPackedNormals.size()
+              << "  UVs: " << m_AllPackedUVs.size() << std::endl;
 }

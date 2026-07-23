@@ -154,6 +154,15 @@ function(CheckAndDownloadPackage NAME VERSION LOCAL_PATH URL)
     endif()
 endfunction()
 
+# Download meshoptimizer (meshlet generation + mesh optimization)
+FetchContent_Declare(
+    meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG v0.23
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/meshoptimizer
+)
+FetchContent_MakeAvailable(meshoptimizer)
+
 # Download jsmn (header-only JSON parser)
 CheckAndDownloadPackage(
     "jsmn"
@@ -196,6 +205,7 @@ include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
 include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/microprofile)
+include_directories(${meshoptimizer_SOURCE_DIR}/src)
 
 # Collect source files
 file(GLOB_RECURSE SOURCES
@@ -237,6 +247,7 @@ target_link_libraries(${PROJECT_NAME}
     NRDIntegration
     NRI
     microprofile
+    meshoptimizer
 )
 
 # Create hardlinks for DLLs to Bin directory (symlinks require admin privileges on Windows)

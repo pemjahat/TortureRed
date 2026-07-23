@@ -35,6 +35,7 @@ private:
     bool m_DebugShadowMap        = false;
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
+    bool m_UseMeshlet             = false;  // Toggle meshlet vs vertex-buffer rendering
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 

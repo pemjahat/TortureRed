@@ -65,6 +65,13 @@ bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D1
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
 
         ctx.device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, uavHandle);
+
+        // Also create in the CPU-only (non-shader-visible) heap for ClearUnorderedAccessViewUint.
+        // D3D12 requires ViewCPUHandle to come from a non-shader-visible heap.
+        if (buffer.cpuUavIndex < 0)
+            buffer.cpuUavIndex = (int)GraphicsHelper::AllocateCpuUAV();
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuUavHandle = GraphicsHelper::GetCpuUAVHandle((UINT)buffer.cpuUavIndex);
+        ctx.device->CreateUnorderedAccessView(buffer.resource.Get(), nullptr, &uavDesc, cpuUavHandle);
     }
 
     return true;

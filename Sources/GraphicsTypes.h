@@ -24,7 +24,8 @@ struct GPUBuffer : public GPUResource
     void* cpuPtr = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = 0;
     int srvIndex = -1;
-    int uavIndex = -1;
+    int uavIndex = -1;       // slot in shader-visible SRV heap (for GPU access)
+    int cpuUavIndex = -1;    // slot in CPU-only UAV heap (for ClearUnorderedAccessViewUint)
 };
 
 struct GPUTexture : public GPUResource

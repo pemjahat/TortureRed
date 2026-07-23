@@ -39,6 +39,16 @@ void GraphicsHelper::Initialize(ID3D12Device* device) {
         CHECK_HR(device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&s_Context.srvHeap)), "CreateDescriptorHeap for SRV failed");
     }
 
+    // Create CPU-only (non-shader-visible) UAV heap for ClearUnorderedAccessViewUint.
+    // D3D12 requires the ViewCPUHandle to come from a non-shader-visible heap.
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC cpuUavHeapDesc = {};
+        cpuUavHeapDesc.NumDescriptors = 512;
+        cpuUavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        cpuUavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // NOT shader-visible
+        CHECK_HR(device->CreateDescriptorHeap(&cpuUavHeapDesc, IID_PPV_ARGS(&s_Context.cpuUavHeap)), "CreateDescriptorHeap for CPU UAV failed");
+    }
+
     s_Context.srvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     s_Context.rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     s_Context.dsvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -52,6 +62,7 @@ void GraphicsHelper::Shutdown() {
     s_Context.srvHeap.Reset();
     s_Context.rtvHeap.Reset();
     s_Context.dsvHeap.Reset();
+    s_Context.cpuUavHeap.Reset();
     s_Context.device = nullptr;
 }
 
@@ -65,6 +76,10 @@ UINT GraphicsHelper::AllocateRTV() {
 
 UINT GraphicsHelper::AllocateDSV() {
     return s_Context.dsvHeapIndex++;
+}
+
+UINT GraphicsHelper::AllocateCpuUAV() {
+    return s_Context.cpuUavHeapIndex++;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE GraphicsHelper::GetSRVCPUHandle(UINT index) {
@@ -88,6 +103,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE GraphicsHelper::GetRTVCPUHandle(UINT index) {
 D3D12_CPU_DESCRIPTOR_HANDLE GraphicsHelper::GetDSVCPUHandle(UINT index) {
     D3D12_CPU_DESCRIPTOR_HANDLE handle = s_Context.dsvHeap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr += (SIZE_T)index * s_Context.dsvDescriptorSize;
+    return handle;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE GraphicsHelper::GetCpuUAVHandle(UINT index) {
+    // CPU-only (non-shader-visible) heap — use as ViewCPUHandle in ClearUnorderedAccessViewUint
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = s_Context.cpuUavHeap->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += (SIZE_T)index * s_Context.srvDescriptorSize;
     return handle;
 }
 

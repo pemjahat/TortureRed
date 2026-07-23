@@ -30,4 +30,7 @@
 
 #include "microprofile.h"
 
+#include <meshoptimizer.h>
+
+
 

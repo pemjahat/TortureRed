@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GraphicsTypes.h"
+#include "MeshletCache.h"
 
 // Forward declarations
 struct cgltf_data;
@@ -47,6 +48,12 @@ struct GLTFPrimitive
     uint32_t globalVertexOffset = 0;
     uint32_t globalIndexOffset = 0;
     DirectX::BoundingBox aabb;
+
+    // Meshlet data (CPU-side, uploaded to GPU in CreateMeshletResources)
+    std::vector<Meshlet>         meshlets;
+    std::vector<uint32_t>        meshletVertices;   // vertex indirection table
+    std::vector<MeshletTriangle> meshletTriangles;
+    std::vector<MeshletBounds>   meshletBounds;
 };
 
 struct GLTFMesh
@@ -108,11 +115,25 @@ public:
     void UpdateAnimation(float deltaTime);
     void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode = AlphaMode::Opaque);
     void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer);
+    void UploadBuffers(Renderer* renderer);
 
     // Getters for debug counters
     size_t GetTotalNodes() const { return m_TotalNodes; }
     size_t GetTotalRootNodes() const { return m_TotalRootNodes; }
     size_t GetNodesSurviveFrustum() const { return m_NodesSurviveFrustum; }
+
+    // Meshlet pipeline
+    bool IsMeshletReady() const { return m_MeshletReady; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetMeshDataBufferAddress() const { return m_MeshDataBuffer.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetInstanceDataBufferAddress() const { return m_InstanceDataBuffer.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalPositionsBufferAddress() const { return m_GlobalPositions.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalNormalsBufferAddress() const { return m_GlobalNormals.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalUVsBufferAddress() const { return m_GlobalUVs.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletsBufferAddress() const { return m_GlobalMeshlets.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletVerticesBufferAddress() const { return m_GlobalMeshletVertices.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletTrianglesBufferAddress() const { return m_GlobalMeshletTriangles.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletBoundsBufferAddress() const { return m_GlobalMeshletBounds.gpuAddress; }
+    size_t GetTotalMeshletCount() const { return m_TotalMeshletCount; }
 
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
@@ -134,6 +155,8 @@ public:
 
 private:
     void CreateGLTFResources(Renderer* renderer);
+    void BuildMeshlets(GLTFPrimitive& prim);
+    void CreateMeshletResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
     void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
@@ -175,4 +198,36 @@ private:
     size_t m_TotalNodes = 0;
     size_t m_TotalRootNodes = 0;
     size_t m_NodesSurviveFrustum = 0;
+
+    // ----- Meshlet Pipeline -----
+    bool m_MeshletReady = false;
+
+    // Global stream buffers (one per stream type, all meshes concatenated)
+    GPUBuffer m_GlobalPositions;          // StructuredBuffer<float3>
+    GPUBuffer m_GlobalNormals;            // StructuredBuffer<uint>  (RGB10A2_SNORM)
+    GPUBuffer m_GlobalUVs;                // StructuredBuffer<uint>  (RG16_FLOAT)
+    GPUBuffer m_GlobalMeshlets;           // StructuredBuffer<Meshlet>
+    GPUBuffer m_GlobalMeshletVertices;    // StructuredBuffer<uint>  (vertex indirection)
+    GPUBuffer m_GlobalMeshletTriangles;   // StructuredBuffer<MeshletTriangle>
+    GPUBuffer m_GlobalMeshletBounds;      // StructuredBuffer<MeshletBounds>
+
+    // CPU-side consolidated meshlet stream data (mirrors m_GlobalVertices/m_GlobalIndices pattern).
+    // Built once in CreateMeshletResources(), uploaded directly via .data()/.size() in UploadBuffers().
+    std::vector<float3>            m_AllPositions;
+    std::vector<uint32_t>          m_AllPackedNormals;
+    std::vector<uint32_t>          m_AllPackedUVs;
+    std::vector<Meshlet>           m_AllMeshlets;
+    std::vector<uint32_t>          m_AllMeshletVertices;
+    std::vector<MeshletTriangle>   m_AllMeshletTriangles;
+    std::vector<MeshletBounds>     m_AllMeshletBounds;
+
+    // Per-mesh metadata (offsets into the global stream buffers)
+    std::vector<MeshData> m_MeshDataArray;
+    GPUBuffer m_MeshDataBuffer;
+
+    // Per-instance data (1:1 with DrawNodeData for meshlet path)
+    std::vector<InstanceData> m_InstanceDataArray;
+    GPUBuffer m_InstanceDataBuffer;
+
+    size_t m_TotalMeshletCount = 0;
 };

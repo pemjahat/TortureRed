@@ -138,6 +138,14 @@ public:
     // Shader hot-reload: call once per frame; GPU-syncs and rebuilds only changed PSOs.
     void CheckAndReloadShaders();
 
+    // Meshlet pipeline
+    void CreateMeshletResources();
+    void CreateMeshletPipelines();
+    void DispatchMeshletCull(class Model* model, const FrameConstants& frame);
+    void DispatchMeshletRasterize(class Model* model);
+    bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
+    ID3D12PipelineState* GetMeshletRasterizePSO() const { return m_MeshletRasterizePSO.Get(); }
+
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
     void WaitForPreviousFrame();
@@ -332,6 +340,25 @@ private:
 
     // Shader hot-reload: tracks all .hlsl timestamps under Sources/Shaders/
     std::unordered_map<std::string, std::filesystem::file_time_type>  m_ShaderTimestamps;
+
+    // ----- Meshlet Pipeline -----
+    bool m_MeshShaderSupported = false;
+
+    // Cull compute shader resources
+    GPUBuffer m_VisibleMeshlets;            // RWStructuredBuffer<MeshletCandidate>
+    GPUBuffer m_VisibleMeshletsCounter;     // RWBuffer<uint>
+    GPUBuffer m_CullDispatchArgs;           // Indirect dispatch args for cull
+    GPUBuffer m_RasterizeDispatchArgs;      // Indirect draw args for rasterize
+    GPUBuffer m_CullConstantsBuffer;        // Cull constants (total meshlets)
+
+    // PSOs
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletCullPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterizePSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterizeMaskPSO; // Alpha-masked variant
+
+    // Root signature for meshlet passes (separate from main RS to keep it simple)
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshletRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_MeshletCommandSignature;
 
     // Prevent copying
     Renderer(const Renderer&) = delete;

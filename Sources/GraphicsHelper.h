@@ -13,13 +13,17 @@ struct GPUTexture;
 
 struct GraphicsContext {
     ID3D12Device* device = nullptr;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap;      // shader-visible CBV/SRV/UAV
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap;
-    
+    // CPU-only (non-shader-visible) UAV heap required by ClearUnorderedAccessViewUint.
+    // D3D12 spec: the ViewCPUHandle argument must NOT come from a shader-visible heap.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cpuUavHeap;
+
     UINT srvHeapIndex = 0;
     UINT rtvHeapIndex = 0;
     UINT dsvHeapIndex = 0;
+    UINT cpuUavHeapIndex = 0;
 
     UINT srvDescriptorSize = 0;
     UINT rtvDescriptorSize = 0;
@@ -34,6 +38,8 @@ public:
     static UINT AllocateSRV();
     static UINT AllocateRTV();
     static UINT AllocateDSV();
+    // Allocates a slot in the CPU-only UAV heap (for ClearUnorderedAccessViewUint)
+    static UINT AllocateCpuUAV();
 
     static ID3D12DescriptorHeap* GetSRVHeap() { return s_Context.srvHeap.Get(); }
     static ID3D12DescriptorHeap** GetSRVHeapAddress() { return s_Context.srvHeap.GetAddressOf(); }
@@ -49,6 +55,8 @@ public:
     static D3D12_GPU_DESCRIPTOR_HANDLE GetSRVGPUHandle(UINT index);
     static D3D12_CPU_DESCRIPTOR_HANDLE GetRTVCPUHandle(UINT index);
     static D3D12_CPU_DESCRIPTOR_HANDLE GetDSVCPUHandle(UINT index);
+    // CPU-only UAV handle (non-shader-visible) — use as ViewCPUHandle in ClearUnorderedAccessViewUint
+    static D3D12_CPU_DESCRIPTOR_HANDLE GetCpuUAVHandle(UINT index);
 
     static void TransitionResource(ID3D12GraphicsCommandList* cmdList, GPUResource& resource, D3D12_RESOURCE_STATES newState);
     static void TransitionResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3D12_RESOURCE_STATES& currentState, D3D12_RESOURCE_STATES newState);
