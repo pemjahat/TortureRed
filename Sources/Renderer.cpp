@@ -647,6 +647,9 @@ bool Renderer::Initialize(HWND hwnd)
         IID_PPV_ARGS(&m_Device)
     ), "D3D12CreateDevice failed");
 
+    // QI to ID3D12Device2 for CreatePipelineState (pipeline state streams, required for Mesh Shader PSOs)
+    CHECK_HR(m_Device->QueryInterface(IID_PPV_ARGS(&m_Device2)), "QueryInterface ID3D12Device2 failed");
+
     // Check for Ray Tracing support
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
     if (SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))))
@@ -1027,7 +1030,7 @@ void Renderer::CreateRootSignature()
     rootParameters[9].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
     rootParameters[10].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
     rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
-    rootParameters[12].InitAsConstants(sizeof(BindlessIndices) / 4, 1, 0); // b1: Bindless indices
+    rootParameters[12].InitAsConstants(sizeof(BinningParams) / 4, 1, 0); // b1: Bindless/Binning/Raster indices (max of all pass params)
     rootParameters[13].InitAsConstants(sizeof(IrCacheBindlessIndices) / 4, 2, 0); // b2: IrCache bindless indices
     rootParameters[14].InitAsDescriptorTable(1, &srvRangeMeshletSpace3); // t0-t15 space3: Meshlet streams
 
@@ -2704,6 +2707,10 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
     CreateTexture(m_FinalSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // ---- Visibility buffer (meshlet debug overlay R32_UINT) ----
+    CreateTexture(m_VisibilityBuffer, w, h, DXGI_FORMAT_R32_UINT,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
     // ---- Re-initialize NRD at new resolution ----
     if (m_NrdInitialized)
     {
@@ -2912,7 +2919,7 @@ void Renderer::CreateMeshletResources()
 
     // Counter buffer (UAV)
     if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true))
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true))
     {
         std::cerr << "[Meshlet] Failed to create VisibleMeshletsCounter buffer" << std::endl;
         return;
@@ -2926,14 +2933,6 @@ void Renderer::CreateMeshletResources()
         return;
     }
 
-    // Indirect draw args for rasterize pass
-    if (!CreateBuffer(m_RasterizeDispatchArgs, sizeof(D3D12_DRAW_ARGUMENTS),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true))
-    {
-        std::cerr << "[Meshlet] Failed to create RasterizeDispatchArgs buffer" << std::endl;
-        return;
-    }
-
     // Cull constants buffer (total meshlets)
     if (!CreateBuffer(m_CullConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
                       D3D12_RESOURCE_STATE_GENERIC_READ))
@@ -2942,16 +2941,68 @@ void Renderer::CreateMeshletResources()
         return;
     }
 
-    std::cout << "[Meshlet] Resources created (max " << MAX_VISIBLE_MESHLETS << " visible meshlets)" << std::endl;
+    // ---- Binning resources (4-pass GPU sort) ----
+    // Per-bin meshlet counts (NUM_RASTER_BINS = 2)
+    if (!CreateStructuredBuffer(m_MeshletCounts, sizeof(uint32_t), NUM_RASTER_BINS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create MeshletCounts buffer" << std::endl;
+        return;
+    }
+
+    // Per-bin offset+count packed as uint4: (count, 1, 1, offset)
+    // Used directly as D3D12_DISPATCH_MESH_ARGUMENTS by ExecuteIndirect
+    if (!CreateStructuredBuffer(m_MeshletOffsetAndCounts, sizeof(uint32_t) * 4, NUM_RASTER_BINS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create MeshletOffsetAndCounts buffer" << std::endl;
+        return;
+    }
+
+    // Sorted indirection list: BinnedMeshlets[i] = index into VisibleMeshlets[]
+    if (!CreateStructuredBuffer(m_BinnedMeshlets, sizeof(uint32_t), MAX_VISIBLE_MESHLETS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create BinnedMeshlets buffer" << std::endl;
+        return;
+    }
+
+    // Global meshlet counter scratch for prefix-sum
+    if (!CreateStructuredBuffer(m_GlobalMeshletCounter, sizeof(uint32_t), 1,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create GlobalMeshletCounter buffer" << std::endl;
+        return;
+    }
+
+    // Indirect dispatch args for Classify/Write passes (built by PrepareArgsCS)
+    // Created as a structured buffer so PrepareArgsCS can write it as RWStructuredBuffer<DispatchArgs>
+    // and ExecuteIndirect can read it as INDIRECT_ARGUMENT.
+    if (!CreateStructuredBuffer(m_ClassifyDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS), 1,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create ClassifyDispatchArgs buffer" << std::endl;
+        return;
+    }
+
+    std::cout << "[Meshlet] Resources created (max " << MAX_VISIBLE_MESHLETS << " visible meshlets, "
+              << NUM_RASTER_BINS << " raster bins)" << std::endl;
+
+    // Visibility buffer for debug overlay (plan001)
+    if (!CreateTexture(m_VisibilityBuffer, m_InternalWidth, m_InternalHeight,
+                       DXGI_FORMAT_R32_UINT,
+                       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET))
+    {
+        std::cerr << "[Meshlet] Failed to create visibility buffer" << std::endl;
+    }
 }
 
 void Renderer::CreateMeshletPipelines()
 {
-    // --- Meshlet Root Signature ---
-    // Bind all SRV/UAV resources by GPU virtual address (root SRV/UAV) to avoid
-    // descriptor table layout dependencies — descriptor tables require a contiguous
-    // heap range starting at a known base, but our buffers are allocated at scattered
-    // heap slots. Root SRV/UAV binds directly by VA, which is always correct.
+    // --- Meshlet Cull Root Signature ---
+    // Binds all SRV/UAV resources by GPU virtual address (root SRV/UAV) to avoid
+    // descriptor table layout dependencies.
     //
     // Layout:
     //   [0] CBV  b0        — FrameConstants
@@ -2963,25 +3014,22 @@ void Renderer::CreateMeshletPipelines()
     //   [6] UAV  u1        — VisibleMeshletsCounter
     {
         CD3DX12_ROOT_PARAMETER rootParams[7];
-        rootParams[0].InitAsConstantBufferView(0);              // b0: FrameConstants
-        rootParams[1].InitAsConstantBufferView(1);              // b1: CullConstants
-        rootParams[2].InitAsShaderResourceView(0, 3);           // t0 space3: GlobalMeshletBounds
-        rootParams[3].InitAsShaderResourceView(1, 3);           // t1 space3: GlobalMeshData
-        rootParams[4].InitAsShaderResourceView(2, 3);           // t2 space3: GlobalInstanceData
-        rootParams[5].InitAsUnorderedAccessView(0);             // u0: VisibleMeshlets
-        rootParams[6].InitAsUnorderedAccessView(1);             // u1: VisibleMeshletsCounter
+        rootParams[0].InitAsConstantBufferView(0);
+        rootParams[1].InitAsConstantBufferView(1);
+        rootParams[2].InitAsShaderResourceView(0, 3);
+        rootParams[3].InitAsShaderResourceView(1, 3);
+        rootParams[4].InitAsShaderResourceView(2, 3);
+        rootParams[5].InitAsUnorderedAccessView(0);
+        rootParams[6].InitAsUnorderedAccessView(1);
 
         CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-        rsDesc.Init(7, rootParams, 0, nullptr,
-                    D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rsDesc.Init(7, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
-        Microsoft::WRL::ComPtr<ID3DBlob> signature;
-        Microsoft::WRL::ComPtr<ID3DBlob> error;
+        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
         HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
         if (FAILED(hr))
         {
-            if (error)
-                std::cerr << "[Meshlet] Root signature error: " << (char*)error->GetBufferPointer() << std::endl;
+            if (error) std::cerr << "[Meshlet] Root signature error: " << (char*)error->GetBufferPointer() << std::endl;
             return;
         }
         CHECK_HR(m_Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(),
@@ -3001,55 +3049,159 @@ void Renderer::CreateMeshletPipelines()
         }
     }
 
-    // --- Meshlet Rasterize PSO (VS+PS) using MAIN root signature ---
+    // --- Binning PSOs (CS) — use MAIN root signature (bindless heap) ---
+    // PrepareArgsCS, ClassifyMeshletsCS, AllocateBinRangesCS, WriteBinsCS
+    // All use the same root signature as the main pipeline (space0 bindless + root SRVs/UAVs via b1 constants).
     {
-        auto vs = GraphicsHelper::CompileShader("Shaders/MeshletRasterize.hlsl", "VSMain", "vs_6_6");
-        auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterize.hlsl", "PSMain", "ps_6_6");
-        if (!vs.empty() && !ps.empty())
+        auto compile = [&](const char* entry, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso, const char* label)
         {
-            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
-            desc.pRootSignature = m_RootSignature.Get();  // main RS (has bindless + meshlet space3)
-            desc.VS = { vs.data(), vs.size() };
-            desc.PS = { ps.data(), ps.size() };
-            desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-            desc.RasterizerState.FrontCounterClockwise = TRUE;
-            desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-            desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-            desc.SampleMask = UINT_MAX;
-            desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-            desc.NumRenderTargets = 1;
-            desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR output
-            desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-            desc.SampleDesc.Count = 1;
-            desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-            desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // reverse-Z
+            auto cs = GraphicsHelper::CompileShader("Shaders/MeshletBinning.hlsl", entry, "cs_6_6");
+            if (!cs.empty())
+            {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+                desc.pRootSignature = m_RootSignature.Get();
+                desc.CS = { cs.data(), cs.size() };
+                CHECK_HR(m_Device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso)), label);
+            }
+        };
+        compile("PrepareArgsCS",        m_MeshletBinPrepareArgsPSO,    "[Meshlet] CreateComputePipelineState (bin prepare) failed");
+        compile("ClassifyMeshletsCS",   m_MeshletClassifyPSO,          "[Meshlet] CreateComputePipelineState (bin classify) failed");
+        compile("AllocateBinRangesCS",  m_MeshletAllocateBinRangesPSO, "[Meshlet] CreateComputePipelineState (bin allocate) failed");
+        compile("WriteBinsCS",          m_MeshletWriteBinsPSO,         "[Meshlet] CreateComputePipelineState (bin write) failed");
+    }
 
-            CHECK_HR(m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_MeshletRasterizePSO)),
-                     "[Meshlet] CreateGraphicsPipelineState (rasterize) failed");
+    // --- Mesh Shader Raster PSOs (MS+PS) — use MAIN root signature ---
+    // Outputs: SV_TARGET0 = R16G16B16A16_FLOAT (HDR color), SV_TARGET1 = R32_UINT (visibility buffer)
+    // Depth: D32_FLOAT reverse-Z
+    // Uses D3D12 Pipeline State Stream (PSS) API — required for Mesh Shader PSOs.
+    if (m_MeshShaderSupported)
+    {
+        // Helper lambda to build a mesh shader PSO via pipeline state stream
+        auto buildMeshPSO = [&](
+            const std::vector<char>& ms,
+            const std::vector<char>& ps,
+            D3D12_CULL_MODE cullMode,
+            Microsoft::WRL::ComPtr<ID3D12PipelineState>& outPSO,
+            const char* label)
+        {
+            if (ms.empty() || ps.empty()) return;
 
-            // Alpha-masked variant — CULL_NONE so both sides visible for cutouts
-            desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-            CHECK_HR(m_Device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_MeshletRasterizeMaskPSO)),
-                     "[Meshlet] CreateGraphicsPipelineState (rasterize mask) failed");
+            // Build pipeline state stream manually
+            struct MeshShaderPSOStream
+            {
+                CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE        RootSignature;
+                CD3DX12_PIPELINE_STATE_STREAM_MS                    MS;
+                CD3DX12_PIPELINE_STATE_STREAM_PS                    PS;
+                CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER            RasterizerState;
+                CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC            BlendState;
+                CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL         DepthStencilState;
+                CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT  DSVFormat;
+                CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+                CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC           SampleDesc;
+                CD3DX12_PIPELINE_STATE_STREAM_PRIMITIVE_TOPOLOGY    PrimitiveTopologyType;
+            } stream;
+
+            stream.RootSignature = m_RootSignature.Get();
+            stream.MS = D3D12_SHADER_BYTECODE{ ms.data(), ms.size() };
+            stream.PS = D3D12_SHADER_BYTECODE{ ps.data(), ps.size() };
+
+            CD3DX12_RASTERIZER_DESC raster(D3D12_DEFAULT);
+            raster.FrontCounterClockwise = TRUE;
+            raster.CullMode = cullMode;
+            stream.RasterizerState = raster;
+
+            stream.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+            CD3DX12_DEPTH_STENCIL_DESC ds(D3D12_DEFAULT);
+            ds.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            stream.DepthStencilState = ds;
+
+            stream.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+
+            D3D12_RT_FORMAT_ARRAY rtFormats = {};
+            rtFormats.NumRenderTargets = 2;
+            rtFormats.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rtFormats.RTFormats[1] = DXGI_FORMAT_R32_UINT;
+            stream.RTVFormats = rtFormats;
+
+            DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
+            stream.SampleDesc = sampleDesc;
+            stream.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+            D3D12_PIPELINE_STATE_STREAM_DESC streamDesc = { sizeof(stream), &stream };
+            CHECK_HR(m_Device2->CreatePipelineState(&streamDesc, IID_PPV_ARGS(&outPSO)), label);
+        };
+
+        for (uint32_t i = 0; i < NUM_RASTER_BINS; ++i)
+        {
+            D3D12_CULL_MODE cull = (i == 0) ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+            std::wstring alphaMaskVal = (i == 0) ? L"0" : L"1";
+
+            // Normal render PSO
+            {
+                std::vector<std::pair<std::wstring,std::wstring>> defs = { {L"ALPHA_MASK", alphaMaskVal} };
+                auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "MSMain", "ms_6_8", defs);
+                auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "PSMain", "ps_6_8", defs);
+                buildMeshPSO(ms, ps, cull, m_MeshletRasterPSO[i],
+                             "[Meshlet] CreatePipelineState (mesh shader raster) failed");
+            }
+
+            // Debug PSO — same but with ENABLE_DEBUG_DATA=1
+            {
+                std::vector<std::pair<std::wstring,std::wstring>> defs = {
+                    {L"ALPHA_MASK", alphaMaskVal},
+                    {L"ENABLE_DEBUG_DATA", L"1"}
+                };
+                auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "MSMain", "ms_6_8", defs);
+                auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "PSMain", "ps_6_8", defs);
+                buildMeshPSO(ms, ps, cull, m_MeshletRasterDebugPSO[i],
+                             "[Meshlet] CreatePipelineState (mesh shader raster debug) failed");
+            }
         }
     }
 
-    // --- Command signature for DispatchMesh / DrawInstanced indirect ---
-    // For now, use DrawInstanced with VertexCountPerInstance = max vertices (64)
-    // and InstanceCount = 1 per meshlet. This requires a different indirect buffer layout.
-    // Simplification: use direct dispatch (not indirect) for initial implementation.
+    // --- Indirect Dispatch command signature (for binning Classify/Write passes) ---
     {
-        D3D12_INDIRECT_ARGUMENT_DESC drawArg = {};
-        drawArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+        D3D12_INDIRECT_ARGUMENT_DESC dispatchArg = {};
+        dispatchArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
 
-        D3D12_COMMAND_SIGNATURE_DESC cmdSigDesc = {};
-        cmdSigDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
-        cmdSigDesc.NumArgumentDescs = 1;
-        cmdSigDesc.pArgumentDescs = &drawArg;
+        D3D12_COMMAND_SIGNATURE_DESC sigDesc = {};
+        sigDesc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+        sigDesc.NumArgumentDescs = 1;
+        sigDesc.pArgumentDescs = &dispatchArg;
 
-        CHECK_HR(m_Device->CreateCommandSignature(&cmdSigDesc, nullptr,
-                 IID_PPV_ARGS(&m_MeshletCommandSignature)),
-                 "[Meshlet] CreateCommandSignature failed");
+        CHECK_HR(m_Device->CreateCommandSignature(&sigDesc, nullptr,
+                 IID_PPV_ARGS(&m_DispatchCommandSignatureCS)),
+                 "[Meshlet] CreateCommandSignature (dispatch) failed");
+    }
+
+    // --- Indirect DispatchMesh command signature (for per-bin rasterize) ---
+    if (m_MeshShaderSupported)
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC meshArg = {};
+        meshArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+
+        D3D12_COMMAND_SIGNATURE_DESC sigDesc = {};
+        sigDesc.ByteStride = sizeof(D3D12_DISPATCH_MESH_ARGUMENTS);
+        sigDesc.NumArgumentDescs = 1;
+        sigDesc.pArgumentDescs = &meshArg;
+
+        CHECK_HR(m_Device->CreateCommandSignature(&sigDesc, nullptr,
+                 IID_PPV_ARGS(&m_DispatchMeshSignature)),
+                 "[Meshlet] CreateCommandSignature (dispatch mesh) failed");
+    }
+
+    // --- Meshlet Debug View PSO (CS) for visibility buffer overlay ---
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/VisibilityDebugView.hlsl", "DebugRenderCS", "cs_6_6");
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_RootSignature.Get();
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(m_Device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_MeshletDebugViewPSO)),
+                     "[Meshlet] CreateComputePipelineState (debug view) failed");
+        }
     }
 
     std::cout << "[Meshlet] Pipelines created" << std::endl;
@@ -3113,18 +3265,162 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
     cmdList->ResourceBarrier(1, barriers);
 }
 
-void Renderer::DispatchMeshletRasterize(Model* model)
+void Renderer::DispatchMeshletBinning()
 {
-    if (!model->IsMeshletReady())
+    // 4-pass GPU sort: PrepareArgs → Classify → AllocateBinRanges → WriteBins
+    // Input:  m_VisibleMeshlets, m_VisibleMeshletsCounter (from DispatchMeshletCull)
+    // Output: m_BinnedMeshlets (sorted indirection), m_MeshletOffsetAndCounts (per-bin offset+count)
+    //         m_ClassifyDispatchArgs (indirect dispatch args for Classify/Write passes)
+
+    if (!m_MeshletBinPrepareArgsPSO || !m_MeshletClassifyPSO ||
+        !m_MeshletAllocateBinRangesPSO || !m_MeshletWriteBinsPSO)
         return;
 
     auto* cmdList = m_CommandList.Get();
-    //ID3D12PipelineState* pso = (mode == AlphaMode::Mask) ? m_MeshletRasterizeMaskPSO.Get() : m_MeshletRasterizePSO.Get();
-    ID3D12PipelineState* pso = m_MeshletRasterizePSO.Get();
-    if (!pso) return;
+    cmdList->SetComputeRootSignature(m_RootSignature.Get());
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
 
-    // Use MAIN root signature — the meshlet VS+PS accesses bindless textures (space0),
-    // MaterialBuffer (t0 space1), Lights (t0 space2), and meshlet streams (t0-t8 space3).
+    // Bind FrameCB at root param 0
+    cmdList->SetComputeRootConstantBufferView(0, m_FrameCB.gpuAddress);
+
+    // Binning params passed via BindlessIndices (root param 12, b1):
+    //   InputIdx0  = VisibleMeshlets SRV index
+    //   InputIdx1  = VisibleMeshletsCounter SRV index
+    //   InputIdx2  = MeshletCounts SRV index (for AllocateBinRanges read)
+    //   OutputIdx0 = MeshletCounts UAV index
+    //   OutputIdx1 = MeshletOffsetAndCounts UAV index
+    //   OutputIdx2 = BinnedMeshlets UAV index
+    //   PathVizLineBufferIdx = GlobalMeshletCounter UAV index (scratch)
+    // ClassifyDispatchArgs is bound as root UAV at param 5 (u0).
+    // (The binning shader reads NumBins as a push constant via b1.InputIdx0 high bits — see MeshletBinning.hlsl)
+
+    // --- Pass 1: PrepareArgsCS ---
+    // Zeros MeshletCounts, GlobalMeshletCounter; builds ClassifyDispatchArgs from VisibleMeshletsCounter.
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_MeshletCounts,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(cmdList, m_GlobalMeshletCounter,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(cmdList, m_ClassifyDispatchArgs,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BinningParams params = {};
+        params.NumBins                    = NUM_RASTER_BINS;
+        params.VisibleMeshletsCounterIdx  = (uint)m_VisibleMeshletsCounter.srvIndex;
+        params.RWMeshletCountsIdx         = (uint)m_MeshletCounts.uavIndex;
+        params.RWGlobalMeshletCounterIdx  = (uint)m_GlobalMeshletCounter.uavIndex;
+        params.RWDispatchArgumentsIdx     = (uint)m_ClassifyDispatchArgs.uavIndex;
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
+
+        cmdList->SetPipelineState(m_MeshletBinPrepareArgsPSO.Get());
+        cmdList->Dispatch(1, 1, 1);
+
+        D3D12_RESOURCE_BARRIER barriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletCounts.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_ClassifyDispatchArgs.resource.Get()),
+        };
+        cmdList->ResourceBarrier(2, barriers);
+    }
+
+    // --- Pass 2: ClassifyMeshletsCS (indirect, driven by ClassifyDispatchArgs) ---
+    // For each visible meshlet, looks up material.RasterBin and increments that bin's counter.
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_ClassifyDispatchArgs,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        BinningParams params = {};
+        params.NumBins                    = NUM_RASTER_BINS;
+        params.VisibleMeshletsIdx         = (uint)m_VisibleMeshlets.srvIndex;
+        params.VisibleMeshletsCounterIdx  = (uint)m_VisibleMeshletsCounter.srvIndex;
+        params.RWMeshletCountsIdx         = (uint)m_MeshletCounts.uavIndex;
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
+
+        cmdList->SetPipelineState(m_MeshletClassifyPSO.Get());
+        cmdList->ExecuteIndirect(m_DispatchCommandSignatureCS.Get(), 1,
+                                 m_ClassifyDispatchArgs.resource.Get(), 0, nullptr, 0);
+
+        D3D12_RESOURCE_BARRIER barriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletCounts.resource.Get()),
+        };
+        cmdList->ResourceBarrier(1, barriers);
+    }
+
+    // --- Pass 3: AllocateBinRangesCS ---
+    // Prefix-sum on MeshletCounts → writes MeshletOffsetAndCounts (offset per bin).
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_MeshletCounts,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BinningParams params = {};
+        params.NumBins                        = NUM_RASTER_BINS;
+        params.MeshletCountsIdx               = (uint)m_MeshletCounts.srvIndex;
+        params.RWMeshletOffsetAndCountsIdx    = (uint)m_MeshletOffsetAndCounts.uavIndex;
+        params.RWGlobalMeshletCounterIdx      = (uint)m_GlobalMeshletCounter.uavIndex;
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
+
+        cmdList->SetPipelineState(m_MeshletAllocateBinRangesPSO.Get());
+        cmdList->Dispatch((NUM_RASTER_BINS + 63) / 64, 1, 1);
+
+        D3D12_RESOURCE_BARRIER barriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletOffsetAndCounts.resource.Get()),
+        };
+        cmdList->ResourceBarrier(1, barriers);
+    }
+
+    // --- Pass 4: WriteBinsCS (indirect, driven by ClassifyDispatchArgs) ---
+    // Writes each meshlet's index into BinnedMeshlets[] at its bin's offset.
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_ClassifyDispatchArgs,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        BinningParams params = {};
+        params.NumBins                        = NUM_RASTER_BINS;
+        params.VisibleMeshletsIdx             = (uint)m_VisibleMeshlets.srvIndex;
+        params.VisibleMeshletsCounterIdx      = (uint)m_VisibleMeshletsCounter.srvIndex;
+        params.RWMeshletOffsetAndCountsIdx    = (uint)m_MeshletOffsetAndCounts.uavIndex;
+        params.RWBinnedMeshletsIdx            = (uint)m_BinnedMeshlets.uavIndex;
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
+
+        cmdList->SetPipelineState(m_MeshletWriteBinsPSO.Get());
+        cmdList->ExecuteIndirect(m_DispatchCommandSignatureCS.Get(), 1,
+                                 m_ClassifyDispatchArgs.resource.Get(), 0, nullptr, 0);
+
+        D3D12_RESOURCE_BARRIER barriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_BinnedMeshlets.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletOffsetAndCounts.resource.Get()),
+        };
+        cmdList->ResourceBarrier(2, barriers);
+    }
+
+    // Restore VisibleMeshletsCounter to UAV for next frame
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void Renderer::DispatchMeshletRasterize(Model* model)
+{
+    if (!model->IsMeshletReady() || !m_MeshShaderSupported)
+        return;
+
+    auto* cmdList = m_CommandList.Get();
+
+    // Transition binning outputs to SRV for the mesh shader to read
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
+        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+    // Use MAIN root signature
     cmdList->SetGraphicsRootSignature(m_RootSignature.Get());
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
 
@@ -3137,29 +3433,48 @@ void Renderer::DispatchMeshletRasterize(Model* model)
     // Bind bindless texture table at root param 3 (t0 space0)
     cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
-    // Bind meshlet stream buffer descriptor table at root param 14 (t0-t15 space3)
-    // The meshlet shader expects these SRV indices (in the global heap, space3):
-    //   t0: GlobalPositions, t1: GlobalNormals, t2: GlobalUVs, t3: GlobalMeshlets,
-    //   t4: GlobalMeshletVertices, t5: GlobalMeshletTriangles,
-    //   t6: GlobalMeshData, t7: GlobalInstanceData, t8: VisibleMeshlets
-    // We set the table base to the first meshlet SRV in the heap.
-    D3D12_GPU_DESCRIPTOR_HANDLE meshletBase = GraphicsHelper::GetSRVGPUHandle(
-        model->GetGlobalPositionsBufferAddress() ? 0 : 0  // all buffers share contiguous SRV indices
-    );
-    // The meshlet buffers were allocated sequentially via AllocateSRV().
-    // We pass the GPU handle at the start of the heap; the table range covers t0-t15 space3.
-    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle(0));
+    // Bind meshlet stream descriptor table at root param 14 (t0-t8 space3)
+    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
 
-    cmdList->SetPipelineState(pso);
-    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    // Draw: one instance per meshlet, MESHLET_MAX_VERTICES vertices per instance.
-    // The VS uses SV_InstanceID to index into VisibleMeshlets[] and SV_VertexID
-    // for per-vertex data within the meshlet. Degenerate vertices (beyond the
-    // meshlet's actual VertexCount) produce zero-area triangles.
-    size_t totalMeshlets = model->GetTotalMeshletCount();
-    if (totalMeshlets > 0)
+    // Rasterize each bin with its own PSO
+    // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset)
+    // This is used directly as D3D12_DISPATCH_MESH_ARGUMENTS (ThreadGroupCountX=count, Y=1, Z=1)
+    // The mesh shader reads the offset from RasterParams.BinIndex via the constant buffer.
+    for (uint32_t binIndex = 0; binIndex < NUM_RASTER_BINS; ++binIndex)
     {
-        cmdList->DrawInstanced(MESHLET_MAX_VERTICES, static_cast<UINT>(totalMeshlets), 0, 0);
+        // Select PSO: debug mode uses the debug PSO (writes visibility buffer)
+        auto* pso = (m_MeshletDebugMode > 0 && m_MeshletRasterDebugPSO[binIndex])
+                    ? m_MeshletRasterDebugPSO[binIndex].Get()
+                    : m_MeshletRasterPSO[binIndex].Get();
+        if (!pso) continue;
+
+        // Bind RasterParams (root param 12, b1): BinIndex + bindless SRV indices
+        RasterParams rp = {};
+        rp.BinIndex              = binIndex;
+        rp.VisibleMeshletsIdx    = (uint)m_VisibleMeshlets.srvIndex;
+        rp.BinnedMeshletsIdx     = (uint)m_BinnedMeshlets.srvIndex;
+        rp.MeshletBinDataIdx     = (uint)m_MeshletOffsetAndCounts.srvIndex;
+        cmdList->SetGraphicsRoot32BitConstants(12, sizeof(RasterParams) / 4, &rp, 0);
+
+        cmdList->SetPipelineState(pso);
+
+        // ExecuteIndirect: one DispatchMesh per bin.
+        // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset)
+        // D3D12_DISPATCH_MESH_ARGUMENTS reads the first 3 uints: (count, 1, 1)
+        // → ThreadGroupCountX = visible meshlet count for this bin
+        cmdList->ExecuteIndirect(
+            m_DispatchMeshSignature.Get(),
+            1,
+            m_MeshletOffsetAndCounts.resource.Get(),
+            sizeof(uint32_t) * 4 * binIndex,  // offset to this bin's uint4
+            nullptr, 0);
     }
+
+    // Restore resources to UAV for next frame's cull pass
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }

@@ -1,5 +1,5 @@
 {
-  "models": ["Content/Sponza/Sponza.gltf"],
+  "models": ["Content/Box/Box.gltf"],
   "graph": [
     {
       "name": "Lights",

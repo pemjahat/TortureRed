@@ -134,6 +134,11 @@ struct LightConstants {
     uint padding[2];
 };
 
+// Meshlet rasterization PSO bin — determines which PSO permutation renders a meshlet.
+// Must match PipelineBin enum in Renderer.h and the shader's GetBin() function.
+#define RASTER_BIN_OPAQUE       0u  // Standard opaque: back-face cull, no alpha test
+#define RASTER_BIN_ALPHA_MASKED 1u  // Alpha-tested: no cull, discard in PS
+
 struct MaterialConstants {
     float4 baseColorFactor;
     float metallicFactor;
@@ -143,6 +148,7 @@ struct MaterialConstants {
     int metallicRoughnessTextureIndex;
     int alphaMode;
     float alphaCutoff;
+    uint RasterBin;  // RASTER_BIN_OPAQUE or RASTER_BIN_ALPHA_MASKED
 };
 
 struct DrawNodeData {
@@ -268,6 +274,32 @@ struct InstanceData {
 struct MeshletCandidate {
     uint InstanceID;    // Index into InstanceData[]
     uint MeshletIndex;  // Per-mesh meshlet index
+};
+
+// =============================================================================
+// Meshlet Binning / Rasterize Params (shared CPU/GPU, passed via root constants b1)
+// =============================================================================
+
+// Passed to all 4 binning CS passes via root param 12 (b1).
+// Each pass uses only the fields it needs; unused fields are zero.
+struct BinningParams {
+    uint NumBins;                       // NUM_RASTER_BINS (2)
+    uint VisibleMeshletsIdx;            // SRV index of VisibleMeshlets[]
+    uint VisibleMeshletsCounterIdx;     // SRV index of VisibleMeshletsCounter
+    uint MeshletCountsIdx;              // SRV index of MeshletCounts[] (for AllocateBinRanges)
+    uint RWMeshletCountsIdx;            // UAV index of MeshletCounts[]
+    uint RWMeshletOffsetAndCountsIdx;   // UAV index of MeshletOffsetAndCounts[]
+    uint RWBinnedMeshletsIdx;           // UAV index of BinnedMeshlets[]
+    uint RWGlobalMeshletCounterIdx;     // UAV index of GlobalMeshletCounter
+    uint RWDispatchArgumentsIdx;        // UAV index of ClassifyDispatchArgs
+};
+
+// Passed to the Mesh Shader rasterize pass via root param 12 (b1).
+struct RasterParams {
+    uint BinIndex;              // Which bin this DispatchMesh call is for
+    uint VisibleMeshletsIdx;    // SRV index of VisibleMeshlets[]
+    uint BinnedMeshletsIdx;     // SRV index of BinnedMeshlets[]
+    uint MeshletBinDataIdx;     // SRV index of MeshletOffsetAndCounts[]
 };
 
 #endif // SHARED_TYPES_H

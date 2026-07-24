@@ -369,7 +369,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         }
 
         // Populate staging buffer immediately with initial transforms
-        UpdateNodeBuffer();
+        //UpdateNodeBuffer();
     }
 
     // Create material buffer
@@ -384,6 +384,11 @@ void Model::CreateGLTFResources(Renderer* renderer)
 
     // Create meshlet GPU buffers (global streams + MeshData + InstanceData)
     CreateMeshletResources(renderer);
+
+    // Re-populate InstanceData transforms after CreateMeshletResources() rebuilds the array
+    // (CreateMeshletResources clears m_InstanceDataArray and resets LocalToWorld to identity;
+    //  UpdateNodeBuffer walks the node hierarchy to write the correct world transforms).
+    UpdateNodeBuffer();
 }
 
 void Model::LoadTextures(Renderer* renderer)
@@ -554,6 +559,11 @@ void Model::LoadMaterials()
             mc.alphaMode = 2;
 
         mc.alphaCutoff = material->alpha_cutoff;
+
+        // Assign PSO bin for meshlet rasterizer:
+        // Alpha-masked materials go to bin 1 (no cull, alpha discard in PS).
+        // Opaque and blend materials go to bin 0 (back-face cull).
+        mc.RasterBin = (mc.alphaMode == 1) ? RASTER_BIN_ALPHA_MASKED : RASTER_BIN_OPAQUE;
 
         if (material->has_pbr_metallic_roughness)
         {
@@ -1147,6 +1157,14 @@ void Model::UploadBuffers(Renderer* renderer)
         batch.Upload(m_MeshDataBuffer, m_MeshDataArray.data(), m_MeshDataArray.size() * sizeof(MeshData));
         batch.Transition(m_MeshDataBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
     }
+    // InstanceData is UPLOAD heap (cpuPtr mapped), so we write directly — no staging needed.
+    // This initialises LocalToWorld for every instance before the first frame.
+    // (UpdateNodeBuffer() keeps it in sync each frame after animation updates.)
+    // if (m_InstanceDataBuffer.cpuPtr && !m_InstanceDataArray.empty())
+    // {
+    //     memcpy(m_InstanceDataBuffer.cpuPtr, m_InstanceDataArray.data(),
+    //            m_InstanceDataArray.size() * sizeof(InstanceData));
+    // }
     batch.End();
 }
 

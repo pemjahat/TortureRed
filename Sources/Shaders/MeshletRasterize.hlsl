@@ -1,4 +1,5 @@
 #include "MeshletCommon.hlsli"
+#include "VisibilityBuffer.hlsli"
 #include "PBR.hlsl"
 
 // Bindless texture and sampler declarations (shared with existing shaders)
@@ -17,24 +18,28 @@ StructuredBuffer<uint>            GlobalUVs               : register(t2, space3)
 StructuredBuffer<Meshlet>         GlobalMeshlets          : register(t3, space3);
 StructuredBuffer<uint>            GlobalMeshletVertices   : register(t4, space3);
 StructuredBuffer<MeshletTriangle> GlobalMeshletTriangles  : register(t5, space3);
+StructuredBuffer<MeshletBounds>   GlobalMeshletBounds     : register(t6, space3); // allocated in heap; unused by rasterize VS
 
 // Per-mesh / per-instance metadata
-StructuredBuffer<MeshData>        GlobalMeshData          : register(t6, space3);
-StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t7, space3);
+StructuredBuffer<MeshData>        GlobalMeshData          : register(t7, space3);
+StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t8, space3);
 
-// Visible meshlet candidates (output of culling pass)
-StructuredBuffer<MeshletCandidate> VisibleMeshlets        : register(t8, space3);
+// Visible meshlet candidates — bound bindlessly because m_VisibleMeshlets is allocated
+// in the Renderer before the Model buffers, so it is not contiguous with the space3 table.
+// The SRV index is passed via BindlessIndices.InputIdx2 (b1 root constant).
+ConstantBuffer<BindlessIndices> BindlessCB : register(b1);
 
 // Material and light buffers (existing)
 StructuredBuffer<MaterialConstants> MaterialBuffer        : register(t0, space1);
 
-// PS input
+// PS input — candidateIndex forwarded from VS (nointerpolation, one per draw instance)
 struct PSInput {
     float4 position     : SV_POSITION;
     float3 worldPos     : WORLD_POS;
     float3 normal       : NORMAL;
     float2 texCoord     : TEXCOORD;
     nointerpolation uint materialID : MATERIAL_ID;
+    nointerpolation uint candidateIndex : CANDIDATE_INDEX;
 };
 
 // VS: one invocation per vertex per visible meshlet
@@ -43,7 +48,9 @@ struct PSInput {
 // SV_VertexID   = vertex index within the meshlet
 PSInput VSMain(uint instanceID : SV_InstanceID, uint vertexID : SV_VertexID)
 {
-    // Load meshlet candidate
+    // Load meshlet candidate — bindless access (SRV index from root constant b1)
+    StructuredBuffer<MeshletCandidate> VisibleMeshlets =
+        ResourceDescriptorHeap[BindlessCB.InputIdx2];
     MeshletCandidate cand = VisibleMeshlets[instanceID];
 
     // Load instance and mesh data
@@ -57,11 +64,12 @@ PSInput VSMain(uint instanceID : SV_InstanceID, uint vertexID : SV_VertexID)
     if (vertexID >= m.VertexCount)
     {
         PSInput degenerate;
-        degenerate.position = float4(0, 0, 0, 0);
-        degenerate.worldPos = float3(0, 0, 0);
-        degenerate.normal = float3(0, 1, 0);
-        degenerate.texCoord = float2(0, 0);
-        degenerate.materialID = 0;
+        degenerate.position       = float4(0, 0, 0, 0);
+        degenerate.worldPos       = float3(0, 0, 0);
+        degenerate.normal         = float3(0, 1, 0);
+        degenerate.texCoord       = float2(0, 0);
+        degenerate.materialID     = 0;
+        degenerate.candidateIndex = instanceID;
         return degenerate;
     }
 
@@ -78,11 +86,12 @@ PSInput VSMain(uint instanceID : SV_InstanceID, uint vertexID : SV_VertexID)
     float4 clipPos  = mul(worldPos, FrameCB.viewProj);
 
     PSInput output;
-    output.position   = clipPos;
-    output.worldPos   = worldPos.xyz;
-    output.normal     = normalize(mul(localNormal, (float3x3)inst.LocalToWorld));
-    output.texCoord   = uv;
-    output.materialID = md.MaterialIndex;
+    output.position       = clipPos;
+    output.worldPos       = worldPos.xyz;
+    output.normal         = normalize(mul(localNormal, (float3x3)inst.LocalToWorld));
+    output.texCoord       = uv;
+    output.materialID     = md.MaterialIndex;
+    output.candidateIndex = instanceID;    // SV_InstanceID is the index into VisibleMeshlets[]
     return output;
 }
 
@@ -90,7 +99,13 @@ PSInput VSMain(uint instanceID : SV_InstanceID, uint vertexID : SV_VertexID)
 // The key difference is the VS which uses meshlet indirection.
 
 // PS: identical to Forward.hlsl PSMain — reuses existing material/lighting
-float4 PSMain(PSInput input) : SV_Target0 {
+// Additionally writes a visibility buffer token to SV_Target1 for debug overlay support.
+struct PSOutput {
+    float4 color     : SV_Target0;
+    uint   visBuffer : SV_Target1;
+};
+
+PSOutput PSMain(PSInput input) {
     MaterialConstants material = MaterialBuffer[input.materialID];
     
     float4 albedo = material.baseColorFactor;
@@ -153,11 +168,22 @@ float4 PSMain(PSInput input) : SV_Target0 {
 
     float3 ambient = 0.03f * albedo.rgb;
     float3 finalColor = ambient + totalDirectLighting;
+
+    PSOutput output;
     
     if (FrameCB.taaEnabled)
-        return float4(max(finalColor, 0.0f), albedo.a);
+        output.color = float4(max(finalColor, 0.0f), albedo.a);
+    else {
+        float3 exposedColor = finalColor * FrameCB.exposure;
+        float3 ldrColor     = exposedColor / (exposedColor + 1.0f);
+        output.color        = float4(ldrColor, albedo.a);
+    }
 
-    float3 exposedColor = finalColor * FrameCB.exposure;
-    float3 ldrColor = exposedColor / (exposedColor + 1.0f);
-    return float4(ldrColor, albedo.a);
+    // Pack visibility buffer token: candidateIndex + 1 (0 = invalid/sky), primitiveID (low 7 bits)
+    // For VS+PS with DrawInstanced, SV_PrimitiveID counts triangles within each draw instance
+    // (resets per meshlet, which is correct).
+    uint primitiveID = 0; // TODO: pass via SV_PrimitiveID; for now uses per-meshlet primitive count in debug
+    output.visBuffer = PackVisBuffer(input.candidateIndex, primitiveID);
+
+    return output;
 }

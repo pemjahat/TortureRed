@@ -691,3 +691,292 @@ flowchart LR
 | **Depth-only pass** | The `DEPTH_ONLY` permutation skips pixel shader and RTVs entirely. Used for shadow maps or Z-prepass. Mesh shader still runs (outputs vertices only, no PS). |
 | **Root signature compatibility** | The mesh shader reads the same global stream `StructuredBuffer`s as the current VS+PS. The root signature does not change — only the PSO's shader bytecode changes. ✅ |
 | **Two-phase occlusion culling not needed** | TortureRed uses single-phase frustum-only culling per the Phase 1 goals. The binning and rasterization are identical regardless — just fewer `VisibleMeshlets` to process. |
+
+---
+
+## 🔀 Detailed I/O Diagrams per Pipeline Stage
+
+### 📥 Cull Stage — Compute Shader Input/Output
+
+The cull stage runs `CullMeshletsCS` over all meshlets and produces the visible meshlet list.
+
+```mermaid
+flowchart LR
+    accTitle: Meshlet Cull Stage Input Output Data Flow
+    accDescr: Shows how instance data, mesh data, and meshlet bounds feed into the cull compute shader which outputs VisibleMeshlets and VisibleMeshletsCounter
+
+    subgraph inputs["📥 Inputs (SRV)"]
+        dir1["GlobalMeshletBounds\nt0 space3\nStructuredBuffer<MeshletBounds>"]
+        dir2["GlobalMeshData\nt1 space3\nStructuredBuffer<MeshData>"]
+        dir3["GlobalInstanceData\nt2 space3\nStructuredBuffer<InstanceData>"]
+    end
+
+    subgraph cb["📦 Constant Buffers"]
+        dir4["FrameCB\nb0\nFrameConstants (viewProj)"]
+        dir5["CullCB\nb1\nCullConstants (totalMeshlets)"]
+    end
+
+    subgraph cull["⚙️ CullMeshletsCS\n[numthreads(64,1,1)]"]
+        dir6["FrustumCullMeshlet()\n8-corner AABB test\nvs viewProj"]
+    end
+
+    subgraph outputs["📤 Outputs (UAV, GPU VA)"]
+        dir7["VisibleMeshlets\nu0\nRWStructuredBuffer<MeshletCandidate>\n(root param 5: GPU VA)"]
+        dir8["VisibleMeshletsCounter\nu1\nRWStructuredBuffer<uint>\n(root param 6: GPU VA)"]
+    end
+
+    inputs --> cull
+    cb --> cull
+    cull --> outputs
+
+    classDef inputStyle fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef outputStyle fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef cbStyle fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef computeStyle fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+
+    class dir1,dir2,dir3 inputStyle
+    class dir4,dir5 cbStyle
+    class dir6 computeStyle
+    class dir7,dir8 outputStyle
+```
+
+**Cull stage buffer bindings**:
+
+| Binding | Resource | Type | Access | Descriptor |
+|---|---|---|---|---|
+| `t0, space3` | `GlobalMeshletBounds` | `StructuredBuffer<MeshletBounds>` | SRV (read) | Root descriptor table |
+| `t1, space3` | `GlobalMeshData` | `StructuredBuffer<MeshData>` | SRV (read) | Root descriptor table |
+| `t2, space3` | `GlobalInstanceData` | `StructuredBuffer<InstanceData>` | SRV (read) | Root descriptor table |
+| `b0` | `FrameConstants` | Constant buffer | CBV | Root CBV (param 0) |
+| `b1` | `CullConstants` | Constant buffer | CBV | Root CBV (param 1) |
+| `u0` | `VisibleMeshlets` | `RWStructuredBuffer<MeshletCandidate>` | UAV (write) | Root UAV (param 5, GPU VA) |
+| `u1` | `VisibleMeshletsCounter` | `RWStructuredBuffer<uint>` | UAV (write) | Root UAV (param 6, GPU VA) |
+
+---
+
+### 🗂️ Binning Stage — 4-Pass GPU Sort I/O
+
+The binning stage classifies visible meshlets by `RasterBin` (Opaque=0, AlphaMasked=1) and builds a sorted indirection list.
+
+```mermaid
+flowchart TB
+    accTitle: Meshlet Binning 4-Pass Data Flow
+    accDescr: Four compute passes that sort visible meshlets into PSO bins using wave-ops coalesced atomic operations
+
+    subgraph pass1["🔧 Pass 1: PrepareArgsCS [1,1,1]"]
+        p1r["📥 Read: VisibleMeshletsCounter\n(ResourceDescriptorHeap[srvIndex])\nStructuredBuffer<uint>"]
+        p1w["📤 Write: MeshletCounts ← 0\n📤 Write: GlobalMeshletCounter ← 0\n📤 Write: ClassifyDispatchArgs"]
+        p1r --> p1w
+    end
+
+    subgraph pass2["📊 Pass 2: ClassifyMeshletsCS [64,1,1]\n(indirect from ClassifyDispatchArgs)"]
+        p2r["📥 Read: VisibleMeshlets[]\n📥 Read: MaterialBuffer → RasterBin\n📥 Read: VisibleMeshletsCounter"]
+        p2w["📤 Write: MeshletCounts\n(wave-ops InterlockedAdd per bin)"]
+        p2r --> p2w
+    end
+
+    subgraph pass3["📐 Pass 3: AllocateBinRangesCS [64,1,1]"]
+        p3r["📥 Read: MeshletCounts"]
+        p3w["📤 Write: MeshletOffsetAndCounts[bin]\n= uint4(count=0, 1, 1, offset)\n📤 Write: GlobalMeshletCounter\n(wave prefix-sum + InterlockedAdd)"]
+        p3r --> p3w
+    end
+
+    subgraph pass4["✏️ Pass 4: WriteBinsCS [64,1,1]\n(indirect from ClassifyDispatchArgs)"]
+        p4r["📥 Read: VisibleMeshlets[]\n📥 Read: MeshletOffsetAndCounts\n📥 Read: VisibleMeshletsCounter"]
+        p4w["📤 Write: BinnedMeshlets[offset+slot] = threadID\n📤 Write: MeshletOffsetAndCounts[bin].x = count\n(wave-ops InterlockedAdd)"]
+        p4r --> p4w
+    end
+
+    pass1 --> pass2 --> pass3 --> pass4
+
+    classDef passStyle fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    class pass1,pass2,pass3,pass4 passStyle
+```
+
+**`BinningParams` passed via root constants (param 12, b1) per pass**:
+
+| Pass | Fields Set |
+|---|---|
+| **Prepare** | `NumBins`, `VisibleMeshletsCounterIdx`, `RWMeshletCountsIdx`, `RWGlobalMeshletCounterIdx`, `RWDispatchArgumentsIdx` |
+| **Classify** | `NumBins`, `VisibleMeshletsIdx`, `VisibleMeshletsCounterIdx`, `RWMeshletCountsIdx` |
+| **Allocate** | `NumBins`, `MeshletCountsIdx`, `RWMeshletOffsetAndCountsIdx`, `RWGlobalMeshletCounterIdx` |
+| **Write** | `NumBins`, `VisibleMeshletsIdx`, `VisibleMeshletsCounterIdx`, `RWMeshletOffsetAndCountsIdx`, `RWBinnedMeshletsIdx` |
+
+**Binning buffer summary**:
+
+| Buffer | Size | Access per pass |
+|---|---|---|
+| `VisibleMeshlets[]` | `MAX_VISIBLE_MESHLETS × MeshletCandidate` | Pass 2 (SRV), Pass 4 (SRV) |
+| `VisibleMeshletsCounter` | 1 × uint | Pass 1 (SRV), Pass 2 (SRV), Pass 4 (SRV) |
+| `MeshletCounts[]` | `NUM_RASTER_BINS × uint` | Pass 1 (UAV zero), Pass 2 (UAV write), Pass 3 (SRV read) |
+| `MeshletOffsetAndCounts[]` | `NUM_RASTER_BINS × uint4` | Pass 3 (UAV write), Pass 4 (UAV read+write) |
+| `BinnedMeshlets[]` | `MAX_VISIBLE_MESHLETS × uint` | Pass 4 (UAV write) |
+| `GlobalMeshletCounter` | 1 × uint | Pass 1 (UAV zero), Pass 3 (UAV read+write) |
+| `ClassifyDispatchArgs` | 1 × `DispatchArgs` | Pass 1 (UAV write), Pass 2+4 (INDIRECT_ARGUMENT) |
+
+---
+
+### 🖌️ Mesh Shader Raster Stage — Input/Output (MS+PS)
+
+This is the core mesh shader rasterization. Each `DispatchMesh` thread group processes one meshlet.
+
+```mermaid
+flowchart TB
+    accTitle: Mesh Shader Raster Stage Detailed I/O
+    accDescr: Detailed input/output diagram showing how the mesh shader reads binning outputs and stream buffers to produce vertices, triangles, and per-primitive attributes for the pixel shader
+
+    subgraph rootParams["🔗 Root Signature Bindings"]
+        rp1["param 0: FrameCB\nCBV b0\nFrameConstants\n(viewProj matrix)"]
+        rp2["param 1: MaterialBuffer\nSRV t0 space1\nStructuredBuffer<MaterialConstants>"]
+        rp3["param 3: Bindless Textures\nDescriptor Table t0 space0\nTexture2D[] + SamplerState"]
+        rp4["param 12: RasterParams\nRoot Constants b1\n(BinIndex, VisibleMeshletsIdx,\nBinnedMeshletsIdx, MeshletBinDataIdx)"]
+        rp5["param 14: Meshlet Streams\nDescriptor Table t0-t8 space3\n(Positions, Normals, UVs, Meshlets,\nVerts, Tris, Bounds, MeshData, Instances)"]
+    end
+
+    subgraph binOutputs["🗂️ Binning Outputs (via Bindless Heap)"]
+        bo1["VisibleMeshlets[]\nResourceDescriptorHeap[RasterParams.VisibleMeshletsIdx]\nStructuredBuffer<MeshletCandidate>"]
+        bo2["BinnedMeshlets[]\nResourceDescriptorHeap[RasterParams.BinnedMeshletsIdx]\nStructuredBuffer<uint>"]
+        bo3["MeshletOffsetAndCounts[]\nResourceDescriptorHeap[RasterParams.MeshletBinDataIdx]\nStructuredBuffer<uint4>"]
+    end
+
+    subgraph ms["🎨 MSMain\n[outputtopology(triangle)]\n[numthreads(32,1,1)]\n\n1. Resolve: groupID + binOffset\n→ BinnedMeshlets → meshletIndex\n2. Load: MeshletCandidate\n→ InstanceData → MeshData → Meshlet\n3. SetMeshOutputCounts(vtx, tri)\n4. Output vertices (strided 32-thread)\n5. Output primitives (strided 32-thread)"]
+    end
+
+    subgraph msOutputs["📤 Mesh Shader Outputs"]
+        mo1["vertices:\nVertexAttribute[MESHLET_MAX_VERTICES]\nSV_Position · UV (alpha) · MaterialID"]
+        mo2["indices:\nuint3[MESHLET_MAX_TRIANGLES]\n(tri.V0, tri.V1, tri.V2)"]
+        mo3["primitives:\nPrimitiveAttribute[MESHLET_MAX_TRIANGLES]\n(SV_PrimitiveID, CANDIDATE_INDEX)"]
+    end
+
+    subgraph hwRast["⚙️ HW Rasterizer\nTriangle setup · Clipping\nReverse-Z depth test\nBack-face cull (Opaque bin)"]
+    end
+
+    subgraph ps["🖼️ PSMain\nPer-primitive attributes\n+ per-vertex interpolation"]
+    end
+
+    subgraph psOutputs["📤 Pixel Shader Outputs"]
+        po1["SV_TARGET0\nR16G16B16A16_FLOAT\nGBuffer albedo (cleared to 0\n— deferred shading)"]
+        po2["SV_TARGET1\nR32_UINT\nVisibility buffer token\nPackVisBuffer(candidate, primitive)"]
+        po3["Depth\nD32_FLOAT\nReverse-Z (HW writes)"]
+    end
+
+    rootParams --> ms
+    binOutputs --> ms
+    ms --> msOutputs
+    msOutputs --> hwRast
+    hwRast --> ps
+    ps --> psOutputs
+
+    classDef rootStyle fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef binStyle fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+    classDef msStyle fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef outStyle fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef hwStyle fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+
+    class rp1,rp2,rp3,rp4,rp5 rootStyle
+    class bo1,bo2,bo3 binStyle
+    class ms msStyle
+    class mo1,mo2,mo3,po1,po2,po3 outStyle
+    class hwRast,ps hwStyle
+```
+
+**Mesh shader MSMain data flow — step by step**:
+
+```
+SV_GroupID (0..N-1, one per meshlet in this bin)
+    │
+    ▼
+RasterParams.BinIndex → MeshletOffsetAndCounts[binIndex].w = binOffset
+    │
+    ▼
+BinnedMeshlets[binOffset + SV_GroupID] → meshletIndex
+    │
+    ▼
+VisibleMeshlets[meshletIndex] → MeshletCandidate { InstanceID, MeshletIndex }
+    │
+    ├── GlobalInstanceData[cand.InstanceID] → InstanceData { LocalToWorld, MeshDataIndex }
+    │
+    └── GlobalMeshData[inst.MeshDataIndex] → MeshData { PositionOffset, NormalOffset, UVOffset,
+          MeshletOffset, MeshletVertexOffset, MeshletTriangleOffset, MaterialIndex, MeshletCount }
+            │
+            ▼
+        GlobalMeshlets[MeshData.MeshletOffset + cand.MeshletIndex] → Meshlet { VertexOffset,
+          TriangleOffset, VertexCount, TriangleCount }
+            │
+            ├── For each vertex i (strided, 32 threads):
+            │     GlobalMeshletVertices[MeshData.MeshletVertexOffset + Meshlet.VertexOffset + i] → globalVtxIdx
+            │     GlobalPositions[MeshData.PositionOffset + globalVtxIdx] → localPos
+            │     → mul(localPos, inst.LocalToWorld) → mul(worldPos, FrameCB.viewProj) → clipPos
+            │     → output VertexAttribute { SV_Position = clipPos }
+            │
+            └── For each triangle i (strided, 32 threads):
+                  GlobalMeshletTriangles[MeshData.MeshletTriangleOffset + Meshlet.TriangleOffset + i] → tri
+                  → output uint3(tri.V0, tri.V1, tri.V2)
+                  → output PrimitiveAttribute { PrimitiveID = i, CandidateIndex = meshletIndex }
+```
+
+**Pixel shader PSMain data flow**:
+
+```
+Per-primitive: PrimitiveAttribute { PrimitiveID, CandidateIndex }
+Per-vertex (interpolated): VertexAttribute { SV_Position, [UV, MaterialID for AlphaMasked] }
+    │
+    ▼
+[ALPHA_MASK] MaterialBuffer[vertexData.MaterialID] → baseColorFactor + alphaCutoff
+    → sample texture → if alpha < cutoff → discard
+    │
+    ▼
+SV_TARGET0 = float4(0,0,0,0)       ← deferred shading (lighting pass reads visibility buffer)
+SV_TARGET1 = PackVisBuffer(CandidateIndex, PrimitiveID)  ← visibility token for debug/resolve
+Depth      = HW rasterizer writes reverse-Z D32_FLOAT
+```
+
+---
+
+## 🐛 Known Bug — `VisibleMeshletsCounter` Invalid SRV Index
+
+### Symptom
+
+In `DispatchMeshletBinning()`, the binning shader `PrepareArgsCS` calls `GetNumMeshlets()` which reads `ResourceDescriptorHeap[VisibleMeshletsCounterIdx]`. The descriptor index passed was `-1` (0xFFFFFFFF), causing an invalid descriptor read and `numMeshlets` returning garbage.
+
+### Root Cause
+
+`m_VisibleMeshletsCounter` is created via `CreateBuffer(..., false, true)` — `createSRV=false, createUAV=true`. This means only a UAV descriptor is created; `srvIndex` retains its default `GPUBuffer` value of `-1`.
+
+Three of the four binning passes pass `m_VisibleMeshletsCounter.srvIndex` (`= -1`) as `BinningParams.VisibleMeshletsCounterIdx`:
+
+| Pass | Passes `VisibleMeshletsCounterIdx`? | Used in shader? |
+|---|---|---|
+| PrepareArgsCS | Yes | `GetNumMeshlets()` reads it |
+| ClassifyMeshletsCS | Yes | `GetNumMeshlets()` reads it |
+| AllocateBinRangesCS | **No** | Not set in params |
+| WriteBinsCS | Yes | `GetNumMeshlets()` reads it |
+
+### Fix
+
+Added a structured buffer SRV creation right after the `CreateBuffer` call in `Renderer::CreateMeshletResources()`:
+
+```cpp
+// Create a structured SRV for the counter so the binning passes
+// (MeshletBinning.hlsl) can read it via ResourceDescriptorHeap[].
+if (m_VisibleMeshletsCounter.srvIndex < 0)
+    m_VisibleMeshletsCounter.srvIndex = (int)GraphicsHelper::AllocateSRV();
+
+D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+srvDesc.Buffer.FirstElement = 0;
+srvDesc.Buffer.NumElements = 1;
+srvDesc.Buffer.StructureByteStride = sizeof(uint32_t);
+srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+m_Device->CreateShaderResourceView(
+    m_VisibleMeshletsCounter.resource.Get(), &srvDesc, srvHandle);
+```
+
+> ⚠️ **Important**: `CreateBuffer` creates raw SRVs (`D3D12_BUFFER_SRV_FLAG_RAW`). The binning shader uses `StructuredBuffer<uint>`, which requires `StructureByteStride=4` and `D3D12_BUFFER_SRV_FLAG_NONE`. A manually-created structured SRV is required.
+
+### Affected Files
+
+- `Sources/Renderer.cpp` — `CreateMeshletResources()` (line ~2926)

@@ -134,6 +134,11 @@ public:
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletTrianglesBufferAddress() const { return m_GlobalMeshletTriangles.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletBoundsBufferAddress() const { return m_GlobalMeshletBounds.gpuAddress; }
     size_t GetTotalMeshletCount() const { return m_TotalMeshletCount; }
+    // Returns the SRV heap index of GlobalPositions — the first of 9 contiguous meshlet stream SRVs
+    // (GlobalPositions[0], GlobalNormals[1], GlobalUVs[2], GlobalMeshlets[3], GlobalMeshletVertices[4],
+    //  GlobalMeshletTriangles[5], GlobalMeshletBounds[6], MeshData[7], InstanceData[8]).
+    // Root param 14 descriptor table (t0-t15 space3) must be set to this base.
+    int GetMeshletStreamSRVBase() const { return m_GlobalPositions.srvIndex; }
 
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;

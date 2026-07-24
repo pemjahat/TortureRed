@@ -142,9 +142,16 @@ public:
     void CreateMeshletResources();
     void CreateMeshletPipelines();
     void DispatchMeshletCull(class Model* model, const FrameConstants& frame);
-    void DispatchMeshletRasterize(class Model* model);
+    void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
+    void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
-    ID3D12PipelineState* GetMeshletRasterizePSO() const { return m_MeshletRasterizePSO.Get(); }
+
+    // Visibility buffer for meshlet debug overlay (plan001)
+    GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
+    int GetVisibleMeshletsSRVIndex() const { return m_VisibleMeshlets.srvIndex; }
+    ID3D12PipelineState* GetMeshletDebugViewPSO() const { return m_MeshletDebugViewPSO.Get(); }
+    int GetMeshletDebugMode() const { return m_MeshletDebugMode; }
+    void SetMeshletDebugMode(int mode) { m_MeshletDebugMode = mode; }
 
 private:
     void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
@@ -158,6 +165,7 @@ private:
 
     // DirectX 12 objects
     Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
+    Microsoft::WRL::ComPtr<ID3D12Device2> m_Device2; // For CreatePipelineState (pipeline state streams, mesh shader PSOs)
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CommandQueue;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CopyQueue;
     Microsoft::WRL::ComPtr<IDXGISwapChain4> m_SwapChain;
@@ -348,17 +356,42 @@ private:
     GPUBuffer m_VisibleMeshlets;            // RWStructuredBuffer<MeshletCandidate>
     GPUBuffer m_VisibleMeshletsCounter;     // RWBuffer<uint>
     GPUBuffer m_CullDispatchArgs;           // Indirect dispatch args for cull
-    GPUBuffer m_RasterizeDispatchArgs;      // Indirect draw args for rasterize
     GPUBuffer m_CullConstantsBuffer;        // Cull constants (total meshlets)
+
+    // Binning resources (4-pass GPU sort)
+    GPUBuffer m_MeshletCounts;              // RWStructuredBuffer<uint>[NUM_RASTER_BINS]
+    GPUBuffer m_MeshletOffsetAndCounts;     // RWStructuredBuffer<uint4>[NUM_RASTER_BINS] — (count,1,1,offset) per bin
+    GPUBuffer m_BinnedMeshlets;             // RWStructuredBuffer<uint>[MAX_VISIBLE_MESHLETS] — sorted indirection
+    GPUBuffer m_GlobalMeshletCounter;       // RWStructuredBuffer<uint>[1] — prefix-sum scratch
+    GPUBuffer m_ClassifyDispatchArgs;       // Indirect dispatch args for Classify/Write passes
+
+    // Debug: visibility buffer for meshlet debug overlay (plan001)
+    GPUTexture m_VisibilityBuffer;          // R32_UINT — packed (candidateIndex, primitiveID)
+    int m_MeshletDebugMode = 0;             // 0=Off, 1=Instance, 2=Meshlet, 3=Primitive
 
     // PSOs
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletCullPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterizePSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterizeMaskPSO; // Alpha-masked variant
 
-    // Root signature for meshlet passes (separate from main RS to keep it simple)
+    // Binning PSOs
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletBinPrepareArgsPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletClassifyPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletAllocateBinRangesPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletWriteBinsPSO;
+
+    // Mesh Shader raster PSOs — indexed by PipelineBin (0=Opaque, 1=AlphaMasked)
+    static constexpr uint32_t NUM_RASTER_BINS = 2;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];      // Normal render
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterDebugPSO[NUM_RASTER_BINS]; // Debug mode (writes vis buffer)
+
+    // Debug view PSO (VisibilityDebugView.hlsl CS)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
+
+    // Command signatures
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignatureCS;  // Indirect Dispatch (for binning)
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchMeshSignature;       // Indirect DispatchMesh (for rasterize)
+
+    // Root signature for meshlet cull pass (separate from main RS)
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshletRootSignature;
-    Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_MeshletCommandSignature;
 
     // Prevent copying
     Renderer(const Renderer&) = delete;

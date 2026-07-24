@@ -79,4 +79,14 @@ bool FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 vi
     return !culled;
 }
 
+// --- Wireframe edge detection from barycentric coordinates ---
+// Returns 0 on edges, 1 in interior. Use: color *= saturate(Wireframe(bary) + 0.8)
+float Wireframe(float3 barycentrics, float thickness = 0.2f, float smoothing = 1.0f)
+{
+    float3 deltas = fwidth(barycentrics);
+    float3 bary   = smoothstep(deltas * thickness, deltas * (thickness + smoothing), barycentrics);
+    float  minBary = min(bary.x, min(bary.y, bary.z));
+    return minBary;
+}
+
 #endif // MESHLET_COMMON_HLSLI

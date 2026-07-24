@@ -598,45 +598,90 @@ void Application::Render()
             }
 
             {
+                MICROPROFILE_SCOPEI("Render", "MeshletBinning", MP_YELLOW);
+                MICROPROFILE_SCOPEGPUI("MeshletBinning", MP_YELLOW);
+                m_Renderer.DispatchMeshletBinning();
+            }
+
+            {
                 MICROPROFILE_SCOPEI("Render", "MeshletForward", MP_BLUE);
                 MICROPROFILE_SCOPEGPUI("MeshletForward", MP_BLUE);
 
-                // Render target: HDR texture (same as deferred path output)
+                // Render targets: HDR color (SV_Target0) + visibility buffer (SV_Target1)
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
-                D3D12_CPU_DESCRIPTOR_HANDLE dsv    = gbuffer.depth.dsvHandle;
-                cmdList->OMSetRenderTargets(1, &hdrRtv, FALSE, &dsv);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = {
+                    m_Renderer.GetRasterHdrOutputTex().rtvHandle,
+                    m_Renderer.GetVisibilityBuffer().rtvHandle
+                };
+                D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
+                cmdList->OMSetRenderTargets(2, rtvs, FALSE, &dsv);
 
-                const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-                cmdList->ClearRenderTargetView(hdrRtv, clearCol, 0, nullptr);
+                const float clearCol[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+                const float clearVis[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+                cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[1], clearVis, 0, nullptr);
                 cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
                 m_Renderer.DispatchMeshletRasterize(&m_Model);
-            }
 
-            // Transparency pass (forward) — uses existing Model::Render for alpha-blended geometry
-            {
-                MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
-                MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
+                // Meshlet debug overlay (plan001 phase 2)
+                if (m_Renderer.GetMeshletDebugMode() > 0)
+                {
+                    MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
 
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
-                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
-                D3D12_CPU_DESCRIPTOR_HANDLE dsv    = gbuffer.depth.dsvHandle;
-                cmdList->OMSetRenderTargets(1, &hdrRtv, FALSE, &dsv);
+                    // Transition visibility buffer: RTV → SRV for compute read
+                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-                // Use existing transparent PSO (reuses the old vertex-buffer path for alpha)
-                bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled();
-                cmdList->SetPipelineState(rasterTaaActive
-                    ? m_Renderer.GetTransparentHdrPSO()
-                    : m_Renderer.GetTransparentPSO());
-                m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
+                    // Transition color output: RTV → UAV for compute write
+                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(),
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                    cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
+                    cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
+
+                    // Bind frame CB at root param 0 (used for viewProj matrix in barycentric calc)
+                    cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
+
+                    // Pass debug params via root constants slot 13 (b2)
+                    // [Mode, VisBufSRVIdx, CandidatesSRVIdx, OutputUAVIdx, Width, Height]
+                    struct {
+                        uint32_t Mode;
+                        uint32_t VisBufSRVIdx;
+                        uint32_t CandidatesSRVIdx;
+                        uint32_t OutputUAVIdx;
+                        uint32_t Width;
+                        uint32_t Height;
+                    } debugParams;
+                    debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
+                    debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
+                    debugParams.CandidatesSRVIdx = (uint32_t)m_Renderer.GetVisibleMeshletsSRVIndex();
+                    debugParams.OutputUAVIdx     = m_Renderer.GetRasterHdrOutputTex().uavIndex;
+                    debugParams.Width            = m_InternalWidth;
+                    debugParams.Height           = m_InternalHeight;
+                    cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
+
+                    // Dispatch one thread per 8×8 tile
+                    cmdList->Dispatch(
+                        (m_InternalWidth  + 7) / 8,
+                        (m_InternalHeight + 7) / 8, 1);
+
+                    // Barrier + transition: UAV write complete, back to RENDER_TARGET for subsequent passes
+                    D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(
+                        m_Renderer.GetRasterHdrOutputTex().resource.Get());
+                    cmdList->ResourceBarrier(1, &uavBarrier);
+                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(),
+                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
             }
         }
         else
         {
             // 1. Depth Pre-Pass
+            if (m_EnableDepthPrePass)
             {
                 MICROPROFILE_SCOPEI("Render", "DepthPrePass", MP_GREY);
                 MICROPROFILE_SCOPEGPUI("DepthPrePass", MP_GREY);
@@ -683,192 +728,195 @@ void Application::Render()
                 m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Opaque);
                 //m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Mask);
             }
-            
-            // 2.5 ReSTIR DI Passes (direct illumination from local lights)
+        } // closes non-meshlet else branch (DepthPrePass + GBuffer)
+        // The meshlet path (Cull + Binning + MeshShader) also writes albedo/normal/material/depth
+        // into the same GBuffer targets, so all passes below run identically for both paths.
+
+        // -----------------------------------------------------------------------
+        // UNION PATH — runs after both meshlet and non-meshlet geometry branches.
+        // GBuffer (albedo, normal, material, depth) is now populated by either path.
+        // -----------------------------------------------------------------------
+
+        // ReSTIR DI — direct illumination from local lights, reads GBuffer depth + material
+        {
+            MICROPROFILE_SCOPEI("Render", "ReSTIR_DI", MP_RED);
+            MICROPROFILE_SCOPEGPUI("ReSTIR_DI", MP_RED);
+            m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+        }
+
+        // ReSTIR GI — indirect illumination, reads GBuffer albedo + normal + depth
+        {
+            MICROPROFILE_SCOPEI("Render", "ReSTIR_GI", MP_PURPLE);
+            MICROPROFILE_SCOPEGPUI("ReSTIR_GI", MP_PURPLE);
+            m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
+        }
+
+        const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
+
+        // Determine if any full-screen debug mode is active.
+        // When true, FullScreenDebug.hlsl replaces Lighting.hlsl entirely.
+        const bool debugActive =
+            (m_FrameConstants.sharcDebug != 0) ||
+            (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
+            (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
+
+        // Lighting Pass (or FullScreenDebug Pass when debug is active)
+        // Reads GBuffer SRVs + FinalDiffuse/FinalSpecular from ReSTIR passes above.
+        // When TAA is active: renders to internal-res RasterHdrOutputTex (no tonemapping).
+        // When TAA is off:    renders directly to output-res back buffer (with tonemapping).
+        {
+            MICROPROFILE_SCOPEI("Render", "Lighting", MP_CYAN);
+            MICROPROFILE_SCOPEGPUI("Lighting", MP_CYAN);
+            BindlessIndices indices = {};
+
+            // Transition G-Buffer targets to SRV state
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+            // FinalDiffuse/FinalSpecular contain NRD-normalized radiance from ReSTIR passes.
+            if ((m_FrameConstants.enableRestirDI || m_FrameConstants.enableRasterIndirectGI) && !debugActive)
             {
-                MICROPROFILE_SCOPEI("Render", "ReSTIR_DI", MP_RED);
-                MICROPROFILE_SCOPEGPUI("ReSTIR_DI", MP_RED);
-                m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalDiffuseTex(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                indices.InputIdx0 = m_Renderer.GetFinalDiffuseTex().srvIndex;
+                indices.InputIdx1 = m_Renderer.GetFinalSpecularTex().srvIndex;
             }
 
-            // 2.6 ReSTIR GI Passes
+            if (debugActive)
             {
-                MICROPROFILE_SCOPEI("Render", "ReSTIR_GI", MP_PURPLE);
-                MICROPROFILE_SCOPEGPUI("ReSTIR_GI", MP_PURPLE);
-                m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFullScreenDebugTex(),
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                indices.InputIdx0 = m_Renderer.GetFullScreenDebugTex().srvIndex;
             }
 
-            const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
+            cmdList->SetGraphicsRootShaderResourceView(1, m_Model.GetMaterialBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
+            cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
 
-            // Determine if any full-screen debug mode is active.
-            // When true, FullScreenDebug.hlsl replaces Lighting.hlsl entirely —
-            // no BSDF evaluation, no shadow rays, no NRD material factors.
-            const bool debugActive =
-                (m_FrameConstants.sharcDebug != 0) ||
-                (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
-                (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
+            cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
-            // 3. Lighting Pass (or FullScreenDebug Pass when debug is active)
-            // When TAA is active: render to internal-res HDR texture (no tonemapping).
-            // When TAA is off:    render directly to output-res back buffer (with tonemapping).
-            {
-                MICROPROFILE_SCOPEI("Render", "Lighting", MP_CYAN);
-                MICROPROFILE_SCOPEGPUI("Lighting", MP_CYAN);
-                BindlessIndices indices = {};
-
-                // Transition G-Buffer targets to SRV state
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.material, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
-                // FinalDiffuse/FinalSpecular are the universal interchange textures.
-                // They contain NRD-normalized radiance (raw or denoised) for all active sources.
-                // Lighting always reads from them — no branching on NRD or DI/GI state.
-                if ((m_FrameConstants.enableRestirDI || m_FrameConstants.enableRasterIndirectGI) && !debugActive)
-                {
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalDiffuseTex(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    indices.InputIdx0 = m_Renderer.GetFinalDiffuseTex().srvIndex;
-                    indices.InputIdx1 = m_Renderer.GetFinalSpecularTex().srvIndex;
-                }
-
-                // When any full-screen debug mode is active, FullScreenDebug.hlsl
-                // reads the unified FullScreenDebugTex (R16G16B16A16) via InputIdx0.
-                // All debug data is pre-combined into this texture by upstream passes.
-                if (debugActive)
-                {
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetFullScreenDebugTex(),
-                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                    indices.InputIdx0 = m_Renderer.GetFullScreenDebugTex().srvIndex;
-                }
-
-                // Need this binding for shadow ray in pixel shader
-                cmdList->SetGraphicsRootShaderResourceView(1, m_Model.GetMaterialBufferAddress());
-                cmdList->SetGraphicsRootShaderResourceView(2, m_Model.GetDrawNodeBufferAddress());
-                cmdList->SetGraphicsRootShaderResourceView(5, m_Model.GetGlobalIndexBufferAddress());
-                cmdList->SetGraphicsRootShaderResourceView(6, m_Model.GetGlobalVertexBufferAddress());
-
-                cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
-
-                if (rasterTaaActive)
-                {
-                    // Render to internal-res HDR texture for TAA input
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-                    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
-                    cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, nullptr);
-
-                    const float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    cmdList->ClearRenderTargetView(hdrRtvHandle, clearColor, 0, nullptr);
-
-                    // Keep viewport at internal resolution (already set above)
-                    // Use debug or HDR lighting PSO
-                    cmdList->SetPipelineState(debugActive
-                        ? m_Renderer.GetFullScreenDebugHdrPSO()
-                        : m_Renderer.GetLightingHdrPSO());
-                }
-                else
-                {
-                    // Switch to output resolution viewport for direct-to-backbuffer rendering
-                    D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
-                    D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
-                    cmdList->RSSetViewports(1, &outputViewport);
-                    cmdList->RSSetScissorRects(1, &outputScissor);
-
-                    // Transition backbuffer to RTV
-                    m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-                    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-                    cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-                    const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
-                    cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-
-                    // Select appropriate PSO: shadow-map debug → lighting → full-screen debug
-                    cmdList->SetPipelineState(
-                        m_DebugShadowMap ? m_Renderer.GetDebugPSO() :
-                        debugActive      ? m_Renderer.GetFullScreenDebugPSO() :
-                                        m_Renderer.GetLightingPSO());
-                }
-
-                cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
-            }
-
-            // 4. Transparency Pass (Forward)
-            // Runs BEFORE TAA so that transparent geometry is temporally accumulated.
-            // In the TAA path: renders into RasterHdrOutputTex at internal resolution,
-            //   depth-tested against the G-buffer depth (also at internal resolution).
-            // In the non-TAA path: renders directly to the back buffer at output resolution.
-            {
-                MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
-                MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
-
-                // Ensure depth is in read state for forward pass
-                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
-
-                D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
-
-                if (rasterTaaActive)
-                {
-                    // Render into the HDR intermediate texture (same target as the lighting pass).
-                    // Viewport stays at internal resolution — already set at the top of Render().
-                    GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
-                    cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
-                }
-                else
-                {
-                    // Non-TAA: render directly to the back buffer at output resolution.
-                    // Internal resolution == output resolution in this path (enforced at
-                    // initialization and on AA mode toggle), so the G-buffer depth covers
-                    // the full viewport and can be bound as DSV safely.
-                    D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
-                    D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
-                    cmdList->RSSetViewports(1, &outputViewport);
-                    cmdList->RSSetScissorRects(1, &outputScissor);
-
-                    m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
-                    cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-                }
-
-                // TAA path: use HDR PSO (R16G16B16A16_FLOAT, no tonemapping) to match RasterHdrOutputTex.
-                // Non-TAA path: use LDR PSO (R8G8B8A8_UNORM, with tonemapping) to match back buffer.
-                ID3D12PipelineState* transparentPSO = rasterTaaActive
-                    ? m_Renderer.GetTransparentHdrPSO()
-                    : m_Renderer.GetTransparentPSO();
-
-                if (transparentPSO)
-                {
-                    cmdList->SetPipelineState(transparentPSO);
-                    m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
-                }
-            }
-
-            // 3.5 TAA post-processing for rasterizer path
             if (rasterTaaActive)
             {
-                // Generate motion vectors from depth + viewProj matrices
-                {
-                    MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
-                    MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
-                    m_Renderer.GenerateMotionVectors(m_FrameConstants);
-                }
-                // Run TAA on the HDR rasterizer output (which now includes transparency),
-                // then copy TAA output to back buffer
-                {
-                    MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
-                    MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
-                    m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
-                }
-                {
-                    MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
-                    m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
-                }
+                // Render to internal-res HDR texture for TAA input
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
+                cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, nullptr);
+
+                const float clearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                cmdList->ClearRenderTargetView(hdrRtvHandle, clearColor, 0, nullptr);
+
+                cmdList->SetPipelineState(debugActive
+                    ? m_Renderer.GetFullScreenDebugHdrPSO()
+                    : m_Renderer.GetLightingHdrPSO());
+            }
+            else
+            {
+                // Switch to output resolution viewport for direct-to-backbuffer rendering
+                D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+                D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+                cmdList->RSSetViewports(1, &outputViewport);
+                cmdList->RSSetScissorRects(1, &outputScissor);
+
+                m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+                cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+                const float clearColor[] = { m_Renderer.m_BackgroundColor[0], m_Renderer.m_BackgroundColor[1], m_Renderer.m_BackgroundColor[2], 1.0f };
+                cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+                cmdList->SetPipelineState(
+                    m_DebugShadowMap ? m_Renderer.GetDebugPSO() :
+                    debugActive      ? m_Renderer.GetFullScreenDebugPSO() :
+                                       m_Renderer.GetLightingPSO());
+            }
+
+            cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
+        }
+
+        // Transparency Pass (Forward)
+        // Runs BEFORE TAA so that transparent geometry is temporally accumulated.
+        // In the TAA path: renders into RasterHdrOutputTex at internal resolution,
+        //   depth-tested against the G-buffer depth (also at internal resolution).
+        // In the non-TAA path: renders directly to the back buffer at output resolution.
+        {
+            MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
+            MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
+
+            // Ensure depth is in read state for forward pass
+            GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = gbuffer.depth.dsvHandle;
+
+            if (rasterTaaActive)
+            {
+                // Render into the HDR intermediate texture (same target as the geometry pass).
+                // Viewport stays at internal resolution — already set at the top of Render().
+                GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = m_Renderer.GetRasterHdrOutputTex().rtvHandle;
+                cmdList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
+            }
+            else
+            {
+                // Non-TAA: render directly to the back buffer at output resolution.
+                // Internal resolution == output resolution in this path (enforced at
+                // initialization and on AA mode toggle), so the G-buffer depth covers
+                // the full viewport and can be bound as DSV safely.
+                D3D12_VIEWPORT outputViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_OutputWidth), static_cast<float>(m_OutputHeight));
+                D3D12_RECT outputScissor = CD3DX12_RECT(0, 0, m_OutputWidth, m_OutputHeight);
+                cmdList->RSSetViewports(1, &outputViewport);
+                cmdList->RSSetScissorRects(1, &outputScissor);
+
+                m_Renderer.TransitionBackBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_Renderer.GetCurrentBackBufferRTV();
+                cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+            }
+
+            // TAA path: use HDR PSO (R16G16B16A16_FLOAT, no tonemapping) to match RasterHdrOutputTex.
+            // Non-TAA path: use LDR PSO (R8G8B8A8_UNORM, with tonemapping) to match back buffer.
+            ID3D12PipelineState* transparentPSO = rasterTaaActive
+                ? m_Renderer.GetTransparentHdrPSO()
+                : m_Renderer.GetTransparentPSO();
+
+            if (transparentPSO)
+            {
+                cmdList->SetPipelineState(transparentPSO);
+                m_Model.Render(cmdList, &m_Renderer, frustum, AlphaMode::Blend);
             }
         }
-    } // closes if (!m_UseMeshlet) meshlet branch
+
+        // TAA post-processing (shared by both meshlet and non-meshlet paths)
+        if (rasterTaaActive)
+        {
+            // Generate motion vectors from depth + viewProj matrices
+            {
+                MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
+                MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
+                m_Renderer.GenerateMotionVectors(m_FrameConstants);
+            }
+            // Run TAA on the HDR output (which now includes transparency),
+            // then copy TAA output to back buffer
+            {
+                MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
+                MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
+                m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
+            }
+            {
+                MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+                m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
+            }
+        }
+        else
+        {
+            // Non-TAA: copy HDR output directly to back buffer.
+            MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+            m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetRasterHdrOutputTex());
+        }
+    } // closes raster (non-path-tracer) branch
 
 
     // Prepare back buffer for ImGui rendering at full output resolution.
@@ -928,6 +976,20 @@ void Application::RenderImGui()
     ImGui::Checkbox("Use Meshlet Rendering", &m_UseMeshlet);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Forward render using meshlet pipeline (GPU frustum culling + vertex pulling).\nOff = standard vertex-buffer deferred path.");
+
+    if (m_UseMeshlet && m_Model.IsMeshletReady())
+    {
+        const char* debugModes[] = { "Off", "InstanceID", "MeshletID", "PrimitiveID" };
+        int debugMode = m_Renderer.GetMeshletDebugMode();
+        if (ImGui::Combo("Meshlet Debug View", &debugMode, debugModes, IM_ARRAYSIZE(debugModes)))
+            m_Renderer.SetMeshletDebugMode(debugMode);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Overlay meshlet debug visualization.\nInstanceID = random color per instance\nMeshletID = random color per meshlet\nPrimitiveID = random color per triangle (wireframe)");
+    }
+    else if (m_Renderer.GetMeshletDebugMode() != 0)
+    {
+        m_Renderer.SetMeshletDebugMode(0); // Reset debug when meshlet is disabled
+    }
 
     if (m_Renderer.IsRayTracingSupported())
     {
