@@ -130,7 +130,7 @@ if(WIN32)
     # microprofile uses Winsock for socket-based dump (MicroProfileSocketDumpState)
     target_link_libraries(microprofile PUBLIC ws2_32.lib)
 endif()
-if(MSVC)
+if(MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     # microprofile.cpp is large; disable some warnings to keep build output clean
     target_compile_options(microprofile PRIVATE /W0 /bigobj)
 endif()
@@ -296,7 +296,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 )
 
 # Compiler warnings
-if(MSVC)
+if(MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(${PROJECT_NAME} PRIVATE /W4)
 else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)

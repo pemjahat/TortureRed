@@ -59,6 +59,78 @@
                 "focus": false,
                 "panel": "shared"
             }
+        },
+        {
+            "label": "build-llvm-debug",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "--preset",
+                "llvm-debug"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile",
+            "dependsOn": ["configure-llvm-debug"],
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "build-llvm-release",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "--preset",
+                "llvm-release"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile",
+            "dependsOn": ["configure-llvm-release"],
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "configure-llvm-release",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--preset",
+                "llvm-release"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "configure-llvm-debug",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--preset",
+                "llvm-debug"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            }
         }
     ]
 }

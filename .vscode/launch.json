@@ -26,6 +26,30 @@
             "console": "integratedTerminal",
             "preLaunchTask": "build-release",
             "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "Debug TortureRed (LLVM)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/Bin/Debug/TortureRed.exe",
+            "args": [],
+            "stopOnEntry": false,
+            "cwd": "${workspaceFolder}/Bin/Debug",
+            "console": "integratedTerminal",
+            "preLaunchTask": "build-llvm-debug",
+            "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            "name": "Release TortureRed (LLVM)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/Bin/Release/TortureRed.exe",
+            "args": [],
+            "stopOnEntry": false,
+            "cwd": "${workspaceFolder}/Bin/Release",
+            "console": "integratedTerminal",
+            "preLaunchTask": "build-llvm-release",
+            "internalConsoleOptions": "openOnSessionStart"
         }
     ]
 }

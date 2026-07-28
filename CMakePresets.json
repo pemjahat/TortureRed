@@ -1,0 +1,116 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "inherits": "base",
+      "displayName": "MSVC Release",
+      "description": "Build with MSVC in Release mode",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "base",
+      "displayName": "MSVC Debug",
+      "description": "Build with MSVC in Debug mode",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "llvm-release",
+      "inherits": "base",
+      "displayName": "LLVM/Clang Release",
+      "description": "Build with LLVM/Clang (ClangCL) in Release mode",
+      "toolset": {
+        "value": "ClangCL",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "llvm-debug",
+      "inherits": "base",
+      "displayName": "LLVM/Clang Debug",
+      "description": "Build with LLVM/Clang (ClangCL) in Debug mode",
+      "toolset": {
+        "value": "ClangCL",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "llvm-ninja-release",
+      "displayName": "LLVM/Clang Ninja Release",
+      "description": "Build with standalone LLVM/Clang + Ninja in Release mode (requires clang-cl on PATH)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+    {
+      "name": "llvm-ninja-debug",
+      "displayName": "LLVM/Clang Ninja Debug",
+      "description": "Build with standalone LLVM/Clang + Ninja in Debug mode (requires clang-cl on PATH)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "msvc-release",
+      "configurePreset": "msvc-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-debug",
+      "configurePreset": "msvc-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "llvm-release",
+      "configurePreset": "llvm-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "llvm-debug",
+      "configurePreset": "llvm-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "llvm-ninja-release",
+      "configurePreset": "llvm-ninja-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "llvm-ninja-debug",
+      "configurePreset": "llvm-ninja-debug",
+      "configuration": "Debug"
+    }
+  ]
+}
