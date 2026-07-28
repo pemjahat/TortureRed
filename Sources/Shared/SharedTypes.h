@@ -257,7 +257,7 @@ struct MeshData {
     uint MeshletBoundsOffset;   // Element offset into GlobalMeshletBounds[]   (MeshletBounds)
     uint MeshletCount;
     uint MaterialIndex;
-    uint _pad0;
+    uint GlobalMeshletStart;   // Global meshlet index where this entry's meshlets begin (CPU prefix-sum)
     uint _pad1;
     uint _pad2;
 };
@@ -276,6 +276,11 @@ struct MeshletCandidate {
     uint MeshletIndex;  // Per-mesh meshlet index
 };
 
+struct MeshletCandidateDebug {
+    uint VertexCount;
+    uint TriangleCount;
+};
+
 // =============================================================================
 // Meshlet Binning / Rasterize Params (shared CPU/GPU, passed via root constants b1)
 // =============================================================================
@@ -292,6 +297,7 @@ struct BinningParams {
     uint RWBinnedMeshletsIdx;           // UAV index of BinnedMeshlets[]
     uint RWGlobalMeshletCounterIdx;     // UAV index of GlobalMeshletCounter
     uint RWDispatchArgumentsIdx;        // UAV index of ClassifyDispatchArgs
+    uint RWDispatchMeshArgsIdx;         // UAV index of DispatchMeshArgs[] — uint3[NUM_BINS], used as INDIRECT_ARGUMENT
 };
 
 // Passed to the Mesh Shader rasterize pass via root param 12 (b1).
@@ -300,6 +306,16 @@ struct RasterParams {
     uint VisibleMeshletsIdx;    // SRV index of VisibleMeshlets[]
     uint BinnedMeshletsIdx;     // SRV index of BinnedMeshlets[]
     uint MeshletBinDataIdx;     // SRV index of MeshletOffsetAndCounts[]
+};
+
+// Passed to the debug mesh shader (MeshletRasterizeDebugMS.hlsl) via root param 12 (b1).
+// CPU iterates all meshlets and issues one DispatchMesh(1,1,1) per meshlet,
+// setting InstanceID and MeshletIndex directly — no binning indirection.
+struct DebugRasterParams {
+    uint InstanceID;    // Index into GlobalInstanceData[]
+    uint MeshletIndex;  // Per-instance local meshlet index (into md.MeshletOffset + MeshletIndex)
+    uint _pad0;
+    uint _pad1;
 };
 
 #endif // SHARED_TYPES_H

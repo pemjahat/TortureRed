@@ -716,10 +716,44 @@ void Model::UpdateNodeBuffer()
         memcpy(m_DrawNodeBuffer.cpuPtr, m_DrawNodeData.data(), m_DrawNodeData.size() * sizeof(DrawNodeData));
     }
 
-    // Also update InstanceData transforms (meshlet path)
+    // InstanceData transform update (meshlet path).
+    // Mirrors the iteration order of CreateMeshletResources() exactly:
+    //   same node loop, same primitive loop, same skip conditions.
+    // This guarantees InstanceDataArray[instIdx] always corresponds to
+    // MeshDataArray[instIdx] without relying on a stored NodeIndex field.
+    // Walks parent chain accumulating on the RIGHT:
+    //   world = node.local × parent.local × ... × root.local
+    // (Matches UpdateNodeBufferRecursive: world = node->transform * parentWorld.)
     if (m_InstanceDataBuffer.cpuPtr && !m_InstanceDataArray.empty())
     {
-        memcpy(m_InstanceDataBuffer.cpuPtr, m_InstanceDataArray.data(), m_InstanceDataArray.size() * sizeof(InstanceData));
+        size_t instIdx = 0;
+        for (size_t nodeIdx = 0; nodeIdx < m_GltfModel.nodes.size(); ++nodeIdx)
+        {
+            GLTFNode& node = m_GltfModel.nodes[nodeIdx];
+            if (!node.mesh)
+                continue;
+
+            for (auto& prim : node.mesh->primitives)
+            {
+                if (prim.vertices.empty())
+                    continue;
+                if (instIdx >= m_InstanceDataArray.size())
+                    break;
+
+                DirectX::XMMATRIX world = DirectX::XMMatrixIdentity();
+                const GLTFNode* n = &node;
+                while (n)
+                {
+                    world = DirectX::XMMatrixMultiply(
+                        world, DirectX::XMLoadFloat4x4(&n->transform));
+                    n = n->parent;
+                }
+                DirectX::XMStoreFloat4x4(&m_InstanceDataArray[instIdx].LocalToWorld, world);
+                instIdx++;
+            }
+        }
+        memcpy(m_InstanceDataBuffer.cpuPtr, m_InstanceDataArray.data(),
+               m_InstanceDataArray.size() * sizeof(InstanceData));
     }
 }
 
@@ -734,11 +768,10 @@ void Model::UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTr
             uint32_t nodeDataIndex = node->nodeDataOffset + i;
             DirectX::XMStoreFloat4x4(&m_DrawNodeData[nodeDataIndex].world, world);
 
-            // Also update InstanceData for meshlet path
-            if (nodeDataIndex < static_cast<uint32_t>(m_InstanceDataArray.size()))
-            {
-                DirectX::XMStoreFloat4x4(&m_InstanceDataArray[nodeDataIndex].LocalToWorld, world);
-            }
+            // Note: InstanceData transforms are not updated here.
+            // They are computed independently by walking the node's parent
+            // chain (same as D3D12_Research's cgltf_node_transform_world).
+            // See UpdateNodeBuffer() for the per-frame animation update path.
         }
     }
 
@@ -1157,14 +1190,6 @@ void Model::UploadBuffers(Renderer* renderer)
         batch.Upload(m_MeshDataBuffer, m_MeshDataArray.data(), m_MeshDataArray.size() * sizeof(MeshData));
         batch.Transition(m_MeshDataBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
     }
-    // InstanceData is UPLOAD heap (cpuPtr mapped), so we write directly — no staging needed.
-    // This initialises LocalToWorld for every instance before the first frame.
-    // (UpdateNodeBuffer() keeps it in sync each frame after animation updates.)
-    // if (m_InstanceDataBuffer.cpuPtr && !m_InstanceDataArray.empty())
-    // {
-    //     memcpy(m_InstanceDataBuffer.cpuPtr, m_InstanceDataArray.data(),
-    //            m_InstanceDataArray.size() * sizeof(InstanceData));
-    // }
     batch.End();
 }
 
@@ -1419,16 +1444,10 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
 
     meshlets.resize(meshletCount);
     meshletVertices.resize(meshlets.back().vertex_offset + meshlets.back().vertex_count);
-    meshletTriangles.resize((meshlets.back().triangle_offset + meshlets.back().triangle_count) * 3);
+    // meshopt pads each meshlet's triangle data to a 4-byte boundary — trim with alignment
+    meshletTriangles.resize(meshlets.back().triangle_offset + ((meshlets.back().triangle_count * 3 + 3) & ~3));
 
-    // Per-meshlet optimization + AABB computation
-    for (auto& m : meshlets)
-    {
-        meshopt_optimizeMeshlet(
-            &meshletVertices[m.vertex_offset],
-            &meshletTriangles[m.triangle_offset],
-            m.triangle_count, m.vertex_count);
-    }
+    // Per-meshlet optimization — must run before packing so we read the optimized triangle order
 
     // --- Pack into GPU-ready Meshlet structs ---
     // Store in CPU-side vectors for later upload to global buffers
@@ -1445,26 +1464,36 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
     // Copy meshlet vertices (indirection table) — these are uint32 indices
     allMeshletVertices.assign(meshletVertices.begin(), meshletVertices.end());
 
+    // Running sequential offset into allMeshletTriangles (re-packed, 0-based per primitive).
+    // meshopt's m.triangle_offset is a raw byte-triplet index into its internal uint8 buffer
+    // and must NOT be stored directly — the re-packed allMeshletTriangles is sequential.
+    uint32_t runningTriOffset = 0;
+
     for (auto& m : meshlets)
     {
         // GPU Meshlet header
         Meshlet gm;
-        gm.VertexOffset   = m.vertex_offset;
-        gm.TriangleOffset = m.triangle_offset;
+        gm.VertexOffset   = m.vertex_offset;   // valid: allMeshletVertices is a direct copy of meshletVertices[]
+        gm.TriangleOffset = runningTriOffset;   // sequential offset into re-packed allMeshletTriangles[]
         gm.VertexCount    = m.vertex_count;
         gm.TriangleCount  = m.triangle_count;
         allMeshlets.push_back(gm);
 
-        // Pack triangles into MeshletTriangle struct
+        // Optimize meshlet vertex/triangle order, then pack triangles sequentially.
+        // pSrcTri points into the 4-byte-padded meshopt buffer at the correct byte offset.
+        uint8_t* pSrcTri = meshletTriangles.data() + m.triangle_offset;
+        meshopt_optimizeMeshlet(&meshletVertices[m.vertex_offset], pSrcTri,
+                                m.triangle_count, m.vertex_count);
+
         for (uint32_t t = 0; t < m.triangle_count; ++t)
         {
-            uint8_t* triBase = &meshletTriangles[(m.triangle_offset + t) * 3];
             MeshletTriangle mt;
-            mt.V0 = triBase[0];
-            mt.V1 = triBase[1];
-            mt.V2 = triBase[2];
+            mt.V0 = *pSrcTri++;
+            mt.V1 = *pSrcTri++;
+            mt.V2 = *pSrcTri++;
             allMeshletTriangles.push_back(mt);
         }
+        runningTriOffset += m.triangle_count;   // advance by actual triangle count
 
         // Compute AABB bounds
         float3 minBounds = { FLT_MAX, FLT_MAX, FLT_MAX };
@@ -1528,8 +1557,9 @@ void Model::CreateMeshletResources(Renderer* renderer)
                 continue;
 
             MeshData md = {};
-            md.MeshletCount    = static_cast<uint32_t>(prim.meshlets.size());
-            md.MaterialIndex   = prim.materialIndex;
+            md.MeshletCount        = static_cast<uint32_t>(prim.meshlets.size());
+            md.MaterialIndex       = prim.materialIndex;
+            md.GlobalMeshletStart  = static_cast<uint32_t>(m_TotalMeshletCount);
 
             // Source vertex streams (positions, normals, UVs)
             md.PositionOffset = static_cast<uint32_t>(m_AllPositions.size());
@@ -1557,9 +1587,25 @@ void Model::CreateMeshletResources(Renderer* renderer)
             m_MeshDataArray.push_back(md);
             m_TotalMeshletCount += md.MeshletCount;
 
-            // Per-instance data (matches DrawNodeData cardinality)
+            // Per-instance data: one entry per node-primitive.
+            // Compute the world transform at load time by walking the node's
+            // parent chain — same approach as D3D12_Research's cgltf_node_transform_world().
+            // No dependency on UpdateNodeBufferRecursive().
             InstanceData inst = {};
-            DirectX::XMStoreFloat4x4(&inst.LocalToWorld, DirectX::XMMatrixIdentity());
+            {
+                // Walk parent chain from node up to root, accumulating on the
+                // RIGHT:  world = node.local × parent.local × ... × root.local
+                // This matches UpdateNodeBufferRecursive: world = node->transform * parentWorld.
+                DirectX::XMMATRIX world = DirectX::XMMatrixIdentity();
+                const GLTFNode* n = &node;
+                while (n)
+                {
+                    world = DirectX::XMMatrixMultiply(
+                        world, DirectX::XMLoadFloat4x4(&n->transform));
+                    n = n->parent;
+                }
+                DirectX::XMStoreFloat4x4(&inst.LocalToWorld, world);
+            }
             inst.MeshDataIndex = static_cast<uint32_t>(m_MeshDataArray.size() - 1);
             m_InstanceDataArray.push_back(inst);
         }
@@ -1604,5 +1650,5 @@ void Model::CreateMeshletResources(Renderer* renderer)
     std::cout << "[Meshlet] Uploaded " << m_TotalMeshletCount << " total meshlets across "
               << m_MeshDataArray.size() << " primitives." << std::endl;
     std::cout << "[Meshlet]  Positions: " << m_AllPositions.size() << "  Normals: " << m_AllPackedNormals.size()
-              << "  UVs: " << m_AllPackedUVs.size() << std::endl;
+              << "  UVs: " << m_AllPackedUVs.size() << "  Triangles: " << m_AllMeshletTriangles.size() << std::endl;
 }

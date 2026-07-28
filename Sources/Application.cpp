@@ -588,9 +588,44 @@ void Application::Render()
     {
         if (m_UseMeshlet && m_Model.IsMeshletReady())
         {
-            // --- Meshlet Forward Rendering ---
-            // Single pass: GPU frustum cull + VS vertex-pulling + PS forward shading.
-            // Writes directly to RasterHdrOutputTex (HDR) + depth, bypassing GBuffer/deferred.
+            // --- DispatchMeshletRasterizeDebug ---
+            // CPU-driven path: iterates every meshlet and issues one DispatchMesh(1,1,1) per meshlet.
+            // No GPU culling or binning — used to verify meshlet data correctness in isolation.
+            // The full GPU-driven path (Cull → Binning → ExecuteIndirect) is commented out below.
+            {
+                MICROPROFILE_SCOPEI("Render", "MeshletDebugDirect", MP_BLUE);
+                MICROPROFILE_SCOPEGPUI("MeshletDebugDirect", MP_BLUE);
+
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo,   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.normal,   D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.depth,    D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+                    gbuffer.albedo.rtvHandle,
+                    gbuffer.normal.rtvHandle,
+                    gbuffer.material.rtvHandle,
+                    m_Renderer.GetVisibilityBuffer().rtvHandle
+                };
+                D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
+                cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+
+                const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[3], clearCol, 0, nullptr);
+                cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+                m_Renderer.DispatchMeshletRasterizeDebug(&m_Model);
+            }
+
+            // ---------------------------------------------------------------
+            // COMMENTED OUT: full GPU-driven meshlet path (Cull → Binning → ExecuteIndirect).
+            // Re-enable once DispatchMeshletRasterizeDebug confirms meshlet data is correct.
+            // ---------------------------------------------------------------
+            /*
             {
                 MICROPROFILE_SCOPEI("Render", "MeshletCull", MP_GREEN);
                 MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
@@ -607,47 +642,41 @@ void Application::Render()
                 MICROPROFILE_SCOPEI("Render", "MeshletForward", MP_BLUE);
                 MICROPROFILE_SCOPEGPUI("MeshletForward", MP_BLUE);
 
-                // Render targets: HDR color (SV_Target0) + visibility buffer (SV_Target1)
-                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = {
-                    m_Renderer.GetRasterHdrOutputTex().rtvHandle,
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+                    gbuffer.albedo.rtvHandle,
+                    gbuffer.normal.rtvHandle,
+                    gbuffer.material.rtvHandle,
                     m_Renderer.GetVisibilityBuffer().rtvHandle
                 };
                 D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
-                cmdList->OMSetRenderTargets(2, rtvs, FALSE, &dsv);
+                cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
 
                 const float clearCol[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
                 const float clearVis[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
                 cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[1], clearVis, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
+                cmdList->ClearRenderTargetView(rtvs[3], clearVis, 0, nullptr);
                 cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
                 m_Renderer.DispatchMeshletRasterize(&m_Model);
 
-                // Meshlet debug overlay (plan001 phase 2)
                 if (m_Renderer.GetMeshletDebugMode() > 0)
                 {
                     MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
-
-                    // Transition visibility buffer: RTV → SRV for compute read
                     GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-                    // Transition color output: RTV → UAV for compute write
-                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(),
+                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
                     cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
                     cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
-
-                    // Bind frame CB at root param 0 (used for viewProj matrix in barycentric calc)
                     cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
-
-                    // Pass debug params via root constants slot 13 (b2)
-                    // [Mode, VisBufSRVIdx, CandidatesSRVIdx, OutputUAVIdx, Width, Height]
                     struct {
                         uint32_t Mode;
                         uint32_t VisBufSRVIdx;
@@ -659,24 +688,19 @@ void Application::Render()
                     debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
                     debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
                     debugParams.CandidatesSRVIdx = (uint32_t)m_Renderer.GetVisibleMeshletsSRVIndex();
-                    debugParams.OutputUAVIdx     = m_Renderer.GetRasterHdrOutputTex().uavIndex;
+                    debugParams.OutputUAVIdx     = m_Renderer.GetFullScreenDebugTex().uavIndex;
                     debugParams.Width            = m_InternalWidth;
                     debugParams.Height           = m_InternalHeight;
                     cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
-
-                    // Dispatch one thread per 8×8 tile
                     cmdList->Dispatch(
                         (m_InternalWidth  + 7) / 8,
                         (m_InternalHeight + 7) / 8, 1);
-
-                    // Barrier + transition: UAV write complete, back to RENDER_TARGET for subsequent passes
                     D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(
-                        m_Renderer.GetRasterHdrOutputTex().resource.Get());
+                        m_Renderer.GetFullScreenDebugTex().resource.Get());
                     cmdList->ResourceBarrier(1, &uavBarrier);
-                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetRasterHdrOutputTex(),
-                        D3D12_RESOURCE_STATE_RENDER_TARGET);
                 }
             }
+            */
         }
         else
         {
@@ -756,6 +780,7 @@ void Application::Render()
         // Determine if any full-screen debug mode is active.
         // When true, FullScreenDebug.hlsl replaces Lighting.hlsl entirely.
         const bool debugActive =
+            (m_Renderer.GetMeshletDebugMode() > 0) ||
             (m_FrameConstants.sharcDebug != 0) ||
             (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
             (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);

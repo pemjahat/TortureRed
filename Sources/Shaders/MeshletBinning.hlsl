@@ -106,6 +106,7 @@ void AllocateBinRangesCS(uint threadID : SV_DispatchThreadID)
     StructuredBuffer<uint>    meshletCounts          = ResourceDescriptorHeap[gParams.MeshletCountsIdx];
     RWStructuredBuffer<uint4> meshletOffsetAndCounts = ResourceDescriptorHeap[gParams.RWMeshletOffsetAndCountsIdx];
     RWStructuredBuffer<uint>  globalCounter          = ResourceDescriptorHeap[gParams.RWGlobalMeshletCounterIdx];
+    RWStructuredBuffer<uint>  dispatchMeshArgs       = ResourceDescriptorHeap[gParams.RWDispatchMeshArgsIdx];
 
     uint numMeshlets = meshletCounts[threadID];
 
@@ -119,8 +120,16 @@ void AllocateBinRangesCS(uint threadID : SV_DispatchThreadID)
     }
     offset += WaveReadLaneFirst(globalOffset);
 
-    // uint4(count=0, 1, 1, offset) — count is filled by WriteBinsCS; (1,1) are Y/Z for DispatchMesh
+    // MeshletOffsetAndCounts: SRV-only data read by the mesh shader (binOffset lookup)
+    // uint4(count=0, 1, 1, offset) — count is filled by WriteBinsCS; offset is the bin start in BinnedMeshlets[]
     meshletOffsetAndCounts[threadID] = uint4(0, 1, 1, offset);
+
+    // DispatchMeshArgs: separate buffer used exclusively as INDIRECT_ARGUMENT for ExecuteIndirect.
+    // Stores uint3(ThreadGroupCountX, 1, 1) per bin — count filled by WriteBinsCS.
+    // Written as 3 consecutive uints at threadID*3 to match D3D12_DISPATCH_MESH_ARGUMENTS layout.
+    dispatchMeshArgs[threadID * 3 + 0] = 0; // ThreadGroupCountX — filled by WriteBinsCS
+    dispatchMeshArgs[threadID * 3 + 1] = 1; // ThreadGroupCountY
+    dispatchMeshArgs[threadID * 3 + 2] = 1; // ThreadGroupCountZ
 }
 
 // ---- Pass 4: WriteBinsCS ----
@@ -132,6 +141,7 @@ void WriteBinsCS(uint threadID : SV_DispatchThreadID)
 
     RWStructuredBuffer<uint4> meshletOffsetAndCounts = ResourceDescriptorHeap[gParams.RWMeshletOffsetAndCountsIdx];
     RWStructuredBuffer<uint>  binnedMeshlets         = ResourceDescriptorHeap[gParams.RWBinnedMeshletsIdx];
+    RWStructuredBuffer<uint>  dispatchMeshArgs       = ResourceDescriptorHeap[gParams.RWDispatchMeshArgsIdx];
 
     uint bin = GetBin(threadID);
     uint offset = meshletOffsetAndCounts[bin].w;
@@ -149,7 +159,11 @@ void WriteBinsCS(uint threadID : SV_DispatchThreadID)
                 uint count = WaveActiveCountBits(true);
                 uint originalValue;
                 if (WaveIsFirstLane())
+                {
+                    // Increment both MeshletOffsetAndCounts.x (SRV data) and DispatchMeshArgs[bin*3+0] (indirect arg)
                     InterlockedAdd(meshletOffsetAndCounts[firstBin].x, count, originalValue);
+                    InterlockedAdd(dispatchMeshArgs[firstBin * 3 + 0], count, originalValue);
+                }
                 meshletOffset = WaveReadLaneFirst(originalValue) + WavePrefixCountBits(true);
                 finished = true;
             }

@@ -144,6 +144,7 @@ public:
     void DispatchMeshletCull(class Model* model, const FrameConstants& frame);
     void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
     void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
+    void DispatchMeshletRasterizeDebug(class Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
     // Visibility buffer for meshlet debug overlay (plan001)
@@ -357,10 +358,12 @@ private:
     GPUBuffer m_VisibleMeshletsCounter;     // RWBuffer<uint>
     GPUBuffer m_CullDispatchArgs;           // Indirect dispatch args for cull
     GPUBuffer m_CullConstantsBuffer;        // Cull constants (total meshlets)
+    GPUBuffer m_VisibleMeshletsDebug;       // DEBUG: RWStructuredBuffer<MeshletCandidateDebug> — per-visible-meshlet VertexCount/TriangleCount
 
     // Binning resources (4-pass GPU sort)
     GPUBuffer m_MeshletCounts;              // RWStructuredBuffer<uint>[NUM_RASTER_BINS]
-    GPUBuffer m_MeshletOffsetAndCounts;     // RWStructuredBuffer<uint4>[NUM_RASTER_BINS] — (count,1,1,offset) per bin
+    GPUBuffer m_MeshletOffsetAndCounts;     // RWStructuredBuffer<uint4>[NUM_RASTER_BINS] — (count,1,1,offset) per bin — SRV only
+    GPUBuffer m_DispatchMeshArgs;           // RWStructuredBuffer<uint>[NUM_RASTER_BINS*3] — uint3(count,1,1) per bin — INDIRECT_ARGUMENT only
     GPUBuffer m_BinnedMeshlets;             // RWStructuredBuffer<uint>[MAX_VISIBLE_MESHLETS] — sorted indirection
     GPUBuffer m_GlobalMeshletCounter;       // RWStructuredBuffer<uint>[1] — prefix-sum scratch
     GPUBuffer m_ClassifyDispatchArgs;       // Indirect dispatch args for Classify/Write passes
@@ -382,6 +385,7 @@ private:
     static constexpr uint32_t NUM_RASTER_BINS = 2;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];      // Normal render
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterDebugPSO[NUM_RASTER_BINS]; // Debug mode (writes vis buffer)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterDirectPSO;                 // CPU-driven debug: one DispatchMesh per meshlet
 
     // Debug view PSO (VisibilityDebugView.hlsl CS)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;

@@ -2925,6 +2925,14 @@ void Renderer::CreateMeshletResources()
         return;
     }
 
+    // DEBUG: per-visible-meshlet vertex/triangle counts — MeshletCandidateDebug[MAX_VISIBLE_MESHLETS]
+    if (!CreateStructuredBuffer(m_VisibleMeshletsDebug, sizeof(MeshletCandidateDebug), MAX_VISIBLE_MESHLETS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create VisibleMeshletsDebug" << std::endl;
+        return;
+    }
+
     // Indirect dispatch args for cull pass
     if (!CreateBuffer(m_CullDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS),
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true))
@@ -2951,11 +2959,21 @@ void Renderer::CreateMeshletResources()
     }
 
     // Per-bin offset+count packed as uint4: (count, 1, 1, offset)
-    // Used directly as D3D12_DISPATCH_MESH_ARGUMENTS by ExecuteIndirect
+    // Read by the mesh shader as SRV to look up binOffset — never used as INDIRECT_ARGUMENT.
     if (!CreateStructuredBuffer(m_MeshletOffsetAndCounts, sizeof(uint32_t) * 4, NUM_RASTER_BINS,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
     {
         std::cerr << "[Meshlet] Failed to create MeshletOffsetAndCounts buffer" << std::endl;
+        return;
+    }
+
+    // Separate indirect dispatch args for DispatchMesh — uint3(count,1,1) per bin.
+    // Kept exclusively as INDIRECT_ARGUMENT; never read as SRV by shaders.
+    // Allocated as NUM_RASTER_BINS * 3 uints (3 uints = D3D12_DISPATCH_MESH_ARGUMENTS per bin).
+    if (!CreateStructuredBuffer(m_DispatchMeshArgs, sizeof(uint32_t), NUM_RASTER_BINS * 3,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        std::cerr << "[Meshlet] Failed to create DispatchMeshArgs buffer" << std::endl;
         return;
     }
 
@@ -3012,8 +3030,10 @@ void Renderer::CreateMeshletPipelines()
     //   [4] SRV  t2 space3 — GlobalInstanceData
     //   [5] UAV  u0        — VisibleMeshlets
     //   [6] UAV  u1        — VisibleMeshletsCounter
+    //   [7] UAV  u2        — VisibleMeshletsDebug
+    //   [8] SRV  t3 space3 — GlobalMeshlets
     {
-        CD3DX12_ROOT_PARAMETER rootParams[7];
+        CD3DX12_ROOT_PARAMETER rootParams[9];
         rootParams[0].InitAsConstantBufferView(0);
         rootParams[1].InitAsConstantBufferView(1);
         rootParams[2].InitAsShaderResourceView(0, 3);
@@ -3021,9 +3041,11 @@ void Renderer::CreateMeshletPipelines()
         rootParams[4].InitAsShaderResourceView(2, 3);
         rootParams[5].InitAsUnorderedAccessView(0);
         rootParams[6].InitAsUnorderedAccessView(1);
+        rootParams[7].InitAsUnorderedAccessView(2); // u2: debug counter (uint2 — x=vertices, y=triangles)
+        rootParams[8].InitAsShaderResourceView(3, 3); // t3 space3: GlobalMeshlets
 
         CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-        rsDesc.Init(7, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rsDesc.Init(9, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
         Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
         HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
@@ -3038,7 +3060,12 @@ void Renderer::CreateMeshletPipelines()
 
     // --- Meshlet Cull PSO (CS) ---
     {
-        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6");
+        // DEBUG: define DEBUG_SINGLE_PRIMITIVE=N to isolate a single primitive (instanceID==N).
+        //        Remove the define entry (or comment out) to process all primitives normally.
+        std::vector<std::pair<std::wstring, std::wstring>> cullDefines = {
+            { L"DEBUG_SINGLE_PRIMITIVE", L"0" },  // 0 = first primitive only
+        };
+        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6", cullDefines);
         if (!cullCS.empty())
         {
             D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
@@ -3119,9 +3146,11 @@ void Renderer::CreateMeshletPipelines()
             stream.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
             D3D12_RT_FORMAT_ARRAY rtFormats = {};
-            rtFormats.NumRenderTargets = 2;
-            rtFormats.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            rtFormats.RTFormats[1] = DXGI_FORMAT_R32_UINT;
+            rtFormats.NumRenderTargets = 4;
+            rtFormats.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;      // SV_Target0: albedo
+            rtFormats.RTFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;  // SV_Target1: packed normal
+            rtFormats.RTFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;      // SV_Target2: roughness|metallic
+            rtFormats.RTFormats[3] = DXGI_FORMAT_R32_UINT;            // SV_Target3: visibility token (debug)
             stream.RTVFormats = rtFormats;
 
             DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
@@ -3157,6 +3186,16 @@ void Renderer::CreateMeshletPipelines()
                 buildMeshPSO(ms, ps, cull, m_MeshletRasterDebugPSO[i],
                              "[Meshlet] CreatePipelineState (mesh shader raster debug) failed");
             }
+        }
+
+        // Direct CPU-driven debug PSO — MeshletRasterizeDebugMS.hlsl
+        // No alpha-mask permutation needed: renders all meshlets as opaque for debugging.
+        {
+            std::vector<std::pair<std::wstring,std::wstring>> defs = { {L"ALPHA_MASK", L"0"} };
+            auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeDebugMS.hlsl", "MSMain", "ms_6_8", defs);
+            auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeDebugMS.hlsl", "PSMain", "ps_6_8", defs);
+            buildMeshPSO(ms, ps, D3D12_CULL_MODE_NONE, m_MeshletRasterDirectPSO,
+                         "[Meshlet] CreatePipelineState (mesh shader raster direct debug) failed");
         }
     }
 
@@ -3219,8 +3258,9 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
 
     // Update cull constants
     {
-        struct { uint totalMeshlets; uint pad[3]; } cullConsts;
+        struct { uint totalMeshlets; uint instanceCount; uint pad[2]; } cullConsts;
         cullConsts.totalMeshlets = static_cast<uint>(totalMeshlets);
+        cullConsts.instanceCount = static_cast<uint>(model->GetInstanceCount());
         memcpy(m_CullConstantsBuffer.cpuPtr, &cullConsts, sizeof(cullConsts));
     }
 
@@ -3235,10 +3275,12 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
     cmdList->SetComputeRootShaderResourceView(2, model->GetGlobalMeshletBoundsBufferAddress());
     cmdList->SetComputeRootShaderResourceView(3, model->GetMeshDataBufferAddress());
     cmdList->SetComputeRootShaderResourceView(4, model->GetInstanceDataBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(8, model->GetGlobalMeshletsBufferAddress()); // t3 space3: GlobalMeshlets
 
     // Transition UAV resources
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Zero counter (ClearUnorderedAccessViewUint requires shader-visible GPU handle + CPU-only heap handle)
     const UINT zeroes[4] = { 0, 0, 0, 0 };
@@ -3250,6 +3292,7 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
     // Bind UAVs by GPU virtual address
     cmdList->SetComputeRootUnorderedAccessView(5, m_VisibleMeshlets.gpuAddress);
     cmdList->SetComputeRootUnorderedAccessView(6, m_VisibleMeshletsCounter.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(7, m_VisibleMeshletsDebug.gpuAddress);
 
     cmdList->SetPipelineState(m_MeshletCullPSO.Get());
     {
@@ -3259,10 +3302,11 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
     }
 
     // UAV barriers
-    D3D12_RESOURCE_BARRIER barriers[1] = {
+    D3D12_RESOURCE_BARRIER barriers[2] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshlets.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshletsDebug.resource.Get()),
     };
-    cmdList->ResourceBarrier(1, barriers);
+    cmdList->ResourceBarrier(2, barriers);
 }
 
 void Renderer::DispatchMeshletBinning()
@@ -3362,6 +3406,7 @@ void Renderer::DispatchMeshletBinning()
         params.MeshletCountsIdx               = (uint)m_MeshletCounts.srvIndex;
         params.RWMeshletOffsetAndCountsIdx    = (uint)m_MeshletOffsetAndCounts.uavIndex;
         params.RWGlobalMeshletCounterIdx      = (uint)m_GlobalMeshletCounter.uavIndex;
+        params.RWDispatchMeshArgsIdx          = (uint)m_DispatchMeshArgs.uavIndex;
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
 
         cmdList->SetPipelineState(m_MeshletAllocateBinRangesPSO.Get());
@@ -3369,8 +3414,9 @@ void Renderer::DispatchMeshletBinning()
 
         D3D12_RESOURCE_BARRIER barriers[] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletOffsetAndCounts.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_DispatchMeshArgs.resource.Get()),
         };
-        cmdList->ResourceBarrier(1, barriers);
+        cmdList->ResourceBarrier(2, barriers);
     }
 
     // --- Pass 4: WriteBinsCS (indirect, driven by ClassifyDispatchArgs) ---
@@ -3387,6 +3433,7 @@ void Renderer::DispatchMeshletBinning()
         params.VisibleMeshletsCounterIdx      = (uint)m_VisibleMeshletsCounter.srvIndex;
         params.RWMeshletOffsetAndCountsIdx    = (uint)m_MeshletOffsetAndCounts.uavIndex;
         params.RWBinnedMeshletsIdx            = (uint)m_BinnedMeshlets.uavIndex;
+        params.RWDispatchMeshArgsIdx          = (uint)m_DispatchMeshArgs.uavIndex;
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BinningParams) / 4, &params, 0);
 
         cmdList->SetPipelineState(m_MeshletWriteBinsPSO.Get());
@@ -3396,8 +3443,9 @@ void Renderer::DispatchMeshletBinning()
         D3D12_RESOURCE_BARRIER barriers[] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_BinnedMeshlets.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletOffsetAndCounts.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_DispatchMeshArgs.resource.Get()),
         };
-        cmdList->ResourceBarrier(2, barriers);
+        cmdList->ResourceBarrier(3, barriers);
     }
 
     // Restore VisibleMeshletsCounter to UAV for next frame
@@ -3417,7 +3465,11 @@ void Renderer::DispatchMeshletRasterize(Model* model)
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // MeshletOffsetAndCounts: SRV — read by mesh shader for binOffset lookup
     GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // DispatchMeshArgs: INDIRECT_ARGUMENT only — never read by shaders
+    GraphicsHelper::TransitionResource(cmdList, m_DispatchMeshArgs,
         D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
     // Use MAIN root signature
@@ -3436,12 +3488,12 @@ void Renderer::DispatchMeshletRasterize(Model* model)
     // Bind meshlet stream descriptor table at root param 14 (t0-t8 space3)
     cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
 
-    // Rasterize each bin with its own PSO
-    // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset)
-    // This is used directly as D3D12_DISPATCH_MESH_ARGUMENTS (ThreadGroupCountX=count, Y=1, Z=1)
-    // The mesh shader reads the offset from RasterParams.BinIndex via the constant buffer.
+    // Rasterize each bin with its own PSO.
+    // DispatchMeshArgs[binIndex] = uint3(count, 1, 1) — used as INDIRECT_ARGUMENT.
+    // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset) — read as SRV by mesh shader for binOffset.
     for (uint32_t binIndex = 0; binIndex < NUM_RASTER_BINS; ++binIndex)
     {
+        //continue;
         // Select PSO: debug mode uses the debug PSO (writes visibility buffer)
         auto* pso = (m_MeshletDebugMode > 0 && m_MeshletRasterDebugPSO[binIndex])
                     ? m_MeshletRasterDebugPSO[binIndex].Get()
@@ -3459,22 +3511,86 @@ void Renderer::DispatchMeshletRasterize(Model* model)
         cmdList->SetPipelineState(pso);
 
         // ExecuteIndirect: one DispatchMesh per bin.
-        // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset)
-        // D3D12_DISPATCH_MESH_ARGUMENTS reads the first 3 uints: (count, 1, 1)
-        // → ThreadGroupCountX = visible meshlet count for this bin
+        // DispatchMeshArgs[binIndex] = uint3(count, 1, 1) — written by AllocateBinRangesCS + WriteBinsCS.
+        // Stride is 3 uints (= sizeof(D3D12_DISPATCH_MESH_ARGUMENTS)) per bin.
         cmdList->ExecuteIndirect(
             m_DispatchMeshSignature.Get(),
             1,
-            m_MeshletOffsetAndCounts.resource.Get(),
-            sizeof(uint32_t) * 4 * binIndex,  // offset to this bin's uint4
+            m_DispatchMeshArgs.resource.Get(),
+            sizeof(uint32_t) * 3 * binIndex,  // offset to this bin's uint3
             nullptr, 0);
     }
 
-    // Restore resources to UAV for next frame's cull pass
+    // Restore resources to UAV for next frame's binning pass
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_DispatchMeshArgs,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// ---------------------------------------------------------------------------
+// DispatchMeshletRasterizeDebug
+//
+// CPU-driven debug path: iterates every meshlet across all instances and issues
+// one DispatchMesh(1, 1, 1) per meshlet.  No GPU culling or binning is involved.
+// Use this to verify meshlet data correctness in isolation before enabling the
+// full GPU-driven pipeline.
+// ---------------------------------------------------------------------------
+void Renderer::DispatchMeshletRasterizeDebug(Model* model)
+{
+    if (!model->IsMeshletReady() || !m_MeshShaderSupported)
+        return;
+    if (!m_MeshletRasterDirectPSO)
+        return;
+
+    auto* cmdList = m_CommandList.Get();
+
+    // DispatchMesh requires ID3D12GraphicsCommandList6 — query it once up front.
+    // (Same pattern as the ray tracing path uses cmdList4 for BuildRaytracingAccelerationStructure.)
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> cmdList6;
+    CHECK_HR(m_CommandList.As(&cmdList6), "Failed to get ID3D12GraphicsCommandList6");
+
+    // Use MAIN root signature
+    cmdList->SetGraphicsRootSignature(m_RootSignature.Get());
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+
+    // Bind per-frame constants (root param 0)
+    cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+
+    // Bind MaterialBuffer (root param 1, t0 space1)
+    cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
+
+    // Bind bindless texture table (root param 3, t0 space0)
+    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+
+    // Bind meshlet stream descriptor table (root param 14, t0-t8 space3)
+    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
+
+    cmdList->SetPipelineState(m_MeshletRasterDirectPSO.Get());
+
+    // Iterate every instance, then every meshlet within that instance
+    const auto& instanceData = model->GetInstanceDataArray();
+    const auto& meshDataArray = model->GetMeshDataArray();
+
+    for (uint32_t instID = 0; instID < (uint32_t)instanceData.size(); ++instID)
+    {
+        const InstanceData& inst = instanceData[instID];
+        const MeshData& md = meshDataArray[inst.MeshDataIndex];
+
+        for (uint32_t meshletIdx = 0; meshletIdx < md.MeshletCount; ++meshletIdx)
+        {
+            // Write InstanceID + MeshletIndex into root param 12 (b1) as DebugRasterParams
+            DebugRasterParams dp = {};
+            dp.InstanceID   = instID;
+            dp.MeshletIndex = meshletIdx;
+            cmdList->SetGraphicsRoot32BitConstants(12, sizeof(DebugRasterParams) / 4, &dp, 0);
+
+            // DispatchMesh requires ID3D12GraphicsCommandList6
+            cmdList6->DispatchMesh(1, 1, 1);
+        }
+    }
 }

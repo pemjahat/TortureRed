@@ -2,40 +2,31 @@
 #include "VisibilityBuffer.hlsli"
 
 /*
-    Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization.
+    Debug Mesh Shader — CPU-driven per-meshlet dispatch (no GPU culling / binning).
 
-    MSMain: one thread group per visible meshlet (SV_GroupID → bin indirection → MeshletCandidate).
-            32 threads process up to MESHLET_MAX_VERTICES vertices and MESHLET_MAX_TRIANGLES triangles.
-    PSMain: writes GBuffers directly — albedo (R8G8B8A8_UNORM), normal (R16G16B16A16_FLOAT),
-            roughness|metallic (R8G8B8A8_UNORM). Same format as legacy Gbuffer.hlsl.
-            Also writes visibility token (R32_UINT) to SV_Target3 for debug overlay
-            (instance/meshlet/primitive/wireframe visualization per plan001).
+    The CPU iterates every meshlet and calls DispatchMesh(1, 1, 1) once per meshlet,
+    writing InstanceID + MeshletIndex directly into DebugRasterParams (root param 12, b1).
+    This bypasses VisibleMeshlets / BinnedMeshlets entirely, making it easy to isolate
+    and verify individual meshlet data without the full GPU-driven pipeline.
 
-    Compile permutations:
-        ALPHA_MASK=0  — Opaque bin (back-face cull, no alpha discard)
-        ALPHA_MASK=1  — AlphaMasked bin (no cull, alpha discard in PS)
-        ENABLE_DEBUG_DATA=1 — writes extra debug info (used by VisibilityDebugView.hlsl)
+    MSMain: SV_GroupID is always 0 — InstanceID and MeshletIndex come from root constants.
+    PSMain: identical GBuffer output to MeshletRasterizeMS.hlsl.
 */
 
 #ifndef ALPHA_MASK
 #define ALPHA_MASK 0
 #endif
 
-#ifndef ENABLE_DEBUG_DATA
-#define ENABLE_DEBUG_DATA 0
-#endif
-
 #define NUM_MESHLET_THREADS 32
 
-// --- Bindless resource declarations ---
-// Meshlet stream buffers (contiguous in heap, bound via root param 14 descriptor table t0-t8 space3)
+// --- Bindless resource declarations (same slots as MeshletRasterizeMS.hlsl) ---
 StructuredBuffer<float3>           GlobalPositions         : register(t0, space3);
 StructuredBuffer<uint>             GlobalNormals           : register(t1, space3);
 StructuredBuffer<uint>             GlobalUVs               : register(t2, space3);
 StructuredBuffer<Meshlet>          GlobalMeshlets          : register(t3, space3);
 StructuredBuffer<uint>             GlobalMeshletVertices   : register(t4, space3);
 StructuredBuffer<MeshletTriangle>  GlobalMeshletTriangles  : register(t5, space3);
-StructuredBuffer<MeshletBounds>    GlobalMeshletBounds     : register(t6, space3); // unused here
+StructuredBuffer<MeshletBounds>    GlobalMeshletBounds     : register(t6, space3);
 StructuredBuffer<MeshData>         GlobalMeshData          : register(t7, space3);
 StructuredBuffer<InstanceData>     GlobalInstanceData      : register(t8, space3);
 
@@ -49,8 +40,8 @@ SamplerState g_LinearSampler : register(s0);
 // Per-frame constants
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
-// Per-bin raster params (root constants b1)
-ConstantBuffer<RasterParams> gRasterParams : register(b1);
+// Per-dispatch debug params: InstanceID + MeshletIndex set by CPU per DispatchMesh call
+ConstantBuffer<DebugRasterParams> gDebugParams : register(b1);
 
 // --- Per-primitive output ---
 struct PrimitiveAttribute
@@ -59,7 +50,7 @@ struct PrimitiveAttribute
     uint CandidateIndex : CANDIDATE_INDEX;
 };
 
-// --- Per-vertex output (always includes full surface data for GBuffer) ---
+// --- Per-vertex output ---
 struct VertexAttribute
 {
     float4 Position : SV_Position;
@@ -74,34 +65,25 @@ struct VertexAttribute
 [numthreads(NUM_MESHLET_THREADS, 1, 1)]
 void MSMain(
     in  uint groupThreadID : SV_GroupIndex,
-    in  uint groupID       : SV_GroupID,
+    in  uint groupID       : SV_GroupID,   // always 0 — one group per DispatchMesh(1,1,1)
     out vertices  VertexAttribute  verts[MESHLET_MAX_VERTICES],
     out indices   uint3            triangles[MESHLET_MAX_TRIANGLES],
     out primitives PrimitiveAttribute primitives[MESHLET_MAX_TRIANGLES])
 {
-    // Resolve meshlet index via bin indirection:
-    //   BinnedMeshlets[groupID + binOffset] → index into VisibleMeshlets[]
-    StructuredBuffer<uint4>            binData        = ResourceDescriptorHeap[gRasterParams.MeshletBinDataIdx];
-    StructuredBuffer<uint>             binnedMeshlets = ResourceDescriptorHeap[gRasterParams.BinnedMeshletsIdx];
-    StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsIdx];
-
-    uint binOffset    = binData[gRasterParams.BinIndex].w;
-    uint meshletIndex = binnedMeshlets[binOffset + groupID];
-
-    MeshletCandidate cand = visibleMeshlets[meshletIndex];
-    InstanceData inst     = GlobalInstanceData[cand.InstanceID];
-    MeshData md           = GlobalMeshData[inst.MeshDataIndex];
-    Meshlet m             = GlobalMeshlets[md.MeshletOffset + cand.MeshletIndex];
+    // Resolve directly from root constants — no binning indirection
+    InstanceData inst = GlobalInstanceData[gDebugParams.InstanceID];
+    MeshData md       = GlobalMeshData[inst.MeshDataIndex];
+    Meshlet m         = GlobalMeshlets[md.MeshletOffset + gDebugParams.MeshletIndex];
 
     SetMeshOutputCounts(m.VertexCount, m.TriangleCount);
 
-    // Output vertices (strided loop over up to MESHLET_MAX_VERTICES)
+    // Output vertices
     for (uint i = groupThreadID; i < m.VertexCount; i += NUM_MESHLET_THREADS)
     {
-        uint globalVtxIdx = GlobalMeshletVertices[md.MeshletVertexOffset + m.VertexOffset + i];
-        float3 localPos   = GlobalPositions[md.PositionOffset + globalVtxIdx];
-        float4 worldPos   = mul(float4(localPos, 1.0), inst.LocalToWorld);
-        float4 clipPos    = mul(worldPos, FrameCB.viewProj);
+        uint globalVtxIdx  = GlobalMeshletVertices[md.MeshletVertexOffset + m.VertexOffset + i];
+        float3 localPos    = GlobalPositions[md.PositionOffset + globalVtxIdx];
+        float4 worldPos    = mul(float4(localPos, 1.0), inst.LocalToWorld);
+        float4 clipPos     = mul(worldPos, FrameCB.viewProj);
         float3 localNormal = UnpackNormalRGB10A2(GlobalNormals, md.NormalOffset, globalVtxIdx);
         float3 worldNormal = mul(localNormal, (float3x3)inst.LocalToWorld);
 
@@ -114,7 +96,7 @@ void MSMain(
         verts[i] = v;
     }
 
-    // Output primitives (strided loop over up to MESHLET_MAX_TRIANGLES)
+    // Output primitives
     for (uint i = groupThreadID; i < m.TriangleCount; i += NUM_MESHLET_THREADS)
     {
         MeshletTriangle tri = GlobalMeshletTriangles[md.MeshletTriangleOffset + m.TriangleOffset + i];
@@ -122,18 +104,12 @@ void MSMain(
 
         PrimitiveAttribute pri;
         pri.PrimitiveID    = i;
-        pri.CandidateIndex = meshletIndex;
+        pri.CandidateIndex = gDebugParams.InstanceID * 10000u + gDebugParams.MeshletIndex; // debug token
         primitives[i] = pri;
     }
 }
 
-// --- Pixel Shader ---
-// Outputs 4 render targets:
-//   SV_Target0: R8G8B8A8_UNORM       — albedo
-//   SV_Target1: R16G16B16A16_FLOAT   — packed normal (world-space, [0,1])
-//   SV_Target2: R8G8B8A8_UNORM       — roughness | metallic
-//   SV_Target3: R32_UINT             — visibility token (debug overlay per plan001)
-// Material sampling mirrors Gbuffer.hlsl PSMain exactly.
+// --- Pixel Shader (identical GBuffer output to MeshletRasterizeMS.hlsl) ---
 struct GBufferOutput
 {
     float4 albedo   : SV_Target0;
@@ -148,18 +124,15 @@ GBufferOutput PSMain(
 {
     MaterialConstants matConstants = MaterialBuffer[vertexData.MaterialID];
 
-    // --- Albedo ---
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
         albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
 
-    // --- Alpha discard (only for alpha-masked bin) ---
 #if ALPHA_MASK
     if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
         discard;
 #endif
 
-    // --- Roughness / Metallic ---
     float roughness = matConstants.roughnessFactor;
     float metallic  = matConstants.metallicFactor;
     if (matConstants.metallicRoughnessTextureIndex >= 0)
