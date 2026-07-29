@@ -541,6 +541,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "PathTrace", MP_BLUE);
             MICROPROFILE_SCOPEGPUI("PathTrace", MP_BLUE);
+            GPU_MARKER(cmdList, L"Path Trace");
             m_Renderer.DispatchRays(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
         }
 
@@ -550,16 +551,19 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
                 MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
+                GPU_MARKER(cmdList, L"Motion Vectors");
                 m_Renderer.GenerateMotionVectors(m_FrameConstants);
             }
             // Run TAA on the HDR path tracer output, then copy TAA output to back buffer
             {
                 MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
                 MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
+                GPU_MARKER(cmdList, L"TAA");
                 m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetPathTracerHdrOutput());
             }
             {
                 MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+                GPU_MARKER(cmdList, L"Copy To BackBuffer");
                 m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
             }
         }
@@ -568,6 +572,7 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "PTPresent", MP_WHITE);
                 MICROPROFILE_SCOPEGPUI("PTPresent", MP_WHITE);
+                GPU_MARKER(cmdList, L"Path Trace Present");
                 m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetPathTracerOutput());
             }
         }
@@ -577,6 +582,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "PathViz", MP_ORANGE);
             MICROPROFILE_SCOPEGPUI("PathViz", MP_ORANGE);
+            GPU_MARKER(cmdList, L"Path Visualization");
             m_Renderer.DrawPathVizLines(m_FrameConstants);
         }
 
@@ -595,6 +601,7 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "MeshletDebugDirect", MP_BLUE);
                 MICROPROFILE_SCOPEGPUI("MeshletDebugDirect", MP_BLUE);
+                GPU_MARKER(cmdList, L"Meshlet Debug Direct");
 
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo,   D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.normal,   D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -709,6 +716,7 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "DepthPrePass", MP_GREY);
                 MICROPROFILE_SCOPEGPUI("DepthPrePass", MP_GREY);
+                GPU_MARKER(cmdList, L"Depth Pre-Pass");
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                 cmdList->SetPipelineState(m_Renderer.GetDepthPrePassPSO());
 
@@ -722,6 +730,7 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "GBuffer", MP_BLUE);
                 MICROPROFILE_SCOPEGPUI("GBuffer", MP_BLUE);
+                GPU_MARKER(cmdList, L"GBuffer Pass");
                 // Transition G-Buffer targets to RTV state
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -765,6 +774,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "ReSTIR_DI", MP_RED);
             MICROPROFILE_SCOPEGPUI("ReSTIR_DI", MP_RED);
+            GPU_MARKER(cmdList, L"ReSTIR DI");
             m_Renderer.DispatchRestirDI(&m_Model, m_FrameConstants);
         }
 
@@ -772,6 +782,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "ReSTIR_GI", MP_PURPLE);
             MICROPROFILE_SCOPEGPUI("ReSTIR_GI", MP_PURPLE);
+            GPU_MARKER(cmdList, L"ReSTIR GI");
             m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
         }
 
@@ -792,6 +803,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "Lighting", MP_CYAN);
             MICROPROFILE_SCOPEGPUI("Lighting", MP_CYAN);
+            GPU_MARKER(cmdList, debugActive ? L"Full-Screen Debug Pass" : L"Lighting Pass");
             BindlessIndices indices = {};
 
             // Transition G-Buffer targets to SRV state
@@ -871,6 +883,7 @@ void Application::Render()
         {
             MICROPROFILE_SCOPEI("Render", "Transparency", MP_ORANGE);
             MICROPROFILE_SCOPEGPUI("Transparency", MP_ORANGE);
+            GPU_MARKER(cmdList, L"Transparency Pass");
 
             // Ensure depth is in read state for forward pass
             GraphicsHelper::TransitionResource(m_Renderer.GetCommandList(), gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_READ);
@@ -921,6 +934,7 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "MotionVectors", MP_GREEN);
                 MICROPROFILE_SCOPEGPUI("MotionVectors", MP_GREEN);
+                GPU_MARKER(cmdList, L"Motion Vectors");
                 m_Renderer.GenerateMotionVectors(m_FrameConstants);
             }
             // Run TAA on the HDR output (which now includes transparency),
@@ -928,10 +942,12 @@ void Application::Render()
             {
                 MICROPROFILE_SCOPEI("Render", "TAA", MP_YELLOW);
                 MICROPROFILE_SCOPEGPUI("TAA", MP_YELLOW);
+                GPU_MARKER(cmdList, L"TAA");
                 m_Renderer.DispatchNaiveTsr(m_FrameConstants, m_Renderer.GetRasterHdrOutputTex());
             }
             {
                 MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+                GPU_MARKER(cmdList, L"Copy To BackBuffer");
                 m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetTaaOutputTex());
             }
         }
@@ -939,6 +955,7 @@ void Application::Render()
         {
             // Non-TAA: copy HDR output directly to back buffer.
             MICROPROFILE_SCOPEI("Render", "CopyToBackBuffer", MP_WHITE);
+            GPU_MARKER(cmdList, L"Copy To BackBuffer");
             m_Renderer.CopyTextureToBackBuffer(m_Renderer.GetRasterHdrOutputTex());
         }
     } // closes raster (non-path-tracer) branch

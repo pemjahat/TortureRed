@@ -29,7 +29,7 @@ void ResourceUploadBatch::Begin()
 void ResourceUploadBatch::Upload(GPUBuffer& dest, const void* data, UINT64 size)
 {
     GPUBuffer staging;
-    if (!CreateBuffer(staging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+    if (!CreateBuffer(staging, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "UploadStagingBuffer"))
     {
         std::cerr << "ResourceUploadBatch: Failed to create staging buffer" << std::endl;
         return;

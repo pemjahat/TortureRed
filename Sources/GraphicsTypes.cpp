@@ -3,7 +3,7 @@
 #include "Utility.h"
 #include "d3dx12.h"
 
-bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV, bool createUAV)
+bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV, bool createUAV, const char* debugName)
 {
     auto& ctx = GraphicsHelper::GetContext();
     D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(heapType);
@@ -25,6 +25,8 @@ bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D1
     buffer.size = size;
     buffer.state = initialState;
     buffer.gpuAddress = buffer.resource->GetGPUVirtualAddress();
+
+    GraphicsHelper::SetObjectName(buffer.resource.Get(), debugName);
 
     if (heapType == D3D12_HEAP_TYPE_UPLOAD)
     {
@@ -77,10 +79,10 @@ bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D1
     return true;
 }
 
-bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState)
+bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elementCount, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, const char* debugName)
 {
     UINT64 size = elementSize * elementCount;
-    if (!CreateBuffer(buffer, size, heapType, initialState, false, false)) return false;
+    if (!CreateBuffer(buffer, size, heapType, initialState, false, false, debugName)) return false;
 
     auto& ctx = GraphicsHelper::GetContext();
     // Reuse existing descriptor slot if available, otherwise allocate a new one
@@ -118,7 +120,7 @@ bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elemen
     return true;
 }
 
-bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize)
+bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize, const char* debugName)
 {
     auto& ctx = GraphicsHelper::GetContext();
     D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -161,6 +163,8 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
 
     texture.state = initialState;
     texture.format = format;
+
+    GraphicsHelper::SetObjectName(texture.resource.Get(), debugName);
 
     // Create SRV (reuse existing descriptor slot if available)
     if (!(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
@@ -231,7 +235,7 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
     return true;
 }
 
-bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels)
+bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, UINT mipLevels, const char* debugName)
 {
     auto& ctx = GraphicsHelper::GetContext();
     D3D12_RESOURCE_DESC desc = {};
@@ -262,6 +266,8 @@ bool CreateTexture3D(GPUTexture& texture, UINT width, UINT height, UINT depth, D
 
     texture.state = initialState;
     texture.format = format;
+
+    GraphicsHelper::SetObjectName(texture.resource.Get(), debugName);
 
     // Create SRV if not a depth stencil
     if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))

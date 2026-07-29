@@ -160,32 +160,32 @@ void Renderer::CreateRasterIndirectGIResources()
 #endif
 
     // ------- SHaRC buffers (~160 MB total) -------
-    CreateStructuredBuffer(m_SharcHashEntriesBuf,  8,  SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_SharcAccumulationBuf, 16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_SharcResolvedBuf,     16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_SharcHashEntriesBuf,  8,  SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_SharcHashEntries");
+    CreateStructuredBuffer(m_SharcAccumulationBuf, 16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_SharcAccumulation");
+    CreateStructuredBuffer(m_SharcResolvedBuf,     16, SHARC_HASH_ENTRIES_NUM, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_SharcResolved");
     m_SharcIndices.HashEntriesBufIdx  = (UINT)m_SharcHashEntriesBuf.uavIndex;
     m_SharcIndices.AccumulationBufIdx = (UINT)m_SharcAccumulationBuf.uavIndex;
     m_SharcIndices.ResolvedBufIdx     = (UINT)m_SharcResolvedBuf.uavIndex;
 
     // ------- Split Diffuse / Specular ReSTIR buffers -------
     for (int i = 0; i < 2; ++i) {
-        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_DiffuseReservoir0" : "SB_DiffuseReservoir1");
+        CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_SpecularReservoir0" : "SB_SpecularReservoir1");
     }
-    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DiffuseReservoirIntermediate");
+    CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_SpecularReservoirIntermediate");
+    CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), m_InternalWidth * m_InternalHeight, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DiffuseCandidateBuffer");
     
-    CreateTexture(m_RasterHdrOutputTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    CreateTexture(m_NrdMotionVectorsTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdNormalRoughnessTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdViewZTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdDenoisedDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdDenoisedSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_NrdValidationTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_RasterHdrOutputTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, 1, 1, "Tex_RasterHdrOutput");
+    CreateTexture(m_NrdMotionVectorsTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdMotionVectors");
+    CreateTexture(m_NrdNormalRoughnessTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdNormalRoughness");
+    CreateTexture(m_NrdViewZTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdViewZ");
+    CreateTexture(m_NrdDenoisedDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdDenoisedDiffuse");
+    CreateTexture(m_NrdDenoisedSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdDenoisedSpecular");
+    CreateTexture(m_NrdValidationTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdValidation");
     // Universal interchange textures: SSO writes, NrdPackNoise+Lighting read
-    CreateTexture(m_FinalDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    CreateTexture(m_FinalSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CreateTexture(m_FinalDiffuseTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FinalDiffuse");
+    CreateTexture(m_FinalSpecularTex, m_InternalWidth, m_InternalHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FinalSpecular");
 
     InitializeNrd();
 }
@@ -351,18 +351,18 @@ void Renderer::CreateRestirDIResources()
     const UINT pixelCount = m_InternalWidth * m_InternalHeight;
     for (int i = 0; i < 2; ++i)
         CreateStructuredBuffer(m_DIReservoirBuffer[i], sizeof(DIRreservoir), pixelCount,
-                               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_DIReservoir0" : "SB_DIReservoir1");
     CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), pixelCount,
-                           D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                           D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DIReservoirIntermediate");
     // Split DI intermediates for SSO bridge path
     CreateTexture(m_DIDiffuseIntermediate, m_InternalWidth, m_InternalHeight,
                   DXGI_FORMAT_R16G16B16A16_FLOAT,
                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_DIDiffuseIntermediate");
     CreateTexture(m_DISpecularIntermediate, m_InternalWidth, m_InternalHeight,
                   DXGI_FORMAT_R16G16B16A16_FLOAT,
                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_DISpecularIntermediate");
 }
 
 void Renderer::CreateRestirDIPipelines()
@@ -715,7 +715,7 @@ bool Renderer::Initialize(HWND hwnd)
     }
 
     // Create constant buffers
-    if (!CreateBuffer(m_FrameCB, (sizeof(FrameConstants) + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+    if (!CreateBuffer(m_FrameCB, (sizeof(FrameConstants) + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_FrameConstants"))
     {
         std::cerr << "Failed to create frame constant buffer" << std::endl;
         return false;
@@ -727,7 +727,7 @@ bool Renderer::Initialize(HWND hwnd)
 
     // Create Shadow Map
     const UINT shadowMapSize = 2048;
-    if (!CreateTexture(m_ShadowMap, shadowMapSize, shadowMapSize, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr))
+    if (!CreateTexture(m_ShadowMap, shadowMapSize, shadowMapSize, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr, 1, 1, "Tex_ShadowMap"))
     {
         std::cerr << "Failed to create shadow map texture" << std::endl;
         return false;
@@ -736,31 +736,31 @@ bool Renderer::Initialize(HWND hwnd)
     // Create Path Tracer Output
     if (m_RayTracingSupported)
     {
-        if (!CreateTexture(m_AccumulationBuffer, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_AccumulationBuffer, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_AccumulationBuffer"))
         {
             std::cerr << "Failed to create accumulation buffer" << std::endl;
             return false;
         }
 
-        if (!CreateTexture(m_PathTracerOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_PathTracerOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_PathTracerOutput"))
         {
             std::cerr << "Failed to create path tracer output texture" << std::endl;
             return false;
         }
 
-        if (!CreateTexture(m_PathTracerPresentOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_PathTracerPresentOutput, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_PathTracerPresentOutput"))
         {
             std::cerr << "Failed to create path tracer present texture" << std::endl;
             return false;
         }
 
-        if (!CreateTexture(m_RestirDebugHeatmap, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_RestirDebugHeatmap, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_RestirDebugHeatmap"))
         {
             std::cerr << "Failed to create ReSTIR debug heatmap texture" << std::endl;
             return false;
         }
 
-        if (!CreateTexture(m_FullScreenDebugTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr))
+        if (!CreateTexture(m_FullScreenDebugTex, WINDOW_WIDTH, WINDOW_HEIGHT, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FullScreenDebug"))
         {
             std::cerr << "Failed to create full-screen debug texture" << std::endl;
             return false;
@@ -770,21 +770,21 @@ bool Renderer::Initialize(HWND hwnd)
         // Will be recreated at internal resolution by CreateInternalResolutionResources().
         for (int i = 0; i < 2; ++i)
         {
-            if (!CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+            if (!CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_Reservoir0" : "SB_Reservoir1"))
             {
                 std::cerr << "Failed to create ReSTIR reservoir buffer" << std::endl;
                 return false;
             }
         }
 
-        if (!CreateStructuredBuffer(m_ReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        if (!CreateStructuredBuffer(m_ReservoirIntermediate, sizeof(Reservoir), WINDOW_WIDTH * WINDOW_HEIGHT, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_ReservoirIntermediate"))
         {
             std::cerr << "Failed to create ReSTIR intermediate reservoir buffer" << std::endl;
             return false;
         }
 
         // Create Path Visualization Line Buffer (small: MAX_PATH_VIZ_LINES * sizeof(PathVizLine))
-        if (!CreateStructuredBuffer(m_PathVizLineBuffer, sizeof(PathVizLine), MAX_PATH_VIZ_LINES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        if (!CreateStructuredBuffer(m_PathVizLineBuffer, sizeof(PathVizLine), MAX_PATH_VIZ_LINES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_PathVizLineBuffer"))
         {
             std::cerr << "Failed to create PathViz line buffer" << std::endl;
             return false;
@@ -798,14 +798,14 @@ bool Renderer::Initialize(HWND hwnd)
 
         for (int i = 0; i < 2; ++i)
         {
-            if (!CreateStructuredBuffer(m_RtxdiReservoirBuffer[i], sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+            if (!CreateStructuredBuffer(m_RtxdiReservoirBuffer[i], sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_RtxdiReservoir0" : "SB_RtxdiReservoir1"))
             {
                 std::cerr << "Failed to create RTXDI reservoir buffer " << i << std::endl;
                 return false;
             }
         }
 
-        if (!CreateStructuredBuffer(m_RtxdiReservoirIntermediate, sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        if (!CreateStructuredBuffer(m_RtxdiReservoirIntermediate, sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_RtxdiReservoirIntermediate"))
         {
             std::cerr << "Failed to create RTXDI intermediate reservoir buffer" << std::endl;
             return false;
@@ -813,7 +813,7 @@ bool Renderer::Initialize(HWND hwnd)
 
         // Create Neighbor Offsets Buffer
         const uint32_t neighborOffsetCount = 8192;
-        if (!CreateBuffer(m_RtxdiNeighborOffsetsBuffer, neighborOffsetCount * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false))
+        if (!CreateBuffer(m_RtxdiNeighborOffsetsBuffer, neighborOffsetCount * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "SB_RtxdiNeighborOffsets"))
         {
             std::cerr << "Failed to create RTXDI neighbor offset buffer" << std::endl;
             return false;
@@ -2307,7 +2307,7 @@ void Renderer::BuildAccelerationStructures(Model* model)
         maxScratchSize = (maxScratchSize > prebuildInfo.ScratchDataSizeInBytes) ? maxScratchSize : prebuildInfo.ScratchDataSizeInBytes;
 
         GPUBuffer blasBuffer;
-        if (CreateBuffer(blasBuffer, prebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE))
+        if (CreateBuffer(blasBuffer, prebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, false, false, "AS_BLAS"))
         {
             m_BlasPool[prim] = std::move(blasBuffer);
             buildInfos.push_back(info);
@@ -2317,7 +2317,7 @@ void Renderer::BuildAccelerationStructures(Model* model)
 
     if (!primsToBuild.empty())
     {
-        CreateBuffer(scratchBuffer, maxScratchSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateBuffer(scratchBuffer, maxScratchSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, false, "AS_BLASScratch");
 
         for (size_t i = 0; i < primsToBuild.size(); ++i)
         {
@@ -2366,11 +2366,11 @@ void Renderer::BuildAccelerationStructures(Model* model)
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlasPrebuildInfo = {};
         device5->GetRaytracingAccelerationStructurePrebuildInfo(&tlasInputs, &tlasPrebuildInfo);
 
-        CreateBuffer(m_TLAS, tlasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        CreateBuffer(m_TLAS, tlasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, false, false, "AS_TLAS");
 
-        CreateBuffer(tlasScratch, tlasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        CreateBuffer(tlasScratch, tlasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, false, "AS_TLASScratch");
 
-        CreateBuffer(instanceDescBuffer, instanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        CreateBuffer(instanceDescBuffer, instanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "AS_InstanceDescBuffer");
         memcpy(instanceDescBuffer.cpuPtr, instanceDescs.data(), instanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlasBuildDesc = {};
@@ -2391,7 +2391,7 @@ void Renderer::BuildAccelerationStructures(Model* model)
 void Renderer::CreateLightsBuffer()
 {
     // Create Structured Buffer directly on Upload Heap for easy per-frame updates without command list
-    CHECK_BOOL(CreateStructuredBuffer(m_LightsBuffer, sizeof(LightConstants), m_MaxLights, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ), "CreateLightsBuffer failed");
+    CHECK_BOOL(CreateStructuredBuffer(m_LightsBuffer, sizeof(LightConstants), m_MaxLights, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, "SB_LightsBuffer"), "CreateLightsBuffer failed");
 }
 
 void Renderer::UpdateLightsBuffer(const std::vector<LightConstants>& lights)
@@ -2446,7 +2446,7 @@ void Renderer::CreateLightLUTBuffer()
 {
     // LUT buffer: 256 uint entries for O(1) light sampling
     // Each entry maps a CDF bucket to a light index
-    CHECK_BOOL(CreateBuffer(m_LightLUTBuffer, sizeof(uint32_t) * LIGHT_LUT_RESOLUTION, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, true), "CreateLightLUTBuffer failed");
+    CHECK_BOOL(CreateBuffer(m_LightLUTBuffer, sizeof(uint32_t) * LIGHT_LUT_RESOLUTION, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, true, false, "SB_LightLUTBuffer"), "CreateLightLUTBuffer failed");
 }
 
 void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
@@ -2517,10 +2517,10 @@ void Renderer::UpdateLightLUTBuffer(const std::vector<LightConstants>& lights)
 void Renderer::CreateGBuffer(uint32_t w, uint32_t h)
 {
     float blackClear[] = { 0, 0, 0, 0 };
-    CreateTexture(m_GBuffer.albedo, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.normal, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.material, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear);
-    CreateTexture(m_GBuffer.depth, w, h, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    CreateTexture(m_GBuffer.albedo, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear, 1, 1, "GBuffer_Albedo");
+    CreateTexture(m_GBuffer.normal, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear, 1, 1, "GBuffer_Normal");
+    CreateTexture(m_GBuffer.material, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, blackClear, 1, 1, "GBuffer_Material");
+    CreateTexture(m_GBuffer.depth, w, h, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr, 1, 1, "GBuffer_Depth");
 }
 
 std::vector<char> Renderer::LoadShader(const std::string& filename)
@@ -2619,23 +2619,23 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
     if (m_RayTracingSupported)
     {
         CreateTexture(m_AccumulationBuffer, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_AccumulationBuffer");
         CreateTexture(m_PathTracerOutput, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_PathTracerOutput");
         CreateTexture(m_PathTracerPresentOutput, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_PathTracerPresentOutput");
         CreateTexture(m_RestirDebugHeatmap, w, h, DXGI_FORMAT_R16_FLOAT,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_RestirDebugHeatmap");
 
         CreateTexture(m_FullScreenDebugTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FullScreenDebug");
 
         // ReSTIR-DI Reservoirs
         for (int i = 0; i < 2; ++i)
             CreateStructuredBuffer(m_ReservoirBuffer[i], sizeof(Reservoir), w * h,
-                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_Reservoir0" : "SB_Reservoir1");
         CreateStructuredBuffer(m_ReservoirIntermediate, sizeof(Reservoir), w * h,
-            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_ReservoirIntermediate");
 
         // RTXDI Reservoirs
         uint32_t renderWidthBlocks = (w + 15) / 16;
@@ -2643,73 +2643,73 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         uint32_t reservoirArrayPitch = renderWidthBlocks * 256 * renderHeightBlocks;
         for (int i = 0; i < 2; ++i)
             CreateStructuredBuffer(m_RtxdiReservoirBuffer[i], sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch,
-                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_RtxdiReservoir0" : "SB_RtxdiReservoir1");
         CreateStructuredBuffer(m_RtxdiReservoirIntermediate, sizeof(RTXDI_PackedGIReservoir), reservoirArrayPitch,
-            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_RtxdiReservoirIntermediate");
     }
 
     // ---- Split Diffuse / Specular ReSTIR buffers ----
     for (int i = 0; i < 2; ++i) {
         CreateStructuredBuffer(m_DiffuseReservoirBuffer[i], sizeof(Reservoir), w * h,
-            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_DiffuseReservoir0" : "SB_DiffuseReservoir1");
         CreateStructuredBuffer(m_SpecularReservoirBuffer[i], sizeof(Reservoir), w * h,
-            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_SpecularReservoir0" : "SB_SpecularReservoir1");
     }
     CreateStructuredBuffer(m_DiffuseReservoirIntermediate, sizeof(Reservoir), w * h,
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DiffuseReservoirIntermediate");
     CreateStructuredBuffer(m_SpecularReservoirIntermediate, sizeof(Reservoir), w * h,
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_SpecularReservoirIntermediate");
     CreateStructuredBuffer(m_DiffuseCandidateBuffer, sizeof(DiffuseCandidate), w * h,
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DiffuseCandidateBuffer");
 
     // ---- ReSTIR DI buffers ----
     for (int i = 0; i < 2; ++i)
         CreateStructuredBuffer(m_DIReservoirBuffer[i], sizeof(DIRreservoir), w * h,
-            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, i == 0 ? "SB_DIReservoir0" : "SB_DIReservoir1");
     CreateStructuredBuffer(m_DIReservoirIntermediate, sizeof(DIRreservoir), w * h,
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DIReservoirIntermediate");
     // Split DI intermediates for SSO bridge path
     CreateTexture(m_DIDiffuseIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_DIDiffuseIntermediate");
     CreateTexture(m_DISpecularIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_DISpecularIntermediate");
 
     // ---- Raster HDR + NRD Textures ----
     // HDR render target for rasterizer lighting when TAA is active
     CreateTexture(m_RasterHdrOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
+        D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, 1, 1, "Tex_RasterHdrOutput");
     CreateTexture(m_NrdMotionVectorsTex, w, h, DXGI_FORMAT_R16G16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdMotionVectors");
     CreateTexture(m_NrdNormalRoughnessTex, w, h, DXGI_FORMAT_R10G10B10A2_UNORM,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdNormalRoughness");
     CreateTexture(m_NrdViewZTex, w, h, DXGI_FORMAT_R16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdViewZ");
     // GI resolved intermediates (raw float4: NRD-normalized radiance + hitT)
     CreateTexture(m_GIDiffuseIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_GIDiffuseIntermediate");
     CreateTexture(m_GISpecularIntermediate, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_GISpecularIntermediate");
     // RELAX-packed inputs for NRD denoiser (NrdPackNoise output)
     CreateTexture(m_NrdRelaxDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdRelaxDiffuse");
     CreateTexture(m_NrdRelaxSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdRelaxSpecular");
     CreateTexture(m_NrdDenoisedDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdDenoisedDiffuse");
     CreateTexture(m_NrdDenoisedSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdDenoisedSpecular");
     CreateTexture(m_NrdValidationTex, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_NrdValidation");
     // Universal interchange textures: SSO writes, NrdPackNoise+Lighting read
     CreateTexture(m_FinalDiffuseTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FinalDiffuse");
     CreateTexture(m_FinalSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FinalSpecular");
 
     // ---- Visibility buffer (meshlet debug overlay R32_UINT) ----
     CreateTexture(m_VisibilityBuffer, w, h, DXGI_FORMAT_R32_UINT,
-        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, 1, 1, "GBuffer_VisibilityBuffer");
 
     // ---- Re-initialize NRD at new resolution ----
     if (m_NrdInitialized)
@@ -2733,23 +2733,23 @@ void Renderer::CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t i
         CreateTexture(m_TaaHistoryTex[i], outputW, outputH,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, i == 0 ? "Tex_TaaHistory0" : "Tex_TaaHistory1");
     }
 
     CreateTexture(m_TaaReprojectedHistoryTex, outputW, outputH,
         DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_TaaReprojectedHistory");
 
     CreateTexture(m_TaaClosestVelocityTex, outputW, outputH,
         DXGI_FORMAT_R16G16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_TaaClosestVelocity");
 
     CreateTexture(m_TaaOutputTex, outputW, outputH,
         DXGI_FORMAT_R8G8B8A8_UNORM,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_TaaOutput");
 
     m_TaaEnabled = true;
     m_TaaHistoryIndex = 0;
@@ -2911,7 +2911,7 @@ void Renderer::CreateMeshletResources()
 
     // Visible meshlets list (RW)
     if (!CreateStructuredBuffer(m_VisibleMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_VisibleMeshlets"))
     {
         std::cerr << "[Meshlet] Failed to create VisibleMeshlets buffer" << std::endl;
         return;
@@ -2919,7 +2919,7 @@ void Renderer::CreateMeshletResources()
 
     // Counter buffer (UAV)
     if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true))
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleMeshletsCounter"))
     {
         std::cerr << "[Meshlet] Failed to create VisibleMeshletsCounter buffer" << std::endl;
         return;
@@ -2927,7 +2927,7 @@ void Renderer::CreateMeshletResources()
 
     // DEBUG: per-visible-meshlet vertex/triangle counts — MeshletCandidateDebug[MAX_VISIBLE_MESHLETS]
     if (!CreateStructuredBuffer(m_VisibleMeshletsDebug, sizeof(MeshletCandidateDebug), MAX_VISIBLE_MESHLETS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_VisibleMeshletsDebug"))
     {
         std::cerr << "[Meshlet] Failed to create VisibleMeshletsDebug" << std::endl;
         return;
@@ -2935,7 +2935,7 @@ void Renderer::CreateMeshletResources()
 
     // Indirect dispatch args for cull pass
     if (!CreateBuffer(m_CullDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true))
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true, "SB_CullDispatchArgs"))
     {
         std::cerr << "[Meshlet] Failed to create CullDispatchArgs buffer" << std::endl;
         return;
@@ -2943,7 +2943,7 @@ void Renderer::CreateMeshletResources()
 
     // Cull constants buffer (total meshlets)
     if (!CreateBuffer(m_CullConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
-                      D3D12_RESOURCE_STATE_GENERIC_READ))
+                      D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_CullConstants"))
     {
         std::cerr << "[Meshlet] Failed to create CullConstants buffer" << std::endl;
         return;
@@ -2952,7 +2952,7 @@ void Renderer::CreateMeshletResources()
     // ---- Binning resources (4-pass GPU sort) ----
     // Per-bin meshlet counts (NUM_RASTER_BINS = 2)
     if (!CreateStructuredBuffer(m_MeshletCounts, sizeof(uint32_t), NUM_RASTER_BINS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_MeshletCounts"))
     {
         std::cerr << "[Meshlet] Failed to create MeshletCounts buffer" << std::endl;
         return;
@@ -2961,7 +2961,7 @@ void Renderer::CreateMeshletResources()
     // Per-bin offset+count packed as uint4: (count, 1, 1, offset)
     // Read by the mesh shader as SRV to look up binOffset — never used as INDIRECT_ARGUMENT.
     if (!CreateStructuredBuffer(m_MeshletOffsetAndCounts, sizeof(uint32_t) * 4, NUM_RASTER_BINS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_MeshletOffsetAndCounts"))
     {
         std::cerr << "[Meshlet] Failed to create MeshletOffsetAndCounts buffer" << std::endl;
         return;
@@ -2971,7 +2971,7 @@ void Renderer::CreateMeshletResources()
     // Kept exclusively as INDIRECT_ARGUMENT; never read as SRV by shaders.
     // Allocated as NUM_RASTER_BINS * 3 uints (3 uints = D3D12_DISPATCH_MESH_ARGUMENTS per bin).
     if (!CreateStructuredBuffer(m_DispatchMeshArgs, sizeof(uint32_t), NUM_RASTER_BINS * 3,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_DispatchMeshArgs"))
     {
         std::cerr << "[Meshlet] Failed to create DispatchMeshArgs buffer" << std::endl;
         return;
@@ -2979,7 +2979,7 @@ void Renderer::CreateMeshletResources()
 
     // Sorted indirection list: BinnedMeshlets[i] = index into VisibleMeshlets[]
     if (!CreateStructuredBuffer(m_BinnedMeshlets, sizeof(uint32_t), MAX_VISIBLE_MESHLETS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BinnedMeshlets"))
     {
         std::cerr << "[Meshlet] Failed to create BinnedMeshlets buffer" << std::endl;
         return;
@@ -2987,7 +2987,7 @@ void Renderer::CreateMeshletResources()
 
     // Global meshlet counter scratch for prefix-sum
     if (!CreateStructuredBuffer(m_GlobalMeshletCounter, sizeof(uint32_t), 1,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_GlobalMeshletCounter"))
     {
         std::cerr << "[Meshlet] Failed to create GlobalMeshletCounter buffer" << std::endl;
         return;
@@ -2997,7 +2997,7 @@ void Renderer::CreateMeshletResources()
     // Created as a structured buffer so PrepareArgsCS can write it as RWStructuredBuffer<DispatchArgs>
     // and ExecuteIndirect can read it as INDIRECT_ARGUMENT.
     if (!CreateStructuredBuffer(m_ClassifyDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS), 1,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_ClassifyDispatchArgs"))
     {
         std::cerr << "[Meshlet] Failed to create ClassifyDispatchArgs buffer" << std::endl;
         return;
@@ -3010,7 +3010,7 @@ void Renderer::CreateMeshletResources()
     if (!CreateTexture(m_VisibilityBuffer, m_InternalWidth, m_InternalHeight,
                        DXGI_FORMAT_R32_UINT,
                        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-                       D3D12_RESOURCE_STATE_RENDER_TARGET))
+                       D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, 1, 1, "GBuffer_VisibilityBuffer"))
     {
         std::cerr << "[Meshlet] Failed to create visibility buffer" << std::endl;
     }
@@ -3255,6 +3255,7 @@ void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
     if (totalMeshlets == 0) return;
 
     auto* cmdList = m_CommandList.Get();
+    GPU_MARKER(cmdList, L"Meshlet Cull");
 
     // Update cull constants
     {
@@ -3341,6 +3342,7 @@ void Renderer::DispatchMeshletBinning()
     // --- Pass 1: PrepareArgsCS ---
     // Zeros MeshletCounts, GlobalMeshletCounter; builds ClassifyDispatchArgs from VisibleMeshletsCounter.
     {
+        GPU_MARKER(cmdList, L"Meshlet Binning - PrepareArgs");
         GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, m_MeshletCounts,
@@ -3371,6 +3373,7 @@ void Renderer::DispatchMeshletBinning()
     // --- Pass 2: ClassifyMeshletsCS (indirect, driven by ClassifyDispatchArgs) ---
     // For each visible meshlet, looks up material.RasterBin and increments that bin's counter.
     {
+        GPU_MARKER(cmdList, L"Meshlet Binning - Classify");
         GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, m_ClassifyDispatchArgs,
@@ -3396,6 +3399,7 @@ void Renderer::DispatchMeshletBinning()
     // --- Pass 3: AllocateBinRangesCS ---
     // Prefix-sum on MeshletCounts → writes MeshletOffsetAndCounts (offset per bin).
     {
+        GPU_MARKER(cmdList, L"Meshlet Binning - AllocateBinRanges");
         GraphicsHelper::TransitionResource(cmdList, m_MeshletCounts,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, m_MeshletOffsetAndCounts,
@@ -3422,6 +3426,7 @@ void Renderer::DispatchMeshletBinning()
     // --- Pass 4: WriteBinsCS (indirect, driven by ClassifyDispatchArgs) ---
     // Writes each meshlet's index into BinnedMeshlets[] at its bin's offset.
     {
+        GPU_MARKER(cmdList, L"Meshlet Binning - WriteBins");
         GraphicsHelper::TransitionResource(cmdList, m_ClassifyDispatchArgs,
             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         GraphicsHelper::TransitionResource(cmdList, m_BinnedMeshlets,
@@ -3459,6 +3464,7 @@ void Renderer::DispatchMeshletRasterize(Model* model)
         return;
 
     auto* cmdList = m_CommandList.Get();
+    GPU_MARKER(cmdList, L"Meshlet Rasterize (Mesh Shader)");
 
     // Transition binning outputs to SRV for the mesh shader to read
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets,

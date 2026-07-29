@@ -284,7 +284,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create global vertex buffer
     if (!m_GlobalVertices.empty())
     {
-        if (!CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_GlobalVertexBuffer, sizeof(GLTFVertex), m_GlobalVertices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, "SB_GlobalVertexBuffer"))
         {
             std::cerr << "Failed to create global vertex buffer" << std::endl;
             return;
@@ -294,7 +294,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create global index buffer
     if (!m_GlobalIndices.empty())
     {
-        if (!CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_GlobalIndexBuffer, sizeof(uint32_t), m_GlobalIndices.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, "SB_GlobalIndexBuffer"))
         {
             std::cerr << "Failed to create global index buffer" << std::endl;
             return;
@@ -340,7 +340,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create draw node buffer
     if (!m_DrawNodeData.empty())
     {
-        if (!CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ))
+        if (!CreateStructuredBuffer(m_DrawNodeBuffer, sizeof(DrawNodeData), m_DrawNodeData.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, "SB_DrawNodeBuffer"))
         {
             std::cerr << "Failed to create draw node buffer" << std::endl;
             return;
@@ -350,7 +350,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_OpaqueCommands.empty())
         {
             const UINT64 cmdSize = m_OpaqueCommands.size() * sizeof(IndirectDrawCommand);
-            if (!CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
+            if (!CreateBuffer(m_OpaqueCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false, false, "SB_OpaqueCommandBuffer"))
             {
                 std::cerr << "Failed to create opaque indirect draw buffer" << std::endl;
                 return;
@@ -361,7 +361,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
         if (!m_TransparentCommands.empty())
         {
             const UINT64 cmdSize = m_TransparentCommands.size() * sizeof(IndirectDrawCommand);
-            if (!CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false))
+            if (!CreateBuffer(m_TransparentCommandBuffer, cmdSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false, false, "SB_TransparentCommandBuffer"))
             {
                 std::cerr << "Failed to create transparent indirect draw buffer" << std::endl;
                 return;
@@ -375,7 +375,7 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create material buffer
     if (!m_MaterialConstants.empty())
     {
-        if (!CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON))
+        if (!CreateStructuredBuffer(m_MaterialBuffer, sizeof(MaterialConstants), m_MaterialConstants.size(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, "SB_MaterialBuffer"))
         {
             std::cerr << "Failed to create material buffer" << std::endl;
             return;
@@ -1602,7 +1602,8 @@ void Model::CreateMeshletResources(Renderer* renderer)
     // Create 7 global StructuredBuffer<T>
     auto createSB = [](GPUBuffer& buf, UINT64 elemSize, UINT64 count, const char* name) -> bool {
         if (count == 0) return true;
-        if (!CreateStructuredBuffer(buf, elemSize, count, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON)) {
+        std::string debugName = std::string("SB_") + name;
+        if (!CreateStructuredBuffer(buf, elemSize, count, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, debugName.c_str())) {
             std::cerr << "[Meshlet] Failed to create " << name << std::endl;
             return false;
         }
@@ -1620,11 +1621,11 @@ void Model::CreateMeshletResources(Renderer* renderer)
     // Create MeshData and InstanceData buffers
     if (!m_MeshDataArray.empty()) {
         CreateStructuredBuffer(m_MeshDataBuffer, sizeof(MeshData), m_MeshDataArray.size(), 
-                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, "SB_MeshData");
     }
     if (!m_InstanceDataArray.empty()) {
         CreateStructuredBuffer(m_InstanceDataBuffer, sizeof(InstanceData), m_InstanceDataArray.size(),
-                              D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+                              D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, "SB_InstanceData");
     }
 
     m_MeshletReady = true;

@@ -30,6 +30,47 @@ struct GraphicsContext {
     UINT dsvDescriptorSize = 0;
 };
 
+// -----------------------------------------------------------------------------
+// ScopedGpuEvent — RAII wrapper around ID3D12GraphicsCommandList::BeginEvent/
+// EndEvent so RenderDoc (and PIX) shows named regions in the capture timeline
+// (e.g. "GBuffer Pass", "Depth Pre-Pass", "Lighting") instead of the generic
+// "Compute Pass #N" / "Colour Pass #N" RenderDoc falls back to when no event
+// markers are present.
+//
+// This intentionally does NOT depend on WinPixEventRuntime: it encodes the
+// event name as a plain null-terminated wide string with Metadata=0, which is
+// the same fallback format RenderDoc's D3D12 capture layer recognizes without
+// needing the PIX blob encoding. PIX for Windows itself does not decode this
+// format, but this project targets RenderDoc as its capture/debug tool.
+// -----------------------------------------------------------------------------
+class ScopedGpuEvent
+{
+public:
+    ScopedGpuEvent(ID3D12GraphicsCommandList* cmdList, const wchar_t* name)
+        : m_CmdList(cmdList)
+    {
+        if (!m_CmdList) return;
+        const size_t byteSize = (wcslen(name) + 1) * sizeof(wchar_t);
+        m_CmdList->BeginEvent(0, name, static_cast<UINT>(byteSize));
+    }
+
+    ~ScopedGpuEvent()
+    {
+        if (m_CmdList) m_CmdList->EndEvent();
+    }
+
+    ScopedGpuEvent(const ScopedGpuEvent&) = delete;
+    ScopedGpuEvent& operator=(const ScopedGpuEvent&) = delete;
+
+private:
+    ID3D12GraphicsCommandList* m_CmdList = nullptr;
+};
+
+// GPU_MARKER(cmdList, "Name") — scoped for the rest of the enclosing {} block.
+#define GPU_MARKER_CONCAT_INNER(a, b) a##b
+#define GPU_MARKER_CONCAT(a, b) GPU_MARKER_CONCAT_INNER(a, b)
+#define GPU_MARKER(cmdList, name) ScopedGpuEvent GPU_MARKER_CONCAT(_gpuMarker_, __LINE__)((cmdList), (name))
+
 class GraphicsHelper {
 public:
     static void Initialize(ID3D12Device* device);
@@ -63,6 +104,12 @@ public:
 
     static GraphicsContext& GetContext() { return s_Context; }
 
+    // ---------------------------------------------------------------------
+    // Debug naming
+    // ---------------------------------------------------------------------
+    // Sets the ID3D12Object debug name (visible in RenderDoc's resource
+    // inspector / PIX object browser) — thin wrapper around SetName().
+    static void SetObjectName(ID3D12Resource* resource, const char* name);
 private:
     static GraphicsContext s_Context;
 };

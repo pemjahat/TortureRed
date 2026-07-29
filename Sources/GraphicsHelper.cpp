@@ -19,6 +19,7 @@ void GraphicsHelper::Initialize(ID3D12Device* device) {
         rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         CHECK_HR(device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&s_Context.rtvHeap)), "CreateDescriptorHeap for RTV failed");
+        s_Context.rtvHeap->SetName(L"Heap_RTV");
     }
 
     // Create DSV heap
@@ -28,6 +29,7 @@ void GraphicsHelper::Initialize(ID3D12Device* device) {
         dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         CHECK_HR(device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&s_Context.dsvHeap)), "CreateDescriptorHeap for DSV failed");
+        s_Context.dsvHeap->SetName(L"Heap_DSV");
     }
 
     // Create SRV heap
@@ -37,6 +39,7 @@ void GraphicsHelper::Initialize(ID3D12Device* device) {
         srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         CHECK_HR(device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&s_Context.srvHeap)), "CreateDescriptorHeap for SRV failed");
+        s_Context.srvHeap->SetName(L"Heap_Bindless_CBV_SRV_UAV");
     }
 
     // Create CPU-only (non-shader-visible) UAV heap for ClearUnorderedAccessViewUint.
@@ -47,6 +50,7 @@ void GraphicsHelper::Initialize(ID3D12Device* device) {
         cpuUavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         cpuUavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // NOT shader-visible
         CHECK_HR(device->CreateDescriptorHeap(&cpuUavHeapDesc, IID_PPV_ARGS(&s_Context.cpuUavHeap)), "CreateDescriptorHeap for CPU UAV failed");
+        s_Context.cpuUavHeap->SetName(L"Heap_CPU_UAV");
     }
 
     s_Context.srvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -127,6 +131,18 @@ void GraphicsHelper::TransitionResource(ID3D12GraphicsCommandList* cmdList, ID3D
         cmdList->ResourceBarrier(1, &barrier);
         currentState = newState;
     }
+}
+
+void GraphicsHelper::SetObjectName(ID3D12Resource* resource, const char* name) {
+    if (!resource || !name) return;
+    // ID3D12Object::SetName takes a wide string. This name shows up in
+    // RenderDoc's resource inspector and PIX's object browser (and in D3D12
+    // debug-layer validation messages, which is a nice side benefit).
+    int len = MultiByteToWideChar(CP_UTF8, 0, name, -1, nullptr, 0);
+    if (len <= 0) return;
+    std::wstring wname(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, name, -1, wname.data(), len);
+    resource->SetName(wname.c_str());
 }
 
 std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target)
