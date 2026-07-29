@@ -6,7 +6,7 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 ## 1. First action: repository discovery
 
-Before editing, map these project. Use fast search commands similar to these, adjusted for the host shell and available tools:
+Before editing, map the project. Use fast search commands similar to these, adjusted for the host shell and available tools:
 
 ```bash
 pwd
@@ -37,7 +37,19 @@ Find these project-specific locations:
 - denoiser input generation, if present
 - GPU resource creation and clear/barrier helpers
 
-## 2. Documentation standards
+## 2. Referencing other repositories
+
+When a task requires research or investigation for the feature currently being prompted, check whether it references another workspace or repository (e.g., a sibling directory with a reference engine or sample). Study the referenced implementation **before** designing or changing code in this repository.
+
+Follow the workflow in [other_repository_guide.md](agentic/other_repository_guide.md).
+
+Key rules:
+
+- **Locate first** — find the referenced repository/workspace on disk before editing anything
+- **Cite precisely** — record the file paths, function names, and line ranges used as the reference
+- **Document before coding** — write down what is wrong or what will change in `docs/` before making code changes
+
+## 3. Documentation standards
 
 When writing any `.md` document, Mermaid diagram, `README`, or documentation output, follow these rules.
 
@@ -51,7 +63,7 @@ When writing any `.md` document, Mermaid diagram, `README`, or documentation out
 
 ### Key rules
 
-- **Diagrams** — `accTitle` + `accDescr` on every diagram, `classDef` color classes (no inline `style`), emoji on key nodes
+- **Diagrams** — accessibility caption on every diagram: italic Markdown paragraph directly above the Mermaid code block (works in all renderers); `accTitle`/`accDescr` inside the block are a newer-directive alternative but render as broken boxes in older viewers; `classDef` color classes (no inline `style`); emoji on key nodes
 - **Structure** — one H1, emoji on H2 only, no H5+, horizontal rules after `</details>` blocks
 - **Naming** — all markdown files in `docs/taskNNN-{short-description}.md`
 

@@ -491,11 +491,10 @@ The login process validates credentials, checks MFA status,
 and issues session tokens. Failed attempts are logged for
 security monitoring.
 
-‎```mermaid
-sequenceDiagram
-accTitle: Login Authentication Flow
-accDescr: User login sequence through API and auth service
+_The API calls involved in the standard login flow, from credentials through session creation_
 
+```mermaid
+sequenceDiagram
     participant U as 👤 User
     participant A as 🌐 API
     participant S as 🔐 Auth Service
@@ -505,13 +504,13 @@ accDescr: User login sequence through API and auth service
     S-->>A: ✅ Token issued
     A-->>U: 200 OK + session
 
-‎```
+```
 
 The token expires after 24 hours. See [Authentication flow](#authentication-flow)
 for refresh token details.
 ````
 
-**Always follow the [Mermaid Style Guide](mermaid_style_guide.md)** for diagram styling — emoji, color classes, accessibility (`accTitle`/`accDescr`), and type-specific conventions.
+**Always follow the [Mermaid Style Guide](mermaid_style_guide.md)** for diagram styling — emoji, color classes, italic accessibility captions, and type-specific conventions.
 
 ---
 
@@ -553,7 +552,7 @@ for refresh token details.
 - [ ] Images have italic figure captions
 - [ ] Images placed inline with related content (not in separate section)
 - [ ] Tables have header rows and consistent formatting
-- [ ] Mermaid diagrams considered where applicable (with `accTitle`/`accDescr`)
+- [ ] Mermaid diagrams considered where applicable (with italic caption for accessibility)
 
 ### Collapsible sections
 

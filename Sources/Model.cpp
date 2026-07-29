@@ -1367,12 +1367,8 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
     if (vertexCount == 0 || indexCount == 0)
         return;
 
-    // Path for the cache file
-    // Note: BuildMeshlets is called per-primitive; we don't have the original GLTF path easily.
-    // We'll just skip cache for now and always regenerate. The cache infrastructure is ready
-    // but needs the file path plumbing from LoadGLTFModel.
-    //
-    // In a production setup, we'd pass the filepath and primitive index to BuildMeshlets.
+    // Cache plumbing note: the disk cache is skipped until the GLTF filepath and
+    // primitive index are passed in from LoadGLTFModel. Always regenerate for now.
 
     // --- Extract flat position array ---
     std::vector<float> positions(vertexCount * 3);
@@ -1384,123 +1380,109 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
     }
 
     // --- Phase 1: Mesh Optimization (always run before meshlet generation) ---
-    // 1a: Vertex cache optimization
+    // Mirrors Adria SceneLoader::CalculateTotalBufferSize: cache → overdraw → fetch remap,
+    // then remap index buffer and all vertex streams through meshopt_remapVertexBuffer.
     meshopt_optimizeVertexCache(prim.indices.data(), prim.indices.data(),
                                 indexCount, vertexCount);
 
-    // 1b: Overdraw optimization
     meshopt_optimizeOverdraw(prim.indices.data(), prim.indices.data(),
                              indexCount, positions.data(), vertexCount,
                              sizeof(float) * 3, 1.05f);
 
-    // 1c: Vertex fetch optimization — remap vertices for spatial locality
     std::vector<uint32_t> remap(vertexCount);
-    size_t uniqueVertices = meshopt_optimizeVertexFetchRemap(
-        &remap[0], prim.indices.data(), indexCount, vertexCount);
+    const size_t uniqueVertices = meshopt_optimizeVertexFetchRemap(
+        remap.data(), prim.indices.data(), indexCount, vertexCount);
 
-    // Apply remap to vertices (resize to unique count)
-    {
-        std::vector<GLTFVertex> remappedVertices(uniqueVertices);
-        for (size_t i = 0; i < vertexCount; ++i)
-        {
-            if (remap[i] != ~0u)
-            {
-                remappedVertices[remap[i]] = prim.vertices[i];
-            }
-        }
-        prim.vertices = std::move(remappedVertices);
-    }
-
-    // Remap indices
     meshopt_remapIndexBuffer(prim.indices.data(), prim.indices.data(),
-                             indexCount, &remap[0]);
+                             indexCount, remap.data());
+
+    // Single interleaved GLTFVertex stream — one call remaps all attributes at once.
+    meshopt_remapVertexBuffer(prim.vertices.data(), prim.vertices.data(),
+                              vertexCount, sizeof(GLTFVertex), remap.data());
+    prim.vertices.resize(uniqueVertices);
 
     // Re-build positions array after remap
-    const size_t newVertexCount = prim.vertices.size();
-    positions.resize(newVertexCount * 3);
-    for (size_t i = 0; i < newVertexCount; ++i)
+    positions.resize(uniqueVertices * 3);
+    for (size_t i = 0; i < uniqueVertices; ++i)
     {
         positions[i * 3 + 0] = prim.vertices[i].position[0];
         positions[i * 3 + 1] = prim.vertices[i].position[1];
         positions[i * 3 + 2] = prim.vertices[i].position[2];
     }
 
-    // --- Phase 2: Meshlet Generation ---
+    // --- Phase 2: Meshlet Generation (build directly into the final GPU-bound arrays) ---
     const size_t maxMeshlets = meshopt_buildMeshletsBound(
         indexCount, MESHLET_MAX_VERTICES, MESHLET_MAX_TRIANGLES);
 
+    prim.meshletVertices.resize(maxMeshlets * MESHLET_MAX_VERTICES);
+    std::vector<uint8_t>        meshletTriangles(maxMeshlets * MESHLET_MAX_TRIANGLES * 3);
     std::vector<meshopt_Meshlet> meshlets(maxMeshlets);
-    std::vector<uint32_t> meshletVertices(maxMeshlets * MESHLET_MAX_VERTICES);
-    std::vector<uint8_t>  meshletTriangles(maxMeshlets * MESHLET_MAX_TRIANGLES * 3);
 
-    size_t meshletCount = meshopt_buildMeshlets(
+    const size_t meshletCount = meshopt_buildMeshlets(
         meshlets.data(),
-        meshletVertices.data(),
+        prim.meshletVertices.data(),
         meshletTriangles.data(),
         prim.indices.data(), indexCount,
-        positions.data(), newVertexCount, sizeof(float) * 3,
+        positions.data(), uniqueVertices, sizeof(float) * 3,
         MESHLET_MAX_VERTICES, MESHLET_MAX_TRIANGLES,
         0.0f /* cone weight = 0 */);
 
-    meshlets.resize(meshletCount);
-    meshletVertices.resize(meshlets.back().vertex_offset + meshlets.back().vertex_count);
+    const meshopt_Meshlet& last = meshlets[meshletCount - 1];
     // meshopt pads each meshlet's triangle data to a 4-byte boundary — trim with alignment
-    meshletTriangles.resize(meshlets.back().triangle_offset + ((meshlets.back().triangle_count * 3 + 3) & ~3));
+    meshletTriangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3));
+    meshlets.resize(meshletCount);
+    prim.meshletVertices.resize(last.vertex_offset + last.vertex_count);
 
-    // Per-meshlet optimization — must run before packing so we read the optimized triangle order
-
-    // --- Pack into GPU-ready Meshlet structs ---
-    // Store in CPU-side vectors for later upload to global buffers
-    auto& allMeshlets         = prim.meshlets;
-    auto& allMeshletVertices  = prim.meshletVertices;
-    auto& allMeshletTriangles = prim.meshletTriangles;
-    auto& allMeshletBounds    = prim.meshletBounds;
-
-    allMeshlets.clear();
-    allMeshletVertices.clear();
-    allMeshletTriangles.clear();
-    allMeshletBounds.clear();
-
-    // Copy meshlet vertices (indirection table) — these are uint32 indices
-    allMeshletVertices.assign(meshletVertices.begin(), meshletVertices.end());
-
-    // Running sequential offset into allMeshletTriangles (re-packed, 0-based per primitive).
-    // meshopt's m.triangle_offset is a raw byte-triplet index into its internal uint8 buffer
-    // and must NOT be stored directly — the re-packed allMeshletTriangles is sequential.
-    uint32_t runningTriOffset = 0;
-
-    for (auto& m : meshlets)
+    // Per-meshlet optimization — MUST run before any array is derived from the vertex
+    // table: it reorders each meshlet's vertex slice in place and rewrites the triangle
+    // local indices to match. Copying the table before this step was the Bug 1 corruption.
+    for (const auto& m : meshlets)
     {
+        meshopt_optimizeMeshlet(&prim.meshletVertices[m.vertex_offset],
+                                meshletTriangles.data() + m.triangle_offset,
+                                m.triangle_count, m.vertex_count);
+    }
+
+    // --- Pack pass: running element offsets into the re-packed streams ---
+    // resize() value-initializes elements — MeshletTriangle padding bits stay zeroed.
+    prim.meshlets.resize(meshletCount);
+    prim.meshletTriangles.resize(meshletTriangles.size() / 3);
+    prim.meshletBounds.resize(meshletCount);
+
+    // meshopt's m.triangle_offset is a raw byte-triplet index into its internal uint8
+    // buffer and must NOT be stored directly — the re-packed prim.meshletTriangles is
+    // sequential, so the header stores a running MeshletTriangle element offset.
+    uint32_t triangleOffset = 0;
+
+    for (size_t i = 0; i < meshletCount; ++i)
+    {
+        const meshopt_Meshlet& m = meshlets[i];
+
         // GPU Meshlet header
-        Meshlet gm;
-        gm.VertexOffset   = m.vertex_offset;   // valid: allMeshletVertices is a direct copy of meshletVertices[]
-        gm.TriangleOffset = runningTriOffset;   // sequential offset into re-packed allMeshletTriangles[]
+        Meshlet& gm       = prim.meshlets[i];
+        gm.VertexOffset   = m.vertex_offset;
+        gm.TriangleOffset = triangleOffset;
         gm.VertexCount    = m.vertex_count;
         gm.TriangleCount  = m.triangle_count;
-        allMeshlets.push_back(gm);
 
-        // Optimize meshlet vertex/triangle order, then pack triangles sequentially.
-        // pSrcTri points into the 4-byte-padded meshopt buffer at the correct byte offset.
-        uint8_t* pSrcTri = meshletTriangles.data() + m.triangle_offset;
-        meshopt_optimizeMeshlet(&meshletVertices[m.vertex_offset], pSrcTri,
-                                m.triangle_count, m.vertex_count);
-
+        // Pack triangles sequentially from the 4-byte-padded meshopt buffer.
+        const uint8_t* pSrcTri = meshletTriangles.data() + m.triangle_offset;
         for (uint32_t t = 0; t < m.triangle_count; ++t)
         {
-            MeshletTriangle mt;
+            MeshletTriangle& mt = prim.meshletTriangles[triangleOffset + t];
             mt.V0 = *pSrcTri++;
             mt.V1 = *pSrcTri++;
             mt.V2 = *pSrcTri++;
-            allMeshletTriangles.push_back(mt);
         }
-        runningTriOffset += m.triangle_count;   // advance by actual triangle count
+        triangleOffset += m.triangle_count;
 
-        // Compute AABB bounds
+        // AABB bounds from the final (post-optimization) vertex indirection table.
+        // Kept as AABB — FrustumCullMeshlet (MeshletCommon.hlsli) consumes LocalCenter/LocalExtents.
         float3 minBounds = { FLT_MAX, FLT_MAX, FLT_MAX };
         float3 maxBounds = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
         for (uint32_t v = 0; v < m.vertex_count; ++v)
         {
-            uint32_t globalIdx = meshletVertices[m.vertex_offset + v];
+            const uint32_t globalIdx = prim.meshletVertices[m.vertex_offset + v];
             float3 pos = { positions[globalIdx * 3 + 0],
                            positions[globalIdx * 3 + 1],
                            positions[globalIdx * 3 + 2] };
@@ -1511,18 +1493,18 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
             maxBounds.y = std::max(maxBounds.y, pos.y);
             maxBounds.z = std::max(maxBounds.z, pos.z);
         }
-        MeshletBounds bounds;
+        MeshletBounds& bounds  = prim.meshletBounds[i];
         bounds.LocalCenter.x  = (minBounds.x + maxBounds.x) * 0.5f;
         bounds.LocalCenter.y  = (minBounds.y + maxBounds.y) * 0.5f;
         bounds.LocalCenter.z  = (minBounds.z + maxBounds.z) * 0.5f;
         bounds.LocalExtents.x = (maxBounds.x - minBounds.x) * 0.5f;
         bounds.LocalExtents.y = (maxBounds.y - minBounds.y) * 0.5f;
         bounds.LocalExtents.z = (maxBounds.z - minBounds.z) * 0.5f;
-        allMeshletBounds.push_back(bounds);
     }
+    prim.meshletTriangles.resize(triangleOffset);
 
     std::cout << "[Meshlet] Generated " << meshletCount << " meshlets from "
-              << newVertexCount << " vertices, " << indexCount << " triangles" << std::endl;
+              << uniqueVertices << " vertices, " << indexCount << " triangles" << std::endl;
 }
 
 // =============================================================================

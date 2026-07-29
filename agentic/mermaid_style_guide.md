@@ -34,17 +34,20 @@
 
 ## Accessibility Requirements
 
-**Every diagram MUST include both `accTitle` and `accDescr`:**
+**Every diagram MUST include an accessible description.** The primary method — an italic Markdown paragraph directly above the code block — works in all Mermaid renderers and is strongly recommended:
 
+```markdown
+_Short description of what this diagram shows and what insight the reader gains from it_
+
+```mermaid
+flowchart LR
+    auth[🔐 Authenticate] --> process[⚙️ Process request] --> respond[📤 Return response]
 ```
-accTitle: Short Name 3-8 Words
-accDescr: One or two sentences explaining what this diagram shows and what insight the reader gains from it
 ```
 
-- `accTitle` — 3–8 words, plain text, names the diagram
-- `accDescr` — 1–2 sentences on a **single line** (GitHub limitation), explains purpose and key structure
+The `accTitle`/`accDescr` directives are a newer Mermaid feature for screen-reader accessibility. **They do not render in older viewers** (pre-2023 GitHub, some VS Code extensions) and will appear as broken boxes, so avoid them unless the rendering environment is known to support them.
 
-**Diagram types that do NOT support `accTitle`/`accDescr`:** Mindmap, Timeline, Quadrant, Sankey, XY Chart, Block, Kanban, Packet, Architecture, Radar, Treemap. For these, place a descriptive _italic_ Markdown paragraph directly above the code block as the accessible description.
+Diagram types that do NOT support `accTitle`/`accDescr` regardless of version: Mindmap, Timeline, Quadrant, Sankey, XY Chart, Block, Kanban, Packet, Architecture, Radar, Treemap.
 
 > **ZenUML note:** ZenUML requires an external plugin and may not render on GitHub. Prefer standard `sequenceDiagram` syntax.
 
@@ -54,11 +57,10 @@ accDescr: One or two sentences explaining what this diagram shows and what insig
 
 ### ✅ Do: No theme directive (GitHub auto-detects)
 
+_A short accessible description of this diagram; what it shows and why it matters_
+
 ```mermaid
 flowchart LR
-    accTitle: Secure API Request Flow
-    accDescr: Three-step API request from authentication through processing to response
-
     auth[🔐 Authenticate] --> process[⚙️ Process request] --> respond[📤 Return response]
 ```
 
@@ -412,7 +414,7 @@ These will save you debugging time:
 
 ### Every Diagram
 
-- [ ] `accTitle` + `accDescr` present (or italic Markdown paragraph for unsupported types)
+- [ ] Accessible description present (italic Markdown paragraph above the block; or `accTitle`/`accDescr` if the renderer is confirmed to support them)
 - [ ] Complexity managed: ≤10 nodes flat, 10–30 with subgraphs, 30+ split into multiple diagrams
 - [ ] Subgraphs used if >10 nodes (grouped by stage, domain, team, or layer)
 - [ ] ≤3 decision points per subgraph
