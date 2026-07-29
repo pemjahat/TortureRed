@@ -598,56 +598,58 @@ void Application::Render()
             // CPU-driven path: iterates every meshlet and issues one DispatchMesh(1,1,1) per meshlet.
             // No GPU culling or binning — used to verify meshlet data correctness in isolation.
             // The full GPU-driven path (Cull → Binning → ExecuteIndirect) is commented out below.
-            {
-                MICROPROFILE_SCOPEI("Render", "MeshletDebugDirect", MP_BLUE);
-                MICROPROFILE_SCOPEGPUI("MeshletDebugDirect", MP_BLUE);
-                GPU_MARKER(cmdList, L"Meshlet Debug Direct");
+            // {
+            //     MICROPROFILE_SCOPEI("Render", "MeshletDebugDirect", MP_BLUE);
+            //     MICROPROFILE_SCOPEGPUI("MeshletDebugDirect", MP_BLUE);
+            //     GPU_MARKER(cmdList, L"Meshlet Debug Direct");
 
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo,   D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.normal,   D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.depth,    D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo,   D3D12_RESOURCE_STATE_RENDER_TARGET);
+            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.normal,   D3D12_RESOURCE_STATE_RENDER_TARGET);
+            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            //     GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.depth,    D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
-                    gbuffer.albedo.rtvHandle,
-                    gbuffer.normal.rtvHandle,
-                    gbuffer.material.rtvHandle,
-                    m_Renderer.GetVisibilityBuffer().rtvHandle
-                };
-                D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
-                cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+            //     D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+            //         gbuffer.albedo.rtvHandle,
+            //         gbuffer.normal.rtvHandle,
+            //         gbuffer.material.rtvHandle,
+            //         m_Renderer.GetVisibilityBuffer().rtvHandle
+            //     };
+            //     D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
+            //     cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
 
-                const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-                cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[3], clearCol, 0, nullptr);
-                cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            //     const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            //     cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
+            //     cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
+            //     cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
+            //     cmdList->ClearRenderTargetView(rtvs[3], clearCol, 0, nullptr);
+            //     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-                m_Renderer.DispatchMeshletRasterizeDebug(&m_Model);
-            }
+            //     m_Renderer.DispatchMeshletRasterizeDebug(&m_Model);
+            // }
 
             // ---------------------------------------------------------------
             // COMMENTED OUT: full GPU-driven meshlet path (Cull → Binning → ExecuteIndirect).
             // Re-enable once DispatchMeshletRasterizeDebug confirms meshlet data is correct.
             // ---------------------------------------------------------------
-            /*
             {
                 MICROPROFILE_SCOPEI("Render", "MeshletCull", MP_GREEN);
                 MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
+                GPU_MARKER(cmdList, L"Meshlet Cull");
                 m_Renderer.DispatchMeshletCull(&m_Model, m_FrameConstants);
             }
 
             {
                 MICROPROFILE_SCOPEI("Render", "MeshletBinning", MP_YELLOW);
                 MICROPROFILE_SCOPEGPUI("MeshletBinning", MP_YELLOW);
+                GPU_MARKER(cmdList, L"Meshlet Binning");
                 m_Renderer.DispatchMeshletBinning();
             }
 
             {
                 MICROPROFILE_SCOPEI("Render", "MeshletForward", MP_BLUE);
                 MICROPROFILE_SCOPEGPUI("MeshletForward", MP_BLUE);
+                GPU_MARKER(cmdList, L"Meshlet Rasterize");
 
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -707,7 +709,6 @@ void Application::Render()
                     cmdList->ResourceBarrier(1, &uavBarrier);
                 }
             }
-            */
         }
         else
         {

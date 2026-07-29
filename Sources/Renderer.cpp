@@ -3062,10 +3062,10 @@ void Renderer::CreateMeshletPipelines()
     {
         // DEBUG: define DEBUG_SINGLE_PRIMITIVE=N to isolate a single primitive (instanceID==N).
         //        Remove the define entry (or comment out) to process all primitives normally.
-        std::vector<std::pair<std::wstring, std::wstring>> cullDefines = {
-            { L"DEBUG_SINGLE_PRIMITIVE", L"0" },  // 0 = first primitive only
-        };
-        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6", cullDefines);
+        // std::vector<std::pair<std::wstring, std::wstring>> cullDefines = {
+        //     { L"DEBUG_SINGLE_PRIMITIVE", L"0" },  // 0 = first primitive only
+        // };
+        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6"/*, cullDefines*/);
         if (!cullCS.empty())
         {
             D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
