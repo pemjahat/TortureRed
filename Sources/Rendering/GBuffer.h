@@ -21,16 +21,21 @@ class GBufferPass
 {
 public:
     void CreateResources(uint32_t w, uint32_t h);
+    void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature);
 
     GBuffer& GetGBuffer() { return m_GBuffer; }
 
     // Depth pre-pass (optional) + G-buffer raster pass. Model handles its own
     // frustum-culled ExecuteIndirect draw via Model::Render().
     void Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Renderer* renderer,
-                 const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass,
-                 ID3D12PipelineState* depthPrePassPSO, ID3D12PipelineState* gbufferPSO,
-                 ID3D12PipelineState* gbufferWritePSO);
+                 const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass);
 
 private:
+    // ----- Resources -----
     GBuffer m_GBuffer; // Graphics/GraphicsTypes.h struct: albedo/normal/material/depth
+
+    // ----- PSOs -----
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthPrePassPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;
 };

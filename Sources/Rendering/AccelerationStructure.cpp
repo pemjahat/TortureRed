@@ -3,9 +3,9 @@
 #include "AccelerationStructure.h"
 #include "Core/Model.h"
 #include "Core/Utility.h"
+#include "Renderer.h"
 
-size_t AccelerationStructure::Build(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, Model* model,
-                                    const std::function<void()>& executeAndWait)
+size_t AccelerationStructure::Build(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, Model* model, Renderer* renderer)
 {
     if (!model)
         return 0;
@@ -147,7 +147,7 @@ size_t AccelerationStructure::Build(ID3D12Device* device, ID3D12GraphicsCommandL
      // Submit and block until GPU finishes, while scratchBuffer/tlasScratch/
     // instanceDescBuffer (stack locals) are still in scope — this makes it
     // safe for them to be destroyed right after this call returns.
-    executeAndWait();
+    renderer->ExecuteCommandList();
 
     return instanceDescs.size();
 }

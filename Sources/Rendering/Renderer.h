@@ -92,14 +92,7 @@ public:
     ID3D12CommandAllocator* GetCommandAllocator() const { return m_CommandAllocator.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_RootSignature.Get(); }
     ID3D12CommandSignature* GetCommandSignature() const { return m_CommandSignature.Get(); }
-    ID3D12PipelineState* GetTransparentPSO() const { return m_TransparentPSO.Get(); }
-    ID3D12PipelineState* GetTransparentHdrPSO() const { return m_TransparentHdrPSO.Get(); }
-    ID3D12PipelineState* GetDepthPrePassPSO() const { return m_DepthPrePassPSO.Get(); }
-    ID3D12PipelineState* GetGBufferPSO() const { return m_GBufferPSO.Get(); }
-    ID3D12PipelineState* GetGBufferWritePSO() const { return m_GBufferWritePSO.Get(); }
-    ID3D12PipelineState* GetLightingPSO() const { return m_LightingPSO.Get(); }
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
-    ID3D12PipelineState* GetShadowPSO() const { return m_ShadowPSO.Get(); }
     ID3D12PipelineState* GetProbeSphereDebugPSO() const { return m_ProbeSphereDebugPSO.Get(); }
     
     // Ray Tracing Getters
@@ -132,7 +125,6 @@ public:
     GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
     GPUTexture& GetRestirDebugHeatmap()       { return m_PathTracing.GetRestirDebugHeatmap(); }
     GPUTexture& GetFullScreenDebugTex()       { return m_FullScreenDebugTex; }
-    ID3D12PipelineState* GetLightingHdrPSO() const { return m_LightingHdrPSO.Get(); }
     ID3D12PipelineState* GetFullScreenDebugPSO() const { return m_FullScreenDebugPSO.Get(); }
     ID3D12PipelineState* GetFullScreenDebugHdrPSO() const { return m_FullScreenDebugHdrPSO.Get(); }
     UINT GetIrCacheSRVIndex() const { return (UINT)m_IrCacheIrradianceBuf.uavIndex; }
@@ -193,14 +185,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
 
     // Pipeline States
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentPSO;    // LDR: R8G8B8A8_UNORM (non-TAA path)
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentHdrPSO; // HDR: R16G16B16A16_FLOAT (TAA path)
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthPrePassPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_GBufferWritePSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ProbeSphereDebugPSO;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
@@ -250,23 +235,23 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IrCacheUpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
 
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
+    
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_FullScreenDebugPSO;    // Debug PSO targeting R8G8B8A8_UNORM (LDR, with tonemapping)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_FullScreenDebugHdrPSO; // Debug PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
 
-    // ------- ReSTIR DI: moved to Rendering/RestirDI.h/.cpp -------
+    // ------- ReSTIR DI
     RestirDI m_RestirDI;
 
     // ------- ReSTIR GI/SHaRC PSOs; only the shared bridge stays here -------
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_NrdStoreShadingOutputPSO;    // Generic 2-input/2-output bridge → Final* (shared by RestirDI + RestirGI, stays in Renderer for now)
 
-    // ------- Path Visualization: moved to Rendering/PathTracing.h/.cpp -------
+    // ------- Path Visualization -------
 
     // ------- Internal resolution tracking -------
     uint32_t m_InternalWidth = WINDOW_WIDTH;
     uint32_t m_InternalHeight = WINDOW_HEIGHT;
 
-    // ------- TAA / Temporal Super-Resolution: moved to Rendering/TAA.h/.cpp -------
+    // ------- TAA / Temporal Super-Resolution -------
     TAA m_TAA;
 
     // GBuffer resources

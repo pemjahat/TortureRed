@@ -21,11 +21,16 @@ class Shadow
 {
 public:
     bool CreateResources();
-
+    void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature);
+    
     GPUTexture& GetShadowMap() { return m_ShadowMap; }
 
 private:
     static constexpr UINT SHADOW_MAP_SIZE = 2048;
 
+    // ----- Resources -----
     GPUTexture m_ShadowMap;
+
+    // ----- PSOs -----
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_ShadowPSO;
 };

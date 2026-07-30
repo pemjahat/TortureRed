@@ -24,6 +24,8 @@ class Renderer;
 class DeferredLighting
 {
 public:
+    void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature);
+
     // ---- Lights buffer ----
     void CreateLightsBuffer();
     void UpdateLightsBuffer(const std::vector<LightConstants>& lights);
@@ -42,8 +44,14 @@ public:
                  bool debugShadowMap, uint32_t outputWidth, uint32_t outputHeight);
 
 private:
+    // ----- Resources -----
     GPUBuffer m_LightsBuffer;
     GPUBuffer m_LightLUTBuffer; // LUT for O(1) importance sampling
+
+    // ----- PSOs -----
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LightingHdrPSO; // Lighting PSO targeting R16G16B16A16_FLOAT (HDR, no tonemapping)
+
     static constexpr UINT LIGHT_LUT_RESOLUTION = 256;
     UINT m_MaxLights = 256;
 };

@@ -701,67 +701,17 @@ void Renderer::CreatePipelineState()
         return desc;
     };
 
-    // 1. Depth Pre-Pass PSO
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.NumRenderTargets = 0;
-        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DepthPrePassPSO));
-    }
+    // Depth PrePass + GBuffer
+    m_GBufferPass.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
+    
+    // Transparency
+    m_Transparency.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 
-    // 2. G-Buffer PSO
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.NumRenderTargets = 3;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        psoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        
-        // No depth write, using pre-pass
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
-        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferPSO));
+    // Shadow
+    m_Shadow.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 
-        // Create a version of G-Buffer PSO that writes to depth (for when pre-pass is disabled)
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferWritePSO));
-    }
-
-    // 3. Lighting PSO (LDR — renders to R8G8B8A8_UNORM back buffer with tonemapping)
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.DepthStencilState.DepthEnable = FALSE;
-        psoDesc.NumRenderTargets = 1;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingPSO));
-    }
-
-    // 3.1 Lighting HDR PSO (renders to R16G16B16A16_FLOAT for TAA input — no tonemapping in shader)
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.DepthStencilState.DepthEnable = FALSE;
-        psoDesc.NumRenderTargets = 1;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingHdrPSO));
-    }
+    // Lighting
+    m_DeferredLighting.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 
     // 3.15 FullScreenDebug PSO (LDR — renders to R8G8B8A8_UNORM back buffer with tonemapping)
     {
@@ -803,90 +753,6 @@ void Renderer::CreatePipelineState()
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DebugPSO));
-    }
-
-    // 4. Shadow PSO
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.RasterizerState.DepthBias = 1000;
-        psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
-        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.NumRenderTargets = 0;
-
-        CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_ShadowPSO)), "CreateGraphicsPipelineState for Shadow PSO failed");
-    }
-
-    // 5. Transparent PSO (Forward)
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-        
-        // Enable Alpha Blending
-        D3D12_RENDER_TARGET_BLEND_DESC blendDesc = {};
-        blendDesc.BlendEnable = TRUE;
-        blendDesc.LogicOpEnable = FALSE;
-        blendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-        blendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        blendDesc.BlendOp = D3D12_BLEND_OP_ADD;
-        blendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-        blendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
-        blendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        blendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
-        blendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        psoDesc.BlendState.RenderTarget[0] = blendDesc;
-
-        // Double sided 
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        
-        // Read-only depth
-        psoDesc.DepthStencilState.DepthEnable = TRUE;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-
-        psoDesc.NumRenderTargets = 1;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // Backbuffer format
-        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-
-        CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_TransparentPSO)), "CreateGraphicsPipelineState for Transparent PSO failed");
-    }
-
-    // 5.1 Transparent HDR PSO (Forward — renders to R16G16B16A16_FLOAT for TAA input, no tonemapping)
-    {
-        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "VSMain", "vs_6_8");
-        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Forward.hlsl", "PSMain", "ps_6_8");
-        auto psoDesc = GetDefaultPsoDesc();
-        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
-        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
-
-        D3D12_RENDER_TARGET_BLEND_DESC blendDesc = {};
-        blendDesc.BlendEnable = TRUE;
-        blendDesc.LogicOpEnable = FALSE;
-        blendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-        blendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        blendDesc.BlendOp = D3D12_BLEND_OP_ADD;
-        blendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-        blendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
-        blendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        blendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
-        blendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        psoDesc.BlendState.RenderTarget[0] = blendDesc;
-
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-
-        psoDesc.DepthStencilState.DepthEnable = TRUE;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-
-        psoDesc.NumRenderTargets = 1;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR intermediate texture format
-        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-
-        CHECK_HR(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_TransparentHdrPSO)), "CreateGraphicsPipelineState for Transparent HDR PSO failed");
     }
 
     if (m_RayTracingSupported)
@@ -1035,8 +901,7 @@ void Renderer::BuildAccelerationStructures(Model* model)
 
     // Build() closes/submits/waits internally (via the callback) before its
     // stack-local scratch buffers go out of scope.
-    size_t instanceCount = m_AccelStructure.Build(m_Device.Get(), m_CommandList.Get(), model,
-        [this]() { ExecuteCommandList(); });
+    size_t instanceCount = m_AccelStructure.Build(m_Device.Get(), m_CommandList.Get(), model, this);
 
     std::cout << "Built acceleration structures for " << instanceCount << " instances." << std::endl;
 }
@@ -1048,8 +913,7 @@ void Renderer::CreateGBuffer(uint32_t w, uint32_t h)
 
 void Renderer::ExecuteGBufferPass(Model* model, const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass)
 {
-    m_GBufferPass.Execute(m_CommandList.Get(), model, this, frustum, enableDepthPrePass,
-                           m_DepthPrePassPSO.Get(), m_GBufferPSO.Get(), m_GBufferWritePSO.Get());
+    m_GBufferPass.Execute(m_CommandList.Get(), model, this, frustum, enableDepthPrePass);
 }
 
 void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bool rasterTaaActive,
@@ -1062,8 +926,7 @@ void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bo
 void Renderer::ExecuteTransparencyPass(Model* model, const DirectX::BoundingFrustum& frustum,
                                         bool rasterTaaActive, uint32_t outputWidth, uint32_t outputHeight)
 {
-    m_Transparency.Execute(m_CommandList.Get(), model, this, frustum, rasterTaaActive,
-                            outputWidth, outputHeight, m_TransparentPSO.Get(), m_TransparentHdrPSO.Get());
+    m_Transparency.Execute(m_CommandList.Get(), model, this, frustum, rasterTaaActive, outputWidth, outputHeight);
 }
 
 std::vector<char> Renderer::LoadShader(const std::string& filename)

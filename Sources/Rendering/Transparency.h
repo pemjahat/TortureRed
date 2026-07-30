@@ -23,8 +23,13 @@ class Renderer;
 class Transparency
 {
 public:
+    void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature);
     void Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Renderer* renderer,
                  const DirectX::BoundingFrustum& frustum, bool rasterTaaActive,
-                 uint32_t outputWidth, uint32_t outputHeight,
-                 ID3D12PipelineState* transparentPSO, ID3D12PipelineState* transparentHdrPSO);
+                 uint32_t outputWidth, uint32_t outputHeight);
+
+private:
+    // ----- PSOs -----
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentPSO;    // LDR: R8G8B8A8_UNORM (non-TAA path)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_TransparentHdrPSO; // HDR: R16G16B16A16_FLOAT (TAA path)
 };

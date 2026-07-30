@@ -6,6 +6,50 @@
 #include "Renderer.h"
 #include "Graphics/GraphicsHelper.h"
 
+void DeferredLighting::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature)
+{
+    auto GetDefaultPsoDesc = [&]() {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+        desc.pRootSignature = rootSignature;
+        desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        desc.RasterizerState.FrontCounterClockwise = TRUE;
+        desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        desc.SampleMask = UINT_MAX;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.SampleDesc.Count = 1;
+        return desc;
+    };
+
+    // 1. Lighting PSO (LDR — renders to R8G8B8A8_UNORM back buffer with tonemapping)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingPSO));
+    }
+
+    // 2. Lighting HDR PSO (renders to R16G16B16A16_FLOAT for TAA input — no tonemapping in shader)
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Lighting.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.NumRenderTargets = 1;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_LightingHdrPSO));
+    }
+}
+
 void DeferredLighting::CreateLightsBuffer()
 {
     // Create Structured Buffer directly on Upload Heap for easy per-frame updates without command list
@@ -180,7 +224,7 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
 
         cmdList->SetPipelineState(debugActive
             ? renderer->GetFullScreenDebugHdrPSO()
-            : renderer->GetLightingHdrPSO());
+            : m_LightingPSO.Get());
     }
     else
     {
@@ -201,7 +245,7 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
         cmdList->SetPipelineState(
             debugShadowMap ? renderer->GetDebugPSO() :
             debugActive    ? renderer->GetFullScreenDebugPSO() :
-                              renderer->GetLightingPSO());
+                              m_LightingHdrPSO.Get());
     }
 
     cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle

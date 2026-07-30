@@ -6,6 +6,7 @@
 // Forward declarations to avoid circular dependencies
 struct GLTFPrimitive;
 class Model;
+class Renderer;
 
 // -----------------------------------------------------------------------------
 // AccelerationStructure
@@ -23,8 +24,7 @@ public:
     // the GPU has finished — must be called while cmdList is still open and
     // scratch buffers are still valid. Caller supplies this since only it
     // owns the command queue/fence (e.g. Renderer::ExecuteCommandList()).
-    size_t Build(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, Model* model,
-                 const std::function<void()>& executeAndWait);
+    size_t Build(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, Model* model, Renderer* renderer);
 
     D3D12_GPU_VIRTUAL_ADDRESS GetTLASGPUAddress() const { return m_TLAS.gpuAddress; }
 

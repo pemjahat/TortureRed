@@ -14,10 +14,58 @@ void GBufferPass::CreateResources(uint32_t w, uint32_t h)
     CreateTexture(m_GBuffer.depth, w, h, DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr, 1, 1, "GBuffer_Depth");
 }
 
+void GBufferPass::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature)
+{
+    auto GetDefaultPsoDesc = [&]() {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+        desc.pRootSignature = rootSignature;
+        desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        desc.RasterizerState.FrontCounterClockwise = TRUE;
+        desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        desc.SampleMask = UINT_MAX;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.SampleDesc.Count = 1;
+        return desc;
+    };
+
+    // 1. Depth Pre-Pass PSO
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/DepthOnly.hlsl", "VSMain", "vs_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        psoDesc.NumRenderTargets = 0;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_DepthPrePassPSO));
+    }
+
+    // 2. G-Buffer PSO
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/Gbuffer.hlsl", "PSMain", "ps_6_8");
+        auto psoDesc = GetDefaultPsoDesc();
+        psoDesc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+        psoDesc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+        psoDesc.NumRenderTargets = 3;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        psoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        
+        // No depth write, using pre-pass
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferPSO));
+
+        // Create a version of G-Buffer PSO that writes to depth (for when pre-pass is disabled)
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferWritePSO));
+    }
+}
+
 void GBufferPass::Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Renderer* renderer,
-                           const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass,
-                           ID3D12PipelineState* depthPrePassPSO, ID3D12PipelineState* gbufferPSO,
-                           ID3D12PipelineState* gbufferWritePSO)
+                           const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass)
 {
     // 1. Depth Pre-Pass
     if (enableDepthPrePass)
@@ -26,7 +74,7 @@ void GBufferPass::Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Rend
         MICROPROFILE_SCOPEGPUI("DepthPrePass", MP_GREY);
         GPU_MARKER(cmdList, L"Depth Pre-Pass");
         GraphicsHelper::TransitionResource(cmdList, m_GBuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cmdList->SetPipelineState(depthPrePassPSO);
+        cmdList->SetPipelineState(m_DepthPrePassPSO.Get());
 
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_GBuffer.depth.dsvHandle;
         cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
@@ -62,7 +110,7 @@ void GBufferPass::Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Rend
 
         cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);
 
-        cmdList->SetPipelineState(enableDepthPrePass ? gbufferPSO : gbufferWritePSO);
+        cmdList->SetPipelineState(enableDepthPrePass ? m_GBufferPSO.Get() : m_GBufferWritePSO.Get());
 
         model->Render(cmdList, renderer, frustum, AlphaMode::Opaque);
     }
