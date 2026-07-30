@@ -1,7 +1,7 @@
 #pragma once
 
-#include "GraphicsTypes.h"
-#include "MeshletCache.h"
+#include "Graphics/GraphicsTypes.h"
+#include "Graphics/MeshletCache.h"
 
 // Forward declarations
 struct cgltf_data;

@@ -3,8 +3,8 @@
 #include "ResourceUploadBatch.h"
 #include "GraphicsHelper.h"
 #include "GraphicsTypes.h"
-#include "Renderer.h"
-#include "Utility.h"
+#include "Rendering/Renderer.h"
+#include "Core/Utility.h"
 
 ResourceUploadBatch::ResourceUploadBatch(Renderer* renderer)
     : m_Renderer(renderer)

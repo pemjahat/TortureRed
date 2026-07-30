@@ -1,6 +1,6 @@
 #include "GraphicsTypes.h"
 #include "GraphicsHelper.h"
-#include "Utility.h"
+#include "Core/Utility.h"
 #include "d3dx12.h"
 
 bool CreateBuffer(GPUBuffer& buffer, UINT64 size, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState, bool createSRV, bool createUAV, const char* debugName)

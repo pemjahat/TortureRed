@@ -3,10 +3,10 @@
 #include "Utility.h"
 #include "Camera.h"
 #include "Model.h"
-#include "Renderer.h"
+#include "Rendering/Renderer.h"
 
 
-#include "Scene.h"
+#include "Graphics/Scene.h"
 
 class Application
 {

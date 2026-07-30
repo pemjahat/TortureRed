@@ -3,14 +3,14 @@
 #include <cgltf.h>
 
 #include "Model.h"
-#include "Renderer.h"
+#include "Rendering/Renderer.h"
 #include "Utility.h"
-#include "ResourceUploadBatch.h"
+#include "Graphics/ResourceUploadBatch.h"
 #include <cstdint>
 #include <algorithm>
-#include "GraphicsTypes.h"
-#include "GraphicsHelper.h"
-#include "MeshletCache.h"
+#include "Graphics/GraphicsTypes.h"
+#include "Graphics/GraphicsHelper.h"
+#include "Graphics/MeshletCache.h"
 
 Model::Model()
 {

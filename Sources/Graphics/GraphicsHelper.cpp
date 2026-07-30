@@ -5,7 +5,7 @@
 #include "GraphicsHelper.h"
 #include "GraphicsTypes.h"
 #include "d3dx12.h"
-#include "Utility.h"
+#include "Core/Utility.h"
 
 GraphicsContext GraphicsHelper::s_Context;
 
