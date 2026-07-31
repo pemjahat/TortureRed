@@ -38,8 +38,8 @@ float4 PSMain(VSOutput input) : SV_Target
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.uv).r;
     float3 normal = g_Textures[FrameCB.normalIndex].Sample(g_LinearSampler, input.uv).rgb * 2.0f - 1.0f;
     
-    // Early exit for sky pixels
-    if (depth == 0.0f) {
+    // Early exit for sky pixels. Reverse-Z: clear = 0.0 (far plane).
+    if (depth <= 0.0f) {
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
     

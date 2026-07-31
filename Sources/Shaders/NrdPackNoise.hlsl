@@ -35,7 +35,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> relaxSpecular    = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
     float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
-    if (depth == 0.0f)
+    if (depth <= 0.0f) // Reverse-Z: sky/clear pixels at far plane (depth = 0.0)
     {
         relaxDiffuse[screenPos]  = RELAX_FrontEnd_PackRadianceAndHitDist(0.0f.xxx, 0.0f, true);
         relaxSpecular[screenPos] = RELAX_FrontEnd_PackRadianceAndHitDist(0.0f.xxx, 0.0f, true);

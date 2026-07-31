@@ -52,14 +52,16 @@ void GBufferPass::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* roo
         psoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
         
-        // No depth write, using pre-pass
+        // No depth write, using pre-pass. EQUAL comparison works identically in both
+        // standard-Z and reverse-Z (exact depth match is convention-agnostic).
         psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferPSO));
 
-        // Create a version of G-Buffer PSO that writes to depth (for when pre-pass is disabled)
+        // Create a version of G-Buffer PSO that writes to depth (for when pre-pass is disabled).
+        // Reverse-Z: closer = larger depth → GREATER_EQUAL (keep fragments at/near camera).
         psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_GBufferWritePSO));
     }
 }
@@ -78,7 +80,7 @@ void GBufferPass::Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Rend
 
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_GBuffer.depth.dsvHandle;
         cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
-        cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
 
         model->Render(cmdList, renderer, frustum, AlphaMode::Opaque);
     }
@@ -105,7 +107,7 @@ void GBufferPass::Execute(ID3D12GraphicsCommandList* cmdList, Model* model, Rend
         if (!enableDepthPrePass)
         {
             GraphicsHelper::TransitionResource(cmdList, m_GBuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cmdList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
         }
 
         cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, &dsvHandle);

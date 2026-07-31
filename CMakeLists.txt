@@ -163,6 +163,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(meshoptimizer)
 
+# Download AMD FidelityFX SPD (Single Pass Downsampler) — used to build the HZB mip chain
+FetchContent_Declare(
+    fidelityfx_spd
+    GIT_REPOSITORY https://github.com/GPUOpen-Effects/FidelityFX-SPD.git
+    GIT_TAG v2.0
+    GIT_SUBMODULES ""
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/FidelityFX-SPD
+)
+
+FetchContent_GetProperties(fidelityfx_spd)
+if(NOT fidelityfx_spd_POPULATED)
+    FetchContent_Populate(fidelityfx_spd)
+endif()
+
 # Download jsmn (header-only JSON parser)
 CheckAndDownloadPackage(
     "jsmn"
@@ -204,7 +218,8 @@ include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/jsmn/jsmn-1.1.0)
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
-include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/microprofile)
+include_directories(${fidelityfx_spd_SOURCE_DIR}/ffx-spd)
+include_directories(${microprofile_SOURCE_DIR})
 include_directories(${meshoptimizer_SOURCE_DIR}/src)
 
 # Collect source files
@@ -229,6 +244,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     RTXDI_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include"
     SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/Sources/Shaders"
     SHARC_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/Externals/sharc/include"
+    SPD_INCLUDE_DIR="${fidelityfx_spd_SOURCE_DIR}/ffx-spd"
     NRD_SHADER_INCLUDE_DIR="${NRD_SOURCE_DIR}/Shaders"
 )
 

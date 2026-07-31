@@ -5,6 +5,10 @@
 #include "Core/Utility.h"
 #include "Graphics/GraphicsHelper.h"
 
+#define A_CPU 1
+#include "ffx_a.h"
+#include "ffx_spd.h"
+
 void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeight)
 {
     static constexpr UINT MAX_VISIBLE_MESHLETS = 1 << 20; // 1M meshlet candidates
@@ -114,6 +118,8 @@ void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeigh
     {
         std::cerr << "[Meshlet] Failed to create visibility buffer" << std::endl;
     }
+
+    CreateHZBResources(internalWidth, internalHeight);
 }
 
 void MeshletPass::RecreateVisibilityBuffer(uint32_t internalWidth, uint32_t internalHeight)
@@ -125,6 +131,80 @@ void MeshletPass::RecreateVisibilityBuffer(uint32_t internalWidth, uint32_t inte
     {
         std::cerr << "[Meshlet] Failed to recreate visibility buffer" << std::endl;
     }
+
+    CreateHZBResources(internalWidth, internalHeight);
+}
+
+// -----------------------------------------------------------------------------
+// CreateHZBResources"
+//
+// Sizes the HZB at half the next-power-of-two of the view dimensions computes the mip count,
+// and (re)creates the multi-mip HZB texture plus the small SPD support buffers.
+// Called from CreateResources() and again whenever the internal resolution changes
+// (RecreateVisibilityBuffer's call site), since the HZB is resolution-dependent.
+// -----------------------------------------------------------------------------
+void MeshletPass::CreateHZBResources(uint32_t internalWidth, uint32_t internalHeight)
+{
+    auto nextPow2 = [](uint32_t v) -> uint32_t
+    {
+        v--;
+        v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+        return v + 1;
+    };
+
+    m_HZBWidth  = std::max(nextPow2(internalWidth)  >> 1u, 1u);
+    m_HZBHeight = std::max(nextPow2(internalHeight) >> 1u, 1u);
+    uint32_t maxDim = std::max(m_HZBWidth, m_HZBHeight);
+    m_HZBMips = std::min<uint32_t>(static_cast<uint32_t>(std::floor(std::log2(static_cast<float>(maxDim)))) + 1, SPD_MAX_MIPS);
+
+    // R32_FLOAT: reverse-Z HZB stores the NEAREST (closest) depth per texel (min-reduce) — see HZB.hlsl header.
+    if (!CreateTexture(m_HZB, m_HZBWidth, m_HZBHeight, DXGI_FORMAT_R32_FLOAT,
+                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, m_HZBMips, 1, "Tex_HZB"))
+    {
+        std::cerr << "[Meshlet] Failed to create HZB texture" << std::endl;
+        return;
+    }
+
+    // Per-mip UAVs: CreateTexture() only creates a UAV for mip 0 (uavIndex). Allocate one bindless
+    // UAV descriptor per additional mip so HZB.hlsl can address any mip via ResourceDescriptorHeap[].
+    auto& ctx = GraphicsHelper::GetContext();
+    ID3D12Device* device = ctx.device;
+    m_HZBMipUAVIndices[0] = static_cast<int>(m_HZB.uavIndex);
+    for (uint32_t mip = 1; mip < m_HZBMips; ++mip)
+    {
+        int uavIdx = static_cast<int>(GraphicsHelper::AllocateSRV());
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uavDesc.Texture2D.MipSlice = mip;
+        device->CreateUnorderedAccessView(m_HZB.resource.Get(), nullptr, &uavDesc,
+                                           GraphicsHelper::GetSRVCPUHandle(static_cast<UINT>(uavIdx)));
+        m_HZBMipUAVIndices[mip] = uavIdx;
+    }
+    for (uint32_t mip = m_HZBMips; mip < SPD_MAX_MIPS; ++mip)
+        m_HZBMipUAVIndices[mip] = m_HZBMipUAVIndices[m_HZBMips - 1]; // unused slots — keep the SRV read in-bounds
+
+    // Upload the mip-UAV-index table read by HZB.hlsl (StructuredBuffer<uint>[SPD_MAX_MIPS]).
+    if (!CreateStructuredBuffer(m_HZBMipIndicesBuffer, sizeof(uint32_t), SPD_MAX_MIPS,
+                                D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, "SB_HZBMipIndices"))
+    {
+        std::cerr << "[Meshlet] Failed to create HZBMipIndices buffer" << std::endl;
+        return;
+    }
+    memcpy(m_HZBMipIndicesBuffer.cpuPtr, m_HZBMipUAVIndices, sizeof(uint32_t) * SPD_MAX_MIPS);
+
+    // SPD's global atomic cross-workgroup-sync counter — one uint, self-resets to 0 at the end of
+    // each SpdDownsample() dispatch (SPD v2.0+), so no per-frame clear is required after creation.
+    if (!CreateStructuredBuffer(m_HZBSpdCounter, sizeof(uint32_t), 1,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_HZBSpdCounter"))
+    {
+        std::cerr << "[Meshlet] Failed to create HZBSpdCounter buffer" << std::endl;
+        return;
+    }
+
+    std::cout << "[Meshlet] HZB resources created (" << m_HZBWidth << "x" << m_HZBHeight
+              << ", " << m_HZBMips << " mips)" << std::endl;
 }
 
 void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, ID3D12RootSignature* mainRootSignature, bool meshShaderSupported)
@@ -248,7 +328,7 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
             stream.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
             CD3DX12_DEPTH_STENCIL_DESC ds(D3D12_DEFAULT);
-            ds.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            ds.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // Reverse-Z: closer = larger depth
             stream.DepthStencilState = ds;
 
             stream.DSVFormat = DXGI_FORMAT_D32_FLOAT;
@@ -351,7 +431,135 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
         }
     }
 
+    CreateHZBPipelines(device);
+
     std::cout << "[Meshlet] Pipelines created" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+// CreateHZBPipelines
+//
+// HZB.hlsl accesses everything (source depth, per-mip HZB UAVs, SPD counter) via
+// bindless ResourceDescriptorHeap[idx] indices carried in HZBConstants, so its
+// dedicated root signature only needs a single root CBV (b0) plus the
+// CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED flag — no descriptor tables or root SRV/UAVs.
+// -----------------------------------------------------------------------------
+void MeshletPass::CreateHZBPipelines(ID3D12Device* device)
+{
+    {
+        CD3DX12_ROOT_PARAMETER rootParams[1];
+        rootParams[0].InitAsConstantBufferView(0); // b0: HZBConstants
+
+        CD3DX12_STATIC_SAMPLER_DESC pointClampSampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+        CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
+        rsDesc.Init(1, rootParams, 1, &pointClampSampler,
+                    D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
+
+        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
+        HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+        if (FAILED(hr))
+        {
+            if (error) std::cerr << "[Meshlet] HZB root signature error: " << (char*)error->GetBufferPointer() << std::endl;
+            return;
+        }
+        CHECK_HR(device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_HZBRootSignature)), "[Meshlet] CreateRootSignature (HZB) failed");
+    }
+
+    auto compile = [&](const char* entry, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso, const char* label)
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/HZB.hlsl", entry, "cs_6_6");
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_HZBRootSignature.Get();
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso)), label);
+        }
+    };
+    compile("HZBInitCS",   m_HZBInitPSO,   "[Meshlet] CreateComputePipelineState (HZB init) failed");
+    compile("HZBCreateCS", m_HZBCreatePSO, "[Meshlet] CreateComputePipelineState (HZB create) failed");
+}
+
+// -----------------------------------------------------------------------------
+// BuildHZB"
+//
+// Two dispatches: HZBInitCS writes mip 0 (min-reduced 2x2 Gather() of the source
+// depth buffer — reverse-Z: farthest=smallest, so min()), HZBCreateCS runs SPD to
+// generate mips 1..NumMips-1 in one dispatch.
+// Currently invoked once at the point in the frame where the old single-phase
+// culling read depth (see docs/task004-2passcull.md "Risks and scoped-out items"
+// for the still-pending two-phase Cull() rewrite that will consume this HZB).
+// -----------------------------------------------------------------------------
+void MeshletPass::BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depthBuffer)
+{
+    if (!m_HZBInitPSO || !m_HZBCreatePSO || m_HZB.resource == nullptr)
+        return;
+
+    GPU_MARKER(cmdList, L"HZB Build");
+
+    HZBConstants hzbConstants = {};
+    hzbConstants.DepthSRVIdx      = depthBuffer.srvIndex;
+    hzbConstants.MipIndicesSRVIdx = static_cast<uint32_t>(m_HZBMipIndicesBuffer.srvIndex);
+    hzbConstants.SpdCounterUAVIdx = static_cast<uint32_t>(m_HZBSpdCounter.uavIndex);
+    hzbConstants.NumMips  = m_HZBMips;
+    hzbConstants.Width    = m_HZBWidth;
+    hzbConstants.Height   = m_HZBHeight;
+    hzbConstants.DimensionsInvX = 1.0f / static_cast<float>(m_HZBWidth);
+    hzbConstants.DimensionsInvY = 1.0f / static_cast<float>(m_HZBHeight);
+
+    // SpdSetup() (CPU-side ffx_a.h macros) computes the dispatch dimensions for HZBCreateCS.
+    varAU2(dispatchThreadGroupCountXY);
+    varAU2(workGroupOffset);
+    varAU2(numWorkGroupsAndMips);
+    varAU4(rectInfo) = initAU4(0, 0, m_HZBWidth, m_HZBHeight);
+    SpdSetup(dispatchThreadGroupCountXY, workGroupOffset, numWorkGroupsAndMips, rectInfo,
+             static_cast<int>(m_HZBMips) - 1); // SPD's own mip count excludes mip 0 (already written by HZBInitCS)
+
+    hzbConstants.NumWorkGroups    = numWorkGroupsAndMips[0];
+    hzbConstants.WorkGroupOffsetX = workGroupOffset[0];
+    hzbConstants.WorkGroupOffsetY = workGroupOffset[1];
+
+    // Upload the constants for this frame via a small per-call scratch CBV.
+    // Reuses the same pattern as m_CullConstantsBuffer (persistent upload-heap map + memcpy).
+    if (m_HZBConstantsBuffer.resource == nullptr)
+    {
+        if (!CreateBuffer(m_HZBConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
+                          D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_HZBConstants"))
+        {
+            std::cerr << "[Meshlet] Failed to create HZBConstants buffer" << std::endl;
+            return;
+        }
+    }
+    memcpy(m_HZBConstantsBuffer.cpuPtr, &hzbConstants, sizeof(hzbConstants));
+
+    cmdList->SetComputeRootSignature(m_HZBRootSignature.Get());
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetComputeRootConstantBufferView(0, m_HZBConstantsBuffer.gpuAddress);
+
+    GraphicsHelper::TransitionResource(cmdList, depthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(cmdList, m_HZB, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_HZBSpdCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    {
+        GPU_MARKER(cmdList, L"HZB Init (mip 0)");
+        cmdList->SetPipelineState(m_HZBInitPSO.Get());
+        UINT groupsX = (m_HZBWidth + 15) / 16;
+        UINT groupsY = (m_HZBHeight + 15) / 16;
+        cmdList->Dispatch(groupsX, groupsY, 1);
+
+        D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_HZB.resource.Get());
+        cmdList->ResourceBarrier(1, &uavBarrier);
+    }
+
+    if (m_HZBMips > 1)
+    {
+        GPU_MARKER(cmdList, L"HZB Create (SPD mips)");
+        cmdList->SetPipelineState(m_HZBCreatePSO.Get());
+        cmdList->Dispatch(dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1], 1);
+    }
 }
 
 void MeshletPass::Cull(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model)

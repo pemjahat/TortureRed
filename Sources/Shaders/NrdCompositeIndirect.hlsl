@@ -34,7 +34,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     }
 
     float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
-    if (depth == 0.0f)
+    if (depth <= 0.0f) // Reverse-Z: sky/clear pixels at far plane (depth = 0.0)
     {
         diffuseOut[screenPos]  = 0.0f.xxxx;
         specularOut[screenPos] = 0.0f.xxxx;

@@ -152,7 +152,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
             desc.DepthStencilState                       = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
             desc.DepthStencilState.DepthEnable           = TRUE;
             desc.DepthStencilState.DepthWriteMask        = D3D12_DEPTH_WRITE_MASK_ZERO;
-            desc.DepthStencilState.DepthFunc             = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            desc.DepthStencilState.DepthFunc             = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // Reverse-Z
             // Alpha blend
             desc.BlendState                              = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
             desc.BlendState.RenderTarget[0].BlendEnable  = TRUE;
@@ -638,7 +638,7 @@ void Renderer::CreateRootSignature()
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
     samplers[1].Init(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, 
         D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER);
-    samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // Reverse-Z: closer = larger depth
     samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;

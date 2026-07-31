@@ -32,6 +32,12 @@ public:
     void Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model);      // Mesh Shader rasterize per bin (GPU-driven)
     void RasterizeDebug(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
 
+    // ----- HZB (Hierarchical Z-Buffer) -----
+    // Builds/rebuilds the HZB mip chain from `depthBuffer` via AMD FidelityFX SPD.
+    void BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depthBuffer);
+    GPUTexture& GetHZB() { return m_HZB; }
+    uint32_t GetHZBMips() const { return m_HZBMips; }
+
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
     int GetVisibleMeshletsSRVIndex() const { return m_VisibleMeshlets.srvIndex; }
@@ -41,6 +47,12 @@ public:
 
 private:
     static constexpr uint32_t NUM_RASTER_BINS = 2;
+    static constexpr uint32_t SPD_MAX_MIPS = 12; // AMD FidelityFX SPD hard limit — ffx_spd.h (ThirdParty/FidelityFX-SPD)
+
+    // Creates/recreates the resolution-dependent HZB texture + support buffers.
+    // Called from CreateResources() and from the resize path alongside RecreateVisibilityBuffer().
+    void CreateHZBResources(uint32_t internalWidth, uint32_t internalHeight);
+    void CreateHZBPipelines(ID3D12Device* device);
 
     // ----- Resources -----
     GPUBuffer m_VisibleMeshlets;            // RWStructuredBuffer<MeshletCandidate>
@@ -60,6 +72,14 @@ private:
     GPUTexture m_VisibilityBuffer;          // R32_UINT — packed (candidateIndex, primitiveID)
     int m_MeshletDebugMode = 0;             // 0=Off, 1=Instance, 2=Meshlet, 3=Primitive
 
+    // ----- HZB (Hierarchical Z-Buffer) resources -----
+    GPUTexture m_HZB;                                // R32_FLOAT, multi-mip. Reverse-Z: stores NEAREST (closest) depth per texel (min-reduce).
+    int        m_HZBMipUAVIndices[SPD_MAX_MIPS] = {}; // Bindless UAV index per mip (CPU-side cache; -1 = not yet allocated)
+    GPUBuffer  m_HZBMipIndicesBuffer;                 // StructuredBuffer<uint>[12] SRV — uploaded copy of m_HZBMipUAVIndices, read by HZB.hlsl
+    GPUBuffer  m_HZBSpdCounter;                       // RWStructuredBuffer<uint>[1] — SPD's global atomic counter
+    GPUBuffer  m_HZBConstantsBuffer;                  // Upload-heap CBV for HZBConstants (root param b0 of m_HZBRootSignature)
+    uint32_t   m_HZBWidth = 0, m_HZBHeight = 0, m_HZBMips = 0;
+
     // ----- PSOs -----
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletCullPSO;
 
@@ -74,11 +94,19 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
 
+    // HZB PSOs (main root signature — bindless heap access via ResourceDescriptorHeap[])
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBInitPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBCreatePSO;
+
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignatureCS;  // Indirect Dispatch (for binning)
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchMeshSignature;       // Indirect DispatchMesh (for rasterize)
 
     // Root signature for meshlet cull pass (separate from main RS)
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshletRootSignature;
+
+    // Dedicated root signature for HZB Init/Create passes: single root CBV (b0, HZBConstants) +
+    // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED flag for ResourceDescriptorHeap[] bindless access.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_HZBRootSignature;
 
     bool m_MeshShaderSupported = false;
 };

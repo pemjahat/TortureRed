@@ -47,8 +47,8 @@ ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 float4 PSMain(PSInput input) : SV_Target {
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
 
-    // Sky pixels — output background (transparent black)
-    if (depth == 0.0f) {
+    // Sky pixels — output background (transparent black). Reverse-Z: clear = 0.0 (far plane).
+    if (depth <= 0.0f) {
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 

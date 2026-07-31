@@ -154,6 +154,13 @@ public:
     void DispatchMeshletRasterizeDebug(class Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
+    // HZB (Hierarchical Z-Buffer).
+    // Builds the HZB mip chain from the current GBuffer depth via AMD FidelityFX SPD. Not yet
+    // consumed for occlusion culling — Cull()'s two-phase rewrite is kept for a follow-up step.
+    void DispatchBuildHZB() { m_Meshlet.BuildHZB(m_CommandList.Get(), m_GBufferPass.GetGBuffer().depth); }
+    GPUTexture& GetHZB() { return m_Meshlet.GetHZB(); }
+    uint32_t GetHZBMips() const { return m_Meshlet.GetHZBMips(); }
+
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }
     int GetVisibleMeshletsSRVIndex() const { return m_Meshlet.GetVisibleMeshletsSRVIndex(); }

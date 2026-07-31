@@ -318,4 +318,39 @@ struct DebugRasterParams {
     uint _pad1;
 };
 
+// =============================================================================
+// HZB (Hierarchical Z-Buffer) construction
+// Built via AMD FidelityFX SPD (fetched via CMake FetchContent, see CMakeLists.txt). Bound as a root CBV
+// (b0) on MeshletPass's dedicated m_HZBRootSignature. All texture/buffer access
+// inside HZB.hlsl goes through ResourceDescriptorHeap[idx] bindless indices —
+// no members here are arrays, to avoid HLSL cbuffer array-packing (16 bytes per
+// element) mismatching this struct's plain C++ layout. Per-mip HZB UAV indices
+// instead live in a small StructuredBuffer<uint> (MipIndicesSRVIdx), which packs
+// tightly on both sides.
+struct HZBConstants {
+    uint  DepthSRVIdx;       // SRV index of the source depth buffer (GBuffer.depth)
+    uint  MipIndicesSRVIdx;  // SRV index of StructuredBuffer<uint> — one HZB mip UAV index per element
+    uint  SpdCounterUAVIdx;  // UAV index of the SPD global atomic counter (RWStructuredBuffer<uint>[1])
+    uint  NumMips;           // Number of HZB mip levels (<= 12, SPD's max)
+    uint  NumWorkGroups;     // SpdSetup() output — total thread groups dispatched (X*Y)
+    uint  WorkGroupOffsetX;  // SpdSetup() output — always 0 (HZB has no sub-rect offset)
+    uint  WorkGroupOffsetY;
+    uint  Width;             // HZB mip 0 width, in texels
+    uint  Height;            // HZB mip 0 height, in texels
+    float DimensionsInvX;    // 1 / Width  — used by HZBInitCS to compute the source-depth UV
+    float DimensionsInvY;    // 1 / Height
+    uint  _pad0;
+};
+
+// Debug visualization of the raw HZB mip chain (Sources/Shaders/HZBDebugView.hlsl),
+// bound at the same root param 13 (b2) slot VisibilityDebugView.hlsl's DebugParams
+// uses — reused across debug-only CS PSOs, never bound simultaneously.
+struct HZBDebugParams {
+    uint HZBSRVIdx;    // SRV index of the HZB texture (all mips)
+    uint MipLevel;     // Which mip to visualize
+    uint OutputUAVIdx; // UAV index of FullScreenDebugTex (R16G16B16A16_FLOAT)
+    uint Width;        // Output (FullScreenDebugTex) width
+    uint Height;       // Output (FullScreenDebugTex) height
+};
+
 #endif // SHARED_TYPES_H

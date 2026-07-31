@@ -35,9 +35,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> giDiffuseOut  = ResourceDescriptorHeap[g_Indices.OutputIdx0];
     RWTexture2D<float4> giSpecularOut = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
-    // Sky pixels: write zero and exit
+    // Sky pixels: write zero and exit (reverse-Z: clear value = 0.0 = far plane)
     float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
-    if (depth == 0.0f)
+    if (depth <= 0.0f)
     {
         giDiffuseOut[screenPos]  = float4(0.0f, 0.0f, 0.0f, 0.0f);
         giSpecularOut[screenPos] = float4(0.0f, 0.0f, 0.0f, 0.0f);

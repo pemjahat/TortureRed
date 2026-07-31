@@ -36,8 +36,8 @@ float4 PSMain(PSInput input) : SV_Target {
     float4 material = g_Textures[FrameCB.materialIndex].Sample(g_LinearSampler, input.texCoord);
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
 
-    // Early exit for sky pixels
-    // if (depth == 0.0f) {
+    // Early exit for sky pixels (reverse-Z: depth <= 0.0 = clear/far plane)
+    // if (depth <= 0.0f) {
     //     return float4(0.0f, 0.0f, 0.0f, 1.0f);
     // }
 

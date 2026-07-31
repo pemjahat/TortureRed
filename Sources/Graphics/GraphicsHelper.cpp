@@ -274,6 +274,15 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     arguments.push_back(sharcDirW.c_str());
 #endif
 
+#ifdef SPD_INCLUDE_DIR
+    static const std::wstring spdDirW = []{
+        std::string s = SPD_INCLUDE_DIR;
+        return std::wstring(s.begin(), s.end());
+    }();
+    arguments.push_back(L"-I");
+    arguments.push_back(spdDirW.c_str());
+#endif
+
 #ifdef NRD_SHADER_INCLUDE_DIR
     static const std::wstring nrdShaderDirW = []{
         std::string s = NRD_SHADER_INCLUDE_DIR;

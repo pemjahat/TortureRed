@@ -15,8 +15,8 @@ Camera::Camera()
     , m_CameraModeActive(false)
     , m_FovY(XM_PI / 3.0f)  // 60 degrees default
     , m_AspectRatio(16.0f / 9.0f)
-    , m_NearZ(0.1f)
-    , m_FarZ(1000.0f)
+    , m_NearZ(1.0f)    // Reverse-Z: near clip plane at z_view = -1.0, maps to NDC depth 1.0
+    , m_FarZ(0.0f)     // Reverse-Z sentinel (infinite far): far maps to NDC depth 0.0
 {
     m_Keys[0] = m_Keys[1] = m_Keys[2] = m_Keys[3] = false;
 }
@@ -113,7 +113,26 @@ void Camera::SetProjectionParameters(float fovY, float aspectRatio, float nearZ,
 
 DirectX::XMMATRIX Camera::GetProjMatrix() const
 {
-    return XMMatrixPerspectiveFovRH(m_FovY, m_AspectRatio, m_NearZ, m_FarZ);
+    // Custom reverse-Z projection (RH, infinite far plane).
+    // Maps: near plane (z_view = -m_NearZ) → NDC depth 1.0
+    //       far plane  (z_view → -∞)      → NDC depth 0.0
+    //
+    // z_ndc = m_NearZ / (-z_view), derived from:
+    //   z_clip = m_NearZ      (constant, independent of z_view)
+    //   w_clip = -z_view      (RH: negate z for positive w after divide)
+    //
+    // This gives the best depth precision distribution for reverse-Z.
+    float yScale = 1.0f / tanf(m_FovY * 0.5f);
+    float xScale = yScale / m_AspectRatio;
+
+    DirectX::XMMATRIX proj = DirectX::XMMatrixSet(
+        xScale, 0.0f,   0.0f,      0.0f,
+        0.0f,   yScale, 0.0f,      0.0f,
+        0.0f,   0.0f,   0.0f,     -1.0f,
+        0.0f,   0.0f,   m_NearZ,   0.0f
+    );
+
+    return proj;
 }
 
 DirectX::XMMATRIX Camera::GetInvViewMatrix() const

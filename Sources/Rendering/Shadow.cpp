@@ -25,6 +25,7 @@ void Shadow::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSign
     desc.RasterizerState.FrontCounterClockwise = TRUE;
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; // Reverse-Z: closer = larger depth
     desc.SampleMask = UINT_MAX;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.SampleDesc.Count = 1;

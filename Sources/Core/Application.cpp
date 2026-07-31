@@ -81,11 +81,11 @@ void Application::Initialize()
     m_Renderer.CreateLightsBuffer();
     m_Renderer.CreateLightLUTBuffer();
 
-    // Set camera projection parameters
+    // Set camera projection parameters (reverse-Z: nearZ controls NDC depth=1.0 plane)
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
     float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
-    float nearZ = 0.1f;
-    float farZ = 1000.0f;
+    float nearZ = 1.0f;  // Reverse-Z: near clip at z_view = -1.0
+    float farZ  = 0.0f;  // Reverse-Z sentinel: infinite far plane
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
     
     m_FrameConstants.enableRestir = 0;
@@ -358,10 +358,12 @@ void Application::Update(float deltaTime)
     DirectX::XMMATRIX jitteredProj = proj;
     if (taaActive)
     {
-        // Offset in clip space: (2 * jitter.x / internalWidth, -2 * jitter.y / internalHeight)
+        // Offset in clip space: (2 * jitter.x / internalWidth, -2 * jitter.y / internalHeight).
+        // Reverse-Z matrix layout: _31 = _32 = 0 (no z→x or z→y coupling), so adding
+        // jitter to these elements shifts x'/y' by jitter*z_view, producing the correct
+        // sub-pixel offset after perspective divide (same approach as standard-Z).
         float jitterX = 2.0f * m_FrameConstants.taaJitter.x / (float)m_InternalWidth;
         float jitterY = -2.0f * m_FrameConstants.taaJitter.y / (float)m_InternalHeight;
-        // Add jitter to projection matrix elements [2][0] and [2][1] (row-major)
         DirectX::XMFLOAT4X4 projF;
         DirectX::XMStoreFloat4x4(&projF, proj);
         projF._31 += jitterX;
@@ -623,7 +625,7 @@ void Application::Render()
             //     cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
             //     cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
             //     cmdList->ClearRenderTargetView(rtvs[3], clearCol, 0, nullptr);
-            //     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            //     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
 
             //     m_Renderer.DispatchMeshletRasterizeDebug(&m_Model);
             // }
@@ -672,7 +674,7 @@ void Application::Render()
                 cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
                 cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
                 cmdList->ClearRenderTargetView(rtvs[3], clearVis, 0, nullptr);
-                cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+                cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
 
                 m_Renderer.DispatchMeshletRasterize(&m_Model);
 
@@ -721,6 +723,16 @@ void Application::Render()
         // UNION PATH — runs after both meshlet and non-meshlet geometry branches.
         // GBuffer (albedo, normal, material, depth) is now populated by either path.
         // -----------------------------------------------------------------------
+
+        // HZB (Hierarchical Z-Buffer) build.
+        // Builds the mip chain from this frame's depth via AMD FidelityFX SPD. Not yet
+        // consumed for occlusion culling — the two-phase Cull() rewrite is kept for a follow-up step.
+        {
+            MICROPROFILE_SCOPEI("Render", "HZBBuild", MP_ORANGE);
+            MICROPROFILE_SCOPEGPUI("HZBBuild", MP_ORANGE);
+            GPU_MARKER(cmdList, L"HZB Build");
+            m_Renderer.DispatchBuildHZB();
+        }
 
         // ReSTIR DI — direct illumination from local lights, reads GBuffer depth + material
         {

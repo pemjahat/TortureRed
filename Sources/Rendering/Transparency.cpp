@@ -50,10 +50,10 @@ void Transparency::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* ro
         // Double sided 
         psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         
-        // Read-only depth
+        // Read-only depth. Reverse-Z: closer = larger depth → GREATER_EQUAL.
         psoDesc.DepthStencilState.DepthEnable = TRUE;
         psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
 
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // Backbuffer format
@@ -74,9 +74,10 @@ void Transparency::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* ro
 
         psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 
+        // Reverse-Z: closer = larger depth → GREATER_EQUAL.
         psoDesc.DepthStencilState.DepthEnable = TRUE;
         psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
 
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR intermediate texture format

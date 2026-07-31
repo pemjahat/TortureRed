@@ -150,7 +150,7 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
     }
     else if (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
     {
-        clearVal.DepthStencil.Depth = 1.0f;
+        clearVal.DepthStencil.Depth = 0.0f; // Reverse-Z: far plane = 0.0 (clear value)
     }
 
     CHECK_HR(ctx.device->CreateCommittedResource(
