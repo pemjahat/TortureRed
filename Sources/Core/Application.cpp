@@ -732,31 +732,31 @@ void Application::Render()
                 }
 
                 // --- Phase 2: retest occluded instances vs fresh HZB ---
-                {
-                    MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
-                    MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
-                    GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
-                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1, m_FreezeCulling);
-                }
-                {
-                    MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
-                    MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
-                    GPU_MARKER(cmdList, L"Phase 2 - Binning");
-                    m_Renderer.DispatchMeshletBinning();
-                }
-                {
-                    MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
-                    MICROPROFILE_SCOPEGPUI("Phase2_Rasterize", MP_BLUE);
-                    GPU_MARKER(cmdList, L"Phase 2 - Rasterize (Preserve depth)");
-                    doMeshletRasterize(false); // Preserve depth/color from Phase 1
-                }
-                {
-                    MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
-                    MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
-                    GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
-                    if (!m_FreezeCulling)
-                        m_Renderer.DispatchBuildHZB();
-                }
+                // {
+                //     MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
+                //     MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
+                //     GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
+                //     m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1, m_FreezeCulling);
+                // }
+                // {
+                //     MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
+                //     MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
+                //     GPU_MARKER(cmdList, L"Phase 2 - Binning");
+                //     m_Renderer.DispatchMeshletBinning();
+                // }
+                // {
+                //     MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
+                //     MICROPROFILE_SCOPEGPUI("Phase2_Rasterize", MP_BLUE);
+                //     GPU_MARKER(cmdList, L"Phase 2 - Rasterize (Preserve depth)");
+                //     doMeshletRasterize(false); // Preserve depth/color from Phase 1
+                // }
+                // {
+                //     MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
+                //     MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
+                //     GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
+                //     if (!m_FreezeCulling)
+                //         m_Renderer.DispatchBuildHZB();
+                // }
 
                 // Debug overlay — runs once after final rasterize
                 runDebugOverlay();
@@ -831,12 +831,29 @@ void Application::Render()
             m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
         }
 
+        // HZB mip viewer (task007 mode 2) — visualize the selected HZB mip as grayscale.
+        // Runs after all HZB builds, so it shows this frame's freshest chain; the
+        // FullScreenDebug pass then blits FullScreenDebugTex in place of the lighting pass.
+        if (m_UseMeshlet && m_HZBDebugMip >= 0)
+        {
+            GPU_MARKER(cmdList, L"HZB Mip Viewer");
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_Renderer.DispatchHZBDebugView(m_Renderer.GetFullScreenDebugTex().uavIndex,
+                                            m_InternalWidth, m_InternalHeight, m_HZBDebugMip);
+            D3D12_RESOURCE_BARRIER hzbViewBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Renderer.GetFullScreenDebugTex().resource.Get());
+            cmdList->ResourceBarrier(1, &hzbViewBarrier);
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
         // Determine if any full-screen debug mode is active.
         // When true, FullScreenDebug.hlsl replaces Lighting.hlsl entirely.
         const bool debugActive =
             (m_Renderer.GetMeshletDebugMode() > 0) ||
+            (m_UseMeshlet && m_HZBDebugMip >= 0) ||
             (m_FrameConstants.sharcDebug != 0) ||
             (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
             (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
@@ -966,10 +983,16 @@ void Application::RenderImGui()
             m_Renderer.SetMeshletDebugMode(debugMode);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Overlay meshlet debug visualization.\nInstanceID = random color per instance\nMeshletID = random color per meshlet\nPrimitiveID = random color per triangle (wireframe)");
+
+        int hzbMipMax = (int)m_Renderer.GetHZBMips() - 1;
+        ImGui::SliderInt("HZB Mip Viewer", &m_HZBDebugMip, -1, hzbMipMax, m_HZBDebugMip < 0 ? "Off" : "Mip %d");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Visualize one HZB mip as grayscale (reverse-Z: white = near, black = far/sky).\nDisplayed via the FullScreenDebug pass (replaces lighting).\nOverrides the Meshlet Debug View overlay when both are active.");
     }
-    else if (m_Renderer.GetMeshletDebugMode() != 0)
+    else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0)
     {
         m_Renderer.SetMeshletDebugMode(0); // Reset debug when meshlet is disabled
+        m_HZBDebugMip = -1;
     }
 
     if (m_Renderer.IsRayTracingSupported())

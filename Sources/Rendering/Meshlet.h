@@ -39,6 +39,9 @@ public:
     void BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depthBuffer);
     GPUTexture& GetHZB() { return m_HZB; }
     uint32_t GetHZBMips() const { return m_HZBMips; }
+    // task007 mode 2: visualize one HZB mip as grayscale into a bindless UAV (FullScreenDebugTex)
+    void DebugViewHZB(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                      uint32_t outputUAVIdx, uint32_t outputWidth, uint32_t outputHeight, int mipLevel);
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
@@ -88,6 +91,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];      // Normal render (always writes vis buffer token to SV_Target3)
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBDebugViewPSO;                  // HZB mip viewer (task007 mode 2)
 
     // HZB PSOs (main root signature — bindless heap access via ResourceDescriptorHeap[])
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBInitPSO;

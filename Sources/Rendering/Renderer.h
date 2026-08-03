@@ -166,6 +166,10 @@ public:
     void DispatchBuildHZB() { m_Meshlet.BuildHZB(m_CommandList.Get(), m_GBufferPass.GetGBuffer().depth); }
     GPUTexture& GetHZB() { return m_Meshlet.GetHZB(); }
     uint32_t GetHZBMips() const { return m_Meshlet.GetHZBMips(); }
+    // HZB mip viewer (task007 mode 2): renders one HZB mip as grayscale into a bindless UAV
+    // (FullScreenDebugTex), displayed by the FullScreenDebug pass which replaces the lighting pass.
+    void DispatchHZBDebugView(uint32_t outputUAVIdx, uint32_t width, uint32_t height, int mipLevel)
+    { m_Meshlet.DebugViewHZB(m_CommandList.Get(), m_RootSignature.Get(), outputUAVIdx, width, height, mipLevel); }
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }

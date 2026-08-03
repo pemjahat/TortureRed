@@ -429,6 +429,19 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
         }
     }
 
+    // --- HZB Debug View PSO (CS) — raw HZB mip viewer (task007 mode 2) ---
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/HZBDebugView.hlsl", "HZBDebugViewCS", "cs_6_6");
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = mainRootSignature;
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_HZBDebugViewPSO)),
+                     "[Meshlet] CreateComputePipelineState (HZB debug view) failed");
+        }
+    }
+
     CreateHZBPipelines(device);
 
     std::cout << "[Meshlet] Pipelines created" << std::endl;
@@ -567,6 +580,35 @@ void MeshletPass::BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depth
     D3D12_RESOURCE_BARRIER hzbDoneBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_HZB.resource.Get());
     cmdList->ResourceBarrier(1, &hzbDoneBarrier);
     GraphicsHelper::TransitionResource(cmdList, m_HZB, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+// -----------------------------------------------------------------------------
+// DebugViewHZB (task007 mode 2)
+//
+// Renders one HZB mip as grayscale into the caller-provided bindless UAV
+// (FullScreenDebugTex), which the FullScreenDebug pass then blits to screen.
+// The HZB is expected in NON_PIXEL_SHADER_RESOURCE state (as left by BuildHZB).
+// -----------------------------------------------------------------------------
+void MeshletPass::DebugViewHZB(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                               uint32_t outputUAVIdx, uint32_t outputWidth, uint32_t outputHeight, int mipLevel)
+{
+    if (!m_HZBDebugViewPSO || !m_HZB.resource)
+        return;
+
+    int clampedMip = mipLevel < 0 ? 0 : (mipLevel >= (int)m_HZBMips ? (int)m_HZBMips - 1 : mipLevel);
+
+    HZBDebugParams params = {};
+    params.HZBSRVIdx    = static_cast<uint32_t>(m_HZB.srvIndex);
+    params.MipLevel     = static_cast<uint32_t>(clampedMip);
+    params.OutputUAVIdx = outputUAVIdx;
+    params.Width        = outputWidth;
+    params.Height       = outputHeight;
+
+    cmdList->SetComputeRootSignature(mainRootSignature);
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetPipelineState(m_HZBDebugViewPSO.Get());
+    cmdList->SetComputeRoot32BitConstants(13, sizeof(HZBDebugParams) / 4, &params, 0); // b2
+    cmdList->Dispatch((outputWidth + 7) / 8, (outputHeight + 7) / 8, 1);
 }
 
 // =============================================================================
