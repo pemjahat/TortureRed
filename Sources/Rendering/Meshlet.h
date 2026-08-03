@@ -27,7 +27,11 @@ public:
     void RecreateVisibilityBuffer(uint32_t internalWidth, uint32_t internalHeight);
     void CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, ID3D12RootSignature* mainRootSignature, bool meshShaderSupported);
 
-    void Cull(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model);
+    // Hierarchical two-stage culling: CullInstancesCS → CullMeshletsCS.
+    // occlusionEnabled=1: two-phase occlusion culling (Phase 1 vs prev-HZB, Phase 2 vs fresh HZB).
+    // occlusionEnabled=0 (phase must be 0): frustum-only single-phase cull.
+    void CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
+                     bool occlusionEnabled, int phase); // phase: 0=Phase1 (vs prev HZB), 1=Phase2 (vs fresh HZB)
     void Binning(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress);                    // 4-pass GPU sort: PrepareArgs -> Classify -> AllocateBinRanges -> WriteBins
     void Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model);      // Mesh Shader rasterize per bin (GPU-driven)
     void RasterizeDebug(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
@@ -57,9 +61,6 @@ private:
     // ----- Resources -----
     GPUBuffer m_VisibleMeshlets;            // RWStructuredBuffer<MeshletCandidate>
     GPUBuffer m_VisibleMeshletsCounter;     // RWBuffer<uint>
-    GPUBuffer m_CullDispatchArgs;           // Indirect dispatch args for cull
-    GPUBuffer m_CullConstantsBuffer;        // Cull constants (total meshlets)
-    GPUBuffer m_VisibleMeshletsDebug;       // DEBUG: per-visible-meshlet VertexCount/TriangleCount
 
     GPUBuffer m_MeshletCounts;              // RWStructuredBuffer<uint>[NUM_RASTER_BINS]
     GPUBuffer m_MeshletOffsetAndCounts;     // RWStructuredBuffer<uint4>[NUM_RASTER_BINS] — (count,1,1,offset) — SRV only
@@ -81,8 +82,6 @@ private:
     uint32_t   m_HZBWidth = 0, m_HZBHeight = 0, m_HZBMips = 0;
 
     // ----- PSOs -----
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletCullPSO;
-
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletBinPrepareArgsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletClassifyPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletAllocateBinRangesPSO;
@@ -101,12 +100,32 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignatureCS;  // Indirect Dispatch (for binning)
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchMeshSignature;       // Indirect DispatchMesh (for rasterize)
 
-    // Root signature for meshlet cull pass (separate from main RS)
+    // Unified root signature for all meshlet cull passes (old frustum-only + two-pass occlusion).
+    // Superset of both: 15 root params (2 CBV + 5 SRV + 8 UAV) + static point-clamp sampler +
+    // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED flag (required for HZB bindless access).
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshletRootSignature;
 
     // Dedicated root signature for HZB Init/Create passes: single root CBV (b0, HZBConstants) +
     // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED flag for ResourceDescriptorHeap[] bindless access.
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_HZBRootSignature;
+
+    // ----- Two-pass occlusion culling resources -----
+    GPUBuffer m_CandidateMeshlets;              // RWStructuredBuffer<MeshletCandidate> — enum'd by CullInstancesCS
+    GPUBuffer m_CandidateMeshletsCounter;       // RWStructuredBuffer<uint>[1] — atomic counter
+    GPUBuffer m_OccludedInstances;              // RWStructuredBuffer<uint> — deferred instance indices for Phase 2
+    GPUBuffer m_OccludedInstancesCounter;       // RWStructuredBuffer<uint>[1]
+    GPUBuffer m_MeshletCullArgs;                // Indirect dispatch args for CullMeshletsCS (uint3)
+    GPUBuffer m_InstanceCullArgs;               // Indirect dispatch args for Phase 2 CullInstancesCS (uint3)
+    GPUBuffer m_TwoPassCullConstantsBuffer[2];  // Upload-heap CBV, double-buffered: [0]=Phase1, [1]=Phase2
+
+    // Two-pass cull PSOs
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_CullInstancesPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_CullMeshletsPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_BuildMeshletCullIndirectArgsPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_BuildInstanceCullIndirectArgsPSO;
+
+    // Creates the TwoPassCull root signature and compiles all two-pass cull CS PSOs.
+    void CreateTwoPassCullPipelines(ID3D12Device* device);
 
     bool m_MeshShaderSupported = false;
 };

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "Graphics/GraphicsTypes.h"
 #include "Graphics/GraphicsHelper.h"
+#include <unordered_map>
 #include "Graphics/MeshletCache.h"
 
 Model::Model()
@@ -385,9 +386,11 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // Create meshlet GPU buffers (global streams + MeshData + InstanceData)
     CreateMeshletResources(renderer);
 
-    // Re-populate InstanceData transforms after CreateMeshletResources() rebuilds the array
-    // (CreateMeshletResources clears m_InstanceDataArray and resets LocalToWorld to identity;
-    //  UpdateNodeBuffer walks the node hierarchy to write the correct world transforms).
+    // Update InstanceData transforms from the node hierarchy for the initial frame.
+    // CreateMeshletResources() computes the world transform at load time (before
+    // animations are applied), then UpdateNodeBuffer() walks the node tree to
+    // recompute transforms for all instances — handles both the initial frame and
+    // per-frame animation updates.
     UpdateNodeBuffer();
 }
 
@@ -717,13 +720,12 @@ void Model::UpdateNodeBuffer()
     }
 
     // InstanceData transform update (meshlet path).
-    // Mirrors the iteration order of CreateMeshletResources() exactly:
-    //   same node loop, same primitive loop, same skip conditions.
-    // This guarantees InstanceDataArray[instIdx] always corresponds to
-    // MeshDataArray[instIdx] without relying on a stored NodeIndex field.
+    // Walks nodes in the same order as Pass 2 of CreateMeshletResources(),
+    // so instIdx matches m_InstanceDataArray population order.
+    // Each InstanceData links to its MeshData via MeshDataIndex — the two
+    // arrays are independent (multiple instances can share one SubMesh).
     // Walks parent chain accumulating on the RIGHT:
     //   world = node.local × parent.local × ... × root.local
-    // (Matches UpdateNodeBufferRecursive: world = node->transform * parentWorld.)
     if (m_InstanceDataBuffer.cpuPtr && !m_InstanceDataArray.empty())
     {
         size_t instIdx = 0;
@@ -1190,6 +1192,11 @@ void Model::UploadBuffers(Renderer* renderer)
         batch.Upload(m_MeshDataBuffer, m_MeshDataArray.data(), m_MeshDataArray.size() * sizeof(MeshData));
         batch.Transition(m_MeshDataBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
     }
+    if (m_InstanceBoundsBuffer.resource && !m_InstanceBoundsArray.empty())
+    {
+        batch.Upload(m_InstanceBoundsBuffer, m_InstanceBoundsArray.data(), m_InstanceBoundsArray.size() * sizeof(InstanceBounds));
+        batch.Transition(m_InstanceBoundsBuffer, D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
     batch.End();
 }
 
@@ -1524,16 +1531,22 @@ void Model::CreateMeshletResources(Renderer* renderer)
 
     m_MeshDataArray.clear();
     m_InstanceDataArray.clear();
+    m_InstanceBoundsArray.clear();
     m_TotalMeshletCount = 0;
 
-    // Walk nodes and populate consolidated streams
-    for (size_t nodeIdx = 0; nodeIdx < m_GltfModel.nodes.size(); ++nodeIdx)
+    // =========================================================================
+    // Pass 1 — Build SubMeshes (iterate meshes → primitives only).
+    // Map from GLTFPrimitive* → MeshData array index, used in Pass 2 for
+    // instance-to-submesh lookups. Local to this function only.
+    // =========================================================================
+    std::unordered_map<const GLTFPrimitive*, uint32_t> primToMeshData;
+    // Populates global vertex/meshlet streams and m_MeshDataArray.
+    // Records the primitive→MeshData index mapping for Pass 2 lookup.
+    // No node is visited here.
+    // =========================================================================
+    for (auto& mesh : m_GltfModel.meshes)
     {
-        GLTFNode& node = m_GltfModel.nodes[nodeIdx];
-        if (!node.mesh)
-            continue;
-
-        for (auto& prim : node.mesh->primitives)
+        for (auto& prim : mesh.primitives)
         {
             if (prim.vertices.empty())
                 continue;
@@ -1566,29 +1579,74 @@ void Model::CreateMeshletResources(Renderer* renderer)
             m_AllMeshletTriangles.insert(m_AllMeshletTriangles.end(), prim.meshletTriangles.begin(), prim.meshletTriangles.end());
             m_AllMeshletBounds.insert(m_AllMeshletBounds.end(), prim.meshletBounds.begin(), prim.meshletBounds.end());
 
+            uint32_t meshDataIdx = static_cast<uint32_t>(m_MeshDataArray.size());
             m_MeshDataArray.push_back(md);
             m_TotalMeshletCount += md.MeshletCount;
 
-            // Per-instance data: one entry per node-primitive.
+            // LOCAL-space AABB, taken directly from the glTF POSITION accessor's
+            // min/max (required by the glTF 2.0 spec; parsed at load into prim.aabb
+            // with a vertex-scan fallback). Meshlets partition the same vertices,
+            // so the accessor min/max is equivalent to the union of meshlet bounds
+            // — but tighter and free (no per-meshlet iteration).
+            // One entry per MeshData — indexed by MeshDataIndex from the cull shaders,
+            // which apply the instance's per-frame LocalToWorld at cull time.
+            {
+                InstanceBounds ib = {};
+                ib.BoundsCenter  = prim.aabb.Center;
+                ib.BoundsExtents = prim.aabb.Extents;
+                m_InstanceBoundsArray.push_back(ib);
+            }
+
+            // Record mapping: this primitive → its MeshData index.
+            // Used in Pass 2 by nodes that reference this primitive.
+            primToMeshData[&prim] = meshDataIdx;
+        }
+    }
+
+    // =========================================================================
+    // Pass 2 — Build Instances (iterate nodes → primitives).
+    // Each node×primitive pair creates one InstanceData pointing to the
+    // already-built MeshData via MeshDataIndex (index-based reference).
+    // The same MeshData can be referenced by multiple instances (shared mesh).
+    // =========================================================================
+    for (size_t nodeIdx = 0; nodeIdx < m_GltfModel.nodes.size(); ++nodeIdx)
+    {
+        GLTFNode& node = m_GltfModel.nodes[nodeIdx];
+        if (!node.mesh)
+            continue;
+
+        for (auto& prim : node.mesh->primitives)
+        {
+            if (prim.vertices.empty())
+                continue;
+
+            auto it = primToMeshData.find(&prim);
+            if (it == primToMeshData.end())
+            {
+                // Primitive was not built in Pass 1 (should not happen if
+                // BuildMeshlets ran for all meshes — defensive skip).
+                continue;
+            }
+
             // Compute the world transform at load time by walking the node's
             // parent chain — same approach as D3D12_Research's cgltf_node_transform_world().
-            // No dependency on UpdateNodeBufferRecursive().
-            InstanceData inst = {};
+            DirectX::XMMATRIX world = DirectX::XMMatrixIdentity();
+            const GLTFNode* n = &node;
+            while (n)
             {
-                // Walk parent chain from node up to root, accumulating on the
-                // RIGHT:  world = node.local × parent.local × ... × root.local
-                // This matches UpdateNodeBufferRecursive: world = node->transform * parentWorld.
-                DirectX::XMMATRIX world = DirectX::XMMatrixIdentity();
-                const GLTFNode* n = &node;
-                while (n)
-                {
-                    world = DirectX::XMMatrixMultiply(
-                        world, DirectX::XMLoadFloat4x4(&n->transform));
-                    n = n->parent;
-                }
-                DirectX::XMStoreFloat4x4(&inst.LocalToWorld, world);
+                world = DirectX::XMMatrixMultiply(
+                    world, DirectX::XMLoadFloat4x4(&n->transform));
+                n = n->parent;
             }
-            inst.MeshDataIndex = static_cast<uint32_t>(m_MeshDataArray.size() - 1);
+
+            InstanceData inst = {};
+            DirectX::XMStoreFloat4x4(&inst.LocalToWorld, world);
+            inst.MeshDataIndex = it->second;  // ← index-based reference into m_MeshDataArray
+            inst.BoundsIndex   = it->second;  // ← local-space bounds built in Pass 1,
+                                              //   one per MeshData (shared meshes share
+                                              //   the same entry). Transformed per frame
+                                              //   by LocalToWorld in the cull shader.
+
             m_InstanceDataArray.push_back(inst);
         }
     }
@@ -1627,11 +1685,15 @@ void Model::CreateMeshletResources(Renderer* renderer)
         CreateStructuredBuffer(m_InstanceDataBuffer, sizeof(InstanceData), m_InstanceDataArray.size(),
                               D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, "SB_InstanceData");
     }
+    if (!m_InstanceBoundsArray.empty()) {
+        CreateStructuredBuffer(m_InstanceBoundsBuffer, sizeof(InstanceBounds), m_InstanceBoundsArray.size(),
+                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, "SB_InstanceBounds");
+    }
 
     m_MeshletReady = true;
 
     std::cout << "[Meshlet] Uploaded " << m_TotalMeshletCount << " total meshlets across "
-              << m_MeshDataArray.size() << " primitives." << std::endl;
+              << m_MeshDataArray.size() << " SubMeshes, " << m_InstanceDataArray.size() << " Instances." << std::endl;
     std::cout << "[Meshlet]  Positions: " << m_AllPositions.size() << "  Normals: " << m_AllPackedNormals.size()
               << "  UVs: " << m_AllPackedUVs.size() << "  Triangles: " << m_AllMeshletTriangles.size() << std::endl;
 }

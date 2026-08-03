@@ -1102,9 +1102,10 @@ void Renderer::CreateMeshletPipelines()
     m_Meshlet.CreatePipelines(m_Device.Get(), m_Device2.Get(), m_RootSignature.Get(), m_MeshShaderSupported);
 }
 
-void Renderer::DispatchMeshletCull(Model* model, const FrameConstants& frame)
+void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& frame,
+                                           bool occlusionEnabled, int phase)
 {
-    m_Meshlet.Cull(m_CommandList.Get(), m_FrameCB.gpuAddress, model);
+    m_Meshlet.CullTwoPass(m_CommandList.Get(), m_FrameCB.gpuAddress, model, occlusionEnabled, phase);
 }
 
 void Renderer::DispatchMeshletBinning()

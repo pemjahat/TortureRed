@@ -594,80 +594,29 @@ void Application::Render()
     }
     else
     {
-        if (m_UseMeshlet && m_Model.IsMeshletReady())
+        // Helper: perform GBuffer + rasterize render targets transitions, clear, and dispatch.
+        // clearTargets=true for Phase 1 / frustum-only (clear RTVs + depth),
+        // clearTargets=false for Phase 2 — preserve BOTH depth and RTVs so Phase 2's
+        // newly-revealed meshlets composite on top of Phase 1's GBuffer output.
+        auto doMeshletRasterize = [&](bool clearTargets)
         {
-            // --- DispatchMeshletRasterizeDebug ---
-            // CPU-driven path: iterates every meshlet and issues one DispatchMesh(1,1,1) per meshlet.
-            // No GPU culling or binning — used to verify meshlet data correctness in isolation.
-            // The full GPU-driven path (Cull → Binning → ExecuteIndirect) is commented out below.
-            // {
-            //     MICROPROFILE_SCOPEI("Render", "MeshletDebugDirect", MP_BLUE);
-            //     MICROPROFILE_SCOPEGPUI("MeshletDebugDirect", MP_BLUE);
-            //     GPU_MARKER(cmdList, L"Meshlet Debug Direct");
+            GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo,   D3D12_RESOURCE_STATE_RENDER_TARGET);
-            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.normal,   D3D12_RESOURCE_STATE_RENDER_TARGET);
-            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            //     GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-            //     GraphicsHelper::TransitionResource(cmdList, gbuffer.depth,    D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+                gbuffer.albedo.rtvHandle,
+                gbuffer.normal.rtvHandle,
+                gbuffer.material.rtvHandle,
+                m_Renderer.GetVisibilityBuffer().rtvHandle
+            };
+            D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
+            cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
 
-            //     D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
-            //         gbuffer.albedo.rtvHandle,
-            //         gbuffer.normal.rtvHandle,
-            //         gbuffer.material.rtvHandle,
-            //         m_Renderer.GetVisibilityBuffer().rtvHandle
-            //     };
-            //     D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
-            //     cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
-
-            //     const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            //     cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
-            //     cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
-            //     cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
-            //     cmdList->ClearRenderTargetView(rtvs[3], clearCol, 0, nullptr);
-            //     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-
-            //     m_Renderer.DispatchMeshletRasterizeDebug(&m_Model);
-            // }
-
-            // ---------------------------------------------------------------
-            // COMMENTED OUT: full GPU-driven meshlet path (Cull → Binning → ExecuteIndirect).
-            // Re-enable once DispatchMeshletRasterizeDebug confirms meshlet data is correct.
-            // ---------------------------------------------------------------
+            if (clearTargets)
             {
-                MICROPROFILE_SCOPEI("Render", "MeshletCull", MP_GREEN);
-                MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
-                GPU_MARKER(cmdList, L"Meshlet Cull");
-                m_Renderer.DispatchMeshletCull(&m_Model, m_FrameConstants);
-            }
-
-            {
-                MICROPROFILE_SCOPEI("Render", "MeshletBinning", MP_YELLOW);
-                MICROPROFILE_SCOPEGPUI("MeshletBinning", MP_YELLOW);
-                GPU_MARKER(cmdList, L"Meshlet Binning");
-                m_Renderer.DispatchMeshletBinning();
-            }
-
-            {
-                MICROPROFILE_SCOPEI("Render", "MeshletForward", MP_BLUE);
-                MICROPROFILE_SCOPEGPUI("MeshletForward", MP_BLUE);
-                GPU_MARKER(cmdList, L"Meshlet Rasterize");
-
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-                GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
-                    gbuffer.albedo.rtvHandle,
-                    gbuffer.normal.rtvHandle,
-                    gbuffer.material.rtvHandle,
-                    m_Renderer.GetVisibilityBuffer().rtvHandle
-                };
-                D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
-                cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
-
                 const float clearCol[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
                 const float clearVis[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
                 cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
@@ -675,41 +624,162 @@ void Application::Render()
                 cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
                 cmdList->ClearRenderTargetView(rtvs[3], clearVis, 0, nullptr);
                 cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+            }
 
-                m_Renderer.DispatchMeshletRasterize(&m_Model);
+            m_Renderer.DispatchMeshletRasterize(&m_Model);
+        };
 
-                if (m_Renderer.GetMeshletDebugMode() > 0)
+        // Debug overlay for meshlet visibility buffer — runs once per frame, after
+        // the final rasterize pass (Phase 2 or frustum-only).
+        auto runDebugOverlay = [&]() {
+            if (m_Renderer.GetMeshletDebugMode() > 0)
+            {
+                MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
+                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
+                cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
+                cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
+                struct {
+                    uint32_t Mode;
+                    uint32_t VisBufSRVIdx;
+                    uint32_t CandidatesSRVIdx;
+                    uint32_t OutputUAVIdx;
+                    uint32_t Width;
+                    uint32_t Height;
+                } debugParams;
+                debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
+                debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
+                debugParams.CandidatesSRVIdx = (uint32_t)m_Renderer.GetVisibleMeshletsSRVIndex();
+                debugParams.OutputUAVIdx     = m_Renderer.GetFullScreenDebugTex().uavIndex;
+                debugParams.Width            = m_InternalWidth;
+                debugParams.Height           = m_InternalHeight;
+                cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
+                cmdList->Dispatch(
+                    (m_InternalWidth  + 7) / 8,
+                    (m_InternalHeight + 7) / 8, 1);
+                D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(
+                    m_Renderer.GetFullScreenDebugTex().resource.Get());
+                cmdList->ResourceBarrier(1, &uavBarrier);
+            }
+        };
+
+        if (m_UseMeshlet && m_Model.IsMeshletReady())
+        {
+
+            if (m_EnableOcclusionCulling)
+            {
+                // =====================================================
+                // TWO-PHASE OCCLUSION CULLING
+                //
+                // Phase 1 tests ALL instances against the previous frame's
+                // HZB and rasterizes the survivors. That partial depth is
+                // then used to rebuild a FRESH HZB — this is the entire
+                // point of two-pass occlusion culling: Phase 2 gets to
+                // retest previously-occluded instances against depth that
+                // reflects what Phase 1 already drew THIS frame, revealing
+                // instances that are only hidden behind Phase-1 geometry
+                // (not stale last-frame geometry).
+                //
+                // Phase 2 rasterizes its own survivors on top (preserving
+                // depth/color from Phase 1), then a final HZB rebuild
+                // captures the complete depth for next frame's Phase 1.
+                // =====================================================
+
+                // --- Phase 1: cull vs previous-frame HZB (all instances) ---
                 {
-                    MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
-                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
-                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
-                    cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
-                    cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
-                    struct {
-                        uint32_t Mode;
-                        uint32_t VisBufSRVIdx;
-                        uint32_t CandidatesSRVIdx;
-                        uint32_t OutputUAVIdx;
-                        uint32_t Width;
-                        uint32_t Height;
-                    } debugParams;
-                    debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
-                    debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
-                    debugParams.CandidatesSRVIdx = (uint32_t)m_Renderer.GetVisibleMeshletsSRVIndex();
-                    debugParams.OutputUAVIdx     = m_Renderer.GetFullScreenDebugTex().uavIndex;
-                    debugParams.Width            = m_InternalWidth;
-                    debugParams.Height           = m_InternalHeight;
-                    cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
-                    cmdList->Dispatch(
-                        (m_InternalWidth  + 7) / 8,
-                        (m_InternalHeight + 7) / 8, 1);
-                    D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(
-                        m_Renderer.GetFullScreenDebugTex().resource.Get());
-                    cmdList->ResourceBarrier(1, &uavBarrier);
+                    MICROPROFILE_SCOPEI("Render", "Phase1_CullInstances", MP_GREEN);
+                    MICROPROFILE_SCOPEGPUI("Phase1_CullInstances", MP_GREEN);
+                    GPU_MARKER(cmdList, L"Phase 1 - CullInstances (vs prev HZB)");
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 0);
                 }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase1_Binning", MP_YELLOW);
+                    MICROPROFILE_SCOPEGPUI("Phase1_Binning", MP_YELLOW);
+                    GPU_MARKER(cmdList, L"Phase 1 - Binning");
+                    m_Renderer.DispatchMeshletBinning();
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase1_Rasterize", MP_BLUE);
+                    MICROPROFILE_SCOPEGPUI("Phase1_Rasterize", MP_BLUE);
+                    GPU_MARKER(cmdList, L"Phase 1 - Rasterize (Clear)");
+                    doMeshletRasterize(true); // Clear depth
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase1_BuildHZB", MP_ORANGE);
+                    MICROPROFILE_SCOPEGPUI("Phase1_BuildHZB", MP_ORANGE);
+                    GPU_MARKER(cmdList, L"Phase 1 - BuildHZB (fresh, for Phase 2)");
+                    m_Renderer.DispatchBuildHZB();
+                }
+
+                // --- Phase 2: retest occluded instances vs fresh HZB ---
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
+                    MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
+                    GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1);
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
+                    MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
+                    GPU_MARKER(cmdList, L"Phase 2 - Binning");
+                    m_Renderer.DispatchMeshletBinning();
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
+                    MICROPROFILE_SCOPEGPUI("Phase2_Rasterize", MP_BLUE);
+                    GPU_MARKER(cmdList, L"Phase 2 - Rasterize (Preserve depth)");
+                    doMeshletRasterize(false); // Preserve depth/color from Phase 1
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
+                    MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
+                    GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
+                    m_Renderer.DispatchBuildHZB();
+                }
+
+                // Debug overlay — runs once after final rasterize
+                runDebugOverlay();
+            }
+            else
+            {
+                // =====================================================
+                // FRUSTUM-ONLY — hierarchical instance→meshlet cull with
+                // occlusion disabled. Uses the same two-stage pipeline as
+                // the occlusion path (CullInstancesCS → CullMeshletsCS):
+                // dispatch is sized by INSTANCE count, surviving instances
+                // enumerate their meshlets, meshlet cull runs as an
+                // indirect dispatch sized by the GPU-side candidate count.
+                // =====================================================
+                {
+                    MICROPROFILE_SCOPEI("Render", "MeshletCull", MP_GREEN);
+                    MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
+                    GPU_MARKER(cmdList, L"Meshlet Cull (frustum-only)");
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, false, 0);
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "MeshletBinning", MP_YELLOW);
+                    MICROPROFILE_SCOPEGPUI("MeshletBinning", MP_YELLOW);
+                    GPU_MARKER(cmdList, L"Meshlet Binning");
+                    m_Renderer.DispatchMeshletBinning();
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "MeshletForward", MP_BLUE);
+                    MICROPROFILE_SCOPEGPUI("MeshletForward", MP_BLUE);
+                    GPU_MARKER(cmdList, L"Meshlet Rasterize");
+                    doMeshletRasterize(true); // Clear depth
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "HZBBuild", MP_ORANGE);
+                    MICROPROFILE_SCOPEGPUI("HZBBuild", MP_ORANGE);
+                    GPU_MARKER(cmdList, L"HZB Build");
+                    m_Renderer.DispatchBuildHZB();
+                }
+
+                // Debug overlay — runs once after rasterize
+                runDebugOverlay();
             }
         }
         else
@@ -722,17 +792,9 @@ void Application::Render()
         // -----------------------------------------------------------------------
         // UNION PATH — runs after both meshlet and non-meshlet geometry branches.
         // GBuffer (albedo, normal, material, depth) is now populated by either path.
+        // HZB build is handled inside each branch above (two-phase calls it twice,
+        // traditional/frustum-only calls it once) — not duplicated here.
         // -----------------------------------------------------------------------
-
-        // HZB (Hierarchical Z-Buffer) build.
-        // Builds the mip chain from this frame's depth via AMD FidelityFX SPD. Not yet
-        // consumed for occlusion culling — the two-phase Cull() rewrite is kept for a follow-up step.
-        {
-            MICROPROFILE_SCOPEI("Render", "HZBBuild", MP_ORANGE);
-            MICROPROFILE_SCOPEGPUI("HZBBuild", MP_ORANGE);
-            GPU_MARKER(cmdList, L"HZB Build");
-            m_Renderer.DispatchBuildHZB();
-        }
 
         // ReSTIR DI — direct illumination from local lights, reads GBuffer depth + material
         {
@@ -865,6 +927,13 @@ void Application::RenderImGui()
     ImGui::Checkbox("Use Meshlet Rendering", &m_UseMeshlet);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Forward render using meshlet pipeline (GPU frustum culling + vertex pulling).\nOff = standard vertex-buffer deferred path.");
+
+    if (m_UseMeshlet)
+    {
+        ImGui::Checkbox("Occlusion Culling (Phase 1+2)", &m_EnableOcclusionCulling);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Two-phase HZB occlusion culling (prev-frame HZB → Phase 1 rasterize → rebuild HZB → Phase 2 retest).\nOff = frustum-only culling (safe rollback).");
+    }
 
     if (m_UseMeshlet && m_Model.IsMeshletReady())
     {

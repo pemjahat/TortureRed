@@ -35,7 +35,8 @@ private:
     bool m_DebugShadowMap        = false;
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
-    bool m_UseMeshlet             = false;  // Toggle meshlet vs vertex-buffer rendering
+    bool m_UseMeshlet              = false;  // Toggle meshlet vs vertex-buffer rendering
+    bool m_EnableOcclusionCulling  = false;  // Toggle two-phase HZB occlusion culling (Phase 1+2)
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 

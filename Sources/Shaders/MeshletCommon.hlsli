@@ -28,16 +28,11 @@ float2 UnpackUVRG16(StructuredBuffer<uint> uvs, uint offset, uint index)
     return float2(f16tof32(u16), f16tof32(v16));
 }
 
-// Frustum culling: conservative AABB vs view-projection matrix
+// Frustum culling: world-space AABB vs view-projection matrix — conservative test.
 // Returns true if the AABB is at least partially visible.
-bool FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 viewProj)
+bool FrustumCullAABB(float3 worldCenter, float3 worldExtents, float4x4 viewProj)
 {
-    // Transform center to world space, then clip space
-    float3 worldCenter = mul(float4(bounds.LocalCenter, 1.0), localToWorld).xyz;
-
-    // Compute world-space AABB corners using extents
-    // For conservative frustum test, we use 8 corners of the AABB
-    float3 ext = bounds.LocalExtents;
+    float3 ext = worldExtents;
 
     // Transform all 8 corners to clip space and test
     float4 corners[8];
@@ -77,6 +72,27 @@ bool FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 vi
     bool culled = allOutsideLeft || allOutsideRight || allOutsideTop ||
                   allOutsideBottom || allOutsideNear || allOutsideFar;
     return !culled;
+}
+
+// Transform a local-space AABB by localToWorld → conservative world-space AABB.
+// Center is fully transformed; extents are expanded by the absolute value of the
+// linear part (row-vector convention: worldExtents_i = dot(extents, abs(column_i))).
+// Exact for the AABB of a transformed box — required for rotated/scaled instances.
+void TransformAABBToWorld(float3 localCenter, float3 localExtents, float4x4 localToWorld,
+                          out float3 worldCenter, out float3 worldExtents)
+{
+    worldCenter  = mul(float4(localCenter, 1.0f), localToWorld).xyz;
+    worldExtents = mul(localExtents, abs((float3x3)localToWorld));
+}
+
+// Frustum culling: meshlet-space AABB → world → clip, conservative test.
+// Returns true if the AABB is at least partially visible.
+bool FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 viewProj)
+{
+    float3 worldCenter, worldExtents;
+    TransformAABBToWorld(bounds.LocalCenter, bounds.LocalExtents, localToWorld,
+                         worldCenter, worldExtents);
+    return FrustumCullAABB(worldCenter, worldExtents, viewProj);
 }
 
 // --- Wireframe edge detection from barycentric coordinates ---

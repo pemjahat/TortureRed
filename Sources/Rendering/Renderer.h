@@ -148,7 +148,11 @@ public:
     // Meshlet pipeline
     void CreateMeshletResources();
     void CreateMeshletPipelines();
-    void DispatchMeshletCull(class Model* model, const FrameConstants& frame);
+    // Hierarchical two-stage meshlet culling: CullInstancesCS → CullMeshletsCS.
+    // occlusionEnabled=1, phase 0/1: two-phase occlusion culling (vs prev-HZB / fresh HZB).
+    // occlusionEnabled=0 (phase must be 0): frustum-only single-phase hierarchical cull.
+    void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
+                                     bool occlusionEnabled, int phase);
     void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
     void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
     void DispatchMeshletRasterizeDebug(class Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)

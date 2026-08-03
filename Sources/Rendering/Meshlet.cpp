@@ -29,30 +29,6 @@ void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeigh
         return;
     }
 
-    // DEBUG: per-visible-meshlet vertex/triangle counts — MeshletCandidateDebug[MAX_VISIBLE_MESHLETS]
-    if (!CreateStructuredBuffer(m_VisibleMeshletsDebug, sizeof(MeshletCandidateDebug), MAX_VISIBLE_MESHLETS,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_VisibleMeshletsDebug"))
-    {
-        std::cerr << "[Meshlet] Failed to create VisibleMeshletsDebug" << std::endl;
-        return;
-    }
-
-    // Indirect dispatch args for cull pass
-    if (!CreateBuffer(m_CullDispatchArgs, sizeof(D3D12_DISPATCH_ARGUMENTS),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, false, true, "SB_CullDispatchArgs"))
-    {
-        std::cerr << "[Meshlet] Failed to create CullDispatchArgs buffer" << std::endl;
-        return;
-    }
-
-    // Cull constants buffer (total meshlets)
-    if (!CreateBuffer(m_CullConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
-                      D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_CullConstants"))
-    {
-        std::cerr << "[Meshlet] Failed to create CullConstants buffer" << std::endl;
-        return;
-    }
-
     // ---- Binning resources (4-pass GPU sort) ----
     // Per-bin meshlet counts (NUM_RASTER_BINS = 2)
     if (!CreateStructuredBuffer(m_MeshletCounts, sizeof(uint32_t), NUM_RASTER_BINS,
@@ -118,6 +94,36 @@ void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeigh
     {
         std::cerr << "[Meshlet] Failed to create visibility buffer" << std::endl;
     }
+
+    // ----- Two-pass occlusion culling buffers -----
+    if (!CreateStructuredBuffer(m_CandidateMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_CandidateMeshlets"))
+        std::cerr << "[Meshlet] Failed to create CandidateMeshlets buffer" << std::endl;
+    if (!CreateBuffer(m_CandidateMeshletsCounter, sizeof(uint32_t),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_CandidateMeshletsCounter"))
+        std::cerr << "[Meshlet] Failed to create CandidateMeshletsCounter" << std::endl;
+    if (!CreateStructuredBuffer(m_OccludedInstances, sizeof(uint32_t), static_cast<UINT>(MAX_VISIBLE_MESHLETS / 4),
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_OccludedInstances"))
+        std::cerr << "[Meshlet] Failed to create OccludedInstances buffer" << std::endl;
+    if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_OccludedInstancesCounter"))
+        std::cerr << "[Meshlet] Failed to create OccludedInstancesCounter" << std::endl;
+    if (!CreateStructuredBuffer(m_MeshletCullArgs, sizeof(uint32_t), 3,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_MeshletCullArgs"))
+        std::cerr << "[Meshlet] Failed to create MeshletCullArgs" << std::endl;
+    if (!CreateStructuredBuffer(m_InstanceCullArgs, sizeof(uint32_t), 3,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_InstanceCullArgs"))
+        std::cerr << "[Meshlet] Failed to create InstanceCullArgs" << std::endl;
+    // Double-buffered upload CB: Phase 1 writes to [0], Phase 2 writes to [1].
+    // Prevents write-after-write hazard on the upload heap when both phases
+    // record into the same command list — Phase 2's CPU memcpy would otherwise
+    // overwrite Phase 1's data before the GPU executes Phase 1's dispatch.
+    if (!CreateBuffer(m_TwoPassCullConstantsBuffer[0], 256, D3D12_HEAP_TYPE_UPLOAD,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_TwoPassCullConstants_0"))
+        std::cerr << "[Meshlet] Failed to create TwoPassCullConstantsBuffer[0]" << std::endl;
+    if (!CreateBuffer(m_TwoPassCullConstantsBuffer[1], 256, D3D12_HEAP_TYPE_UPLOAD,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_TwoPassCullConstants_1"))
+        std::cerr << "[Meshlet] Failed to create TwoPassCullConstantsBuffer[1]" << std::endl;
 
     CreateHZBResources(internalWidth, internalHeight);
 }
@@ -211,34 +217,55 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
 {
     m_MeshShaderSupported = meshShaderSupported;
 
-    // --- Meshlet Cull Root Signature ---
-    // Binds all SRV/UAV resources by GPU virtual address (root SRV/UAV) to avoid
-    // descriptor table layout dependencies.
+    // --- Unified Meshlet Cull Root Signature ---
+    // Superset of old frustum-only cull + two-pass occlusion cull. Must be created
+    // BEFORE CreateTwoPassCullPipelines() below, since that function's PSOs reference
+    // m_MeshletRootSignature.Get() as their pRootSignature.
+    // All SRV/UAV at space0; static point-clamp sampler + CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+    // required by two-pass cull for bindless HZB access.
     //
-    // Layout:
-    //   [0] CBV  b0        — FrameConstants
-    //   [1] CBV  b1        — CullConstants
-    //   [2] SRV  t0 space3 — GlobalMeshletBounds
-    //   [3] SRV  t1 space3 — GlobalMeshData
-    //   [4] SRV  t2 space3 — GlobalInstanceData
-    //   [5] UAV  u0        — VisibleMeshlets
-    //   [6] UAV  u1        — VisibleMeshletsCounter
-    //   [7] UAV  u2        — VisibleMeshletsDebug
-    //   [8] SRV  t3 space3 — GlobalMeshlets
+    // CullTwoPass() binding (hierarchical cull — used for both occlusion and frustum-only modes):
+    //   [0]  CBV b0 — FrameConstants
+    //   [1]  CBV b1 — TwoPassCullConstants
+    //   [2]  SRV t0 — InstanceData[]
+    //   [3]  SRV t1 — InstanceBounds[]
+    //   [4]  SRV t2 — MeshData[]
+    //   [5]  SRV t3 — MeshletBounds[]
+    //   [6]  SRV t4 — (unused; CandidateMeshlets read via UAV u0 instead, not a
+    //                  separate SRV — avoids a resource-state hazard,
+    //                  see MeshletTwoPassCull.hlsl)
+    //   [7]  UAV u0 — CandidateMeshlets
+    //   [8]  UAV u1 — CandidateMeshletsCounter
+    //   [9]  UAV u2 — OccludedInstances[]
+    //   [10] UAV u3 — OccludedInstancesCounter
+    //   [11] UAV u4 — VisibleMeshlets[]
+    //   [12] UAV u5 — VisibleMeshletsCounter
+    //   [13] UAV u6 — MeshletCullArgs
+    //   [14] UAV u7 — InstanceCullArgs
     {
-        CD3DX12_ROOT_PARAMETER rootParams[9];
-        rootParams[0].InitAsConstantBufferView(0);
-        rootParams[1].InitAsConstantBufferView(1);
-        rootParams[2].InitAsShaderResourceView(0, 3);
-        rootParams[3].InitAsShaderResourceView(1, 3);
-        rootParams[4].InitAsShaderResourceView(2, 3);
-        rootParams[5].InitAsUnorderedAccessView(0);
-        rootParams[6].InitAsUnorderedAccessView(1);
-        rootParams[7].InitAsUnorderedAccessView(2); // u2: debug counter (uint2 — x=vertices, y=triangles)
-        rootParams[8].InitAsShaderResourceView(3, 3); // t3 space3: GlobalMeshlets
+        CD3DX12_ROOT_PARAMETER rootParams[15];
+        rootParams[0].InitAsConstantBufferView(0);          // b0: FrameConstants
+        rootParams[1].InitAsConstantBufferView(1);          // b1: shader-specific constants
+        rootParams[2].InitAsShaderResourceView(0);          // t0
+        rootParams[3].InitAsShaderResourceView(1);          // t1
+        rootParams[4].InitAsShaderResourceView(2);          // t2
+        rootParams[5].InitAsShaderResourceView(3);          // t3
+        rootParams[6].InitAsShaderResourceView(4);          // t4
+        rootParams[7].InitAsUnorderedAccessView(0);         // u0
+        rootParams[8].InitAsUnorderedAccessView(1);         // u1
+        rootParams[9].InitAsUnorderedAccessView(2);         // u2
+        rootParams[10].InitAsUnorderedAccessView(3);        // u3
+        rootParams[11].InitAsUnorderedAccessView(4);        // u4
+        rootParams[12].InitAsUnorderedAccessView(5);        // u5
+        rootParams[13].InitAsUnorderedAccessView(6);        // u6
+        rootParams[14].InitAsUnorderedAccessView(7);        // u7
+
+        CD3DX12_STATIC_SAMPLER_DESC pointClampSampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
         CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-        rsDesc.Init(9, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rsDesc.Init(15, rootParams, 1, &pointClampSampler,
+                    D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
 
         Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
         HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
@@ -251,18 +278,10 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
                                               IID_PPV_ARGS(&m_MeshletRootSignature)), "[Meshlet] CreateRootSignature failed");
     }
 
-    // --- Meshlet Cull PSO (CS) ---
-    {
-        auto cullCS = GraphicsHelper::CompileShader("Shaders/MeshletCull.hlsl", "CSMain", "cs_6_6");
-        if (!cullCS.empty())
-        {
-            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
-            desc.pRootSignature = m_MeshletRootSignature.Get();
-            desc.CS = { cullCS.data(), cullCS.size() };
-            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_MeshletCullPSO)),
-                     "[Meshlet] CreateComputePipelineState (cull) failed");
-        }
-    }
+    // Hierarchical cull PSOs (CullInstancesCS + CullMeshletsCS, two-phase + frustum-only) —
+    // must come AFTER m_MeshletRootSignature is created above,
+    // since these PSOs are built with pRootSignature = m_MeshletRootSignature.Get().
+    CreateTwoPassCullPipelines(device);
 
     // --- Binning PSOs (CS) — use MAIN root signature (bindless heap) ---
     // PrepareArgsCS, ClassifyMeshletsCS, AllocateBinRangesCS, WriteBinsCS
@@ -523,7 +542,7 @@ void MeshletPass::BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depth
     hzbConstants.WorkGroupOffsetY = workGroupOffset[1];
 
     // Upload the constants for this frame via a small per-call scratch CBV.
-    // Reuses the same pattern as m_CullConstantsBuffer (persistent upload-heap map + memcpy).
+    // Reuses the persistent upload-heap map + memcpy pattern (same as the cull constant buffers).
     if (m_HZBConstantsBuffer.resource == nullptr)
     {
         if (!CreateBuffer(m_HZBConstantsBuffer, 256, D3D12_HEAP_TYPE_UPLOAD,
@@ -560,69 +579,209 @@ void MeshletPass::BuildHZB(ID3D12GraphicsCommandList* cmdList, GPUTexture& depth
         cmdList->SetPipelineState(m_HZBCreatePSO.Get());
         cmdList->Dispatch(dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1], 1);
     }
+
+    // Transition the HZB to a shader-readable state. CullTwoPass()'s HZBCull() reads
+    // it via bindless SRV (ResourceDescriptorHeap[HZBSRVIdx]) — both Phase 1 (reading
+    // the HZB built at the end of the PREVIOUS frame) and Phase 2 (reading the HZB
+    // just rebuilt above) require this. Without it, the resource stays in
+    // UNORDERED_ACCESS, which is an invalid state for the SRV read.
+    D3D12_RESOURCE_BARRIER hzbDoneBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_HZB.resource.Get());
+    cmdList->ResourceBarrier(1, &hzbDoneBarrier);
+    GraphicsHelper::TransitionResource(cmdList, m_HZB, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
-void MeshletPass::Cull(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model)
+// =============================================================================
+// CullTwoPass — hierarchical two-stage culling (instance → meshlet), used for
+// both two-phase occlusion culling and the frustum-only single-phase mode.
+//
+// Phase 0 (FIRST):  CullInstancesCS (direct) → BuildMeshletCullIndirectArgs →
+//                   CullMeshletsCS (indirect). Input: all instances. HZB: previous frame.
+// Phase 1 (SECOND): BuildInstanceCullIndirectArgs → CullInstancesCS (indirect,
+//                   only OccludedInstances) → BuildMeshletCullIndirectArgs →
+//                   CullMeshletsCS (indirect). HZB: freshly rebuilt this frame.
+//
+// occlusionEnabled=0 falls back to frustum-only (no HZB read), matching the old
+// single-phase behavior byte-for-byte as a safe rollback path.
+// =============================================================================
+void MeshletPass::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
+                               Model* model, bool occlusionEnabled, int phase)
 {
-    if (!m_MeshletCullPSO || !model->IsMeshletReady())
+    if (!m_CullInstancesPSO || !m_CullMeshletsPSO || !model->IsMeshletReady())
         return;
 
-    size_t totalMeshlets = model->GetTotalMeshletCount();
-    if (totalMeshlets == 0) return;
+    size_t totalInstances = model->GetInstanceCount();
+    size_t totalMeshlets  = model->GetTotalMeshletCount();
+    if (totalInstances == 0 || totalMeshlets == 0) return;
 
-    GPU_MARKER(cmdList, L"Meshlet Cull");
+    const bool isFirstPhase = (phase == 0);
 
-    // Update cull constants
-    {
-        struct { uint totalMeshlets; uint instanceCount; uint pad[2]; } cullConsts;
-        cullConsts.totalMeshlets = static_cast<uint>(totalMeshlets);
-        cullConsts.instanceCount = static_cast<uint>(model->GetInstanceCount());
-        memcpy(m_CullConstantsBuffer.cpuPtr, &cullConsts, sizeof(cullConsts));
-    }
+    // ---- Populate TwoPassCullConstants ----
+    TwoPassCullConstants cullConsts = {};
+    cullConsts.NumInstances      = static_cast<uint>(totalInstances);
+    cullConsts.NumMeshlets        = static_cast<uint>(totalMeshlets);
+    cullConsts.HZBSRVIdx          = static_cast<uint>(m_HZB.srvIndex);
+    cullConsts.HZBMipCount        = m_HZBMips;
+    cullConsts.HZBWidth           = m_HZBWidth;
+    cullConsts.HZBHeight          = m_HZBHeight;
+    cullConsts.CandidateMeshletsCounterIdx  = static_cast<uint>(m_CandidateMeshletsCounter.uavIndex);
+    cullConsts.CandidateMeshletsUAVIdx      = static_cast<uint>(m_CandidateMeshlets.uavIndex);
+    cullConsts.OccludedInstancesCounterIdx  = static_cast<uint>(m_OccludedInstancesCounter.uavIndex);
+    cullConsts.OccludedInstancesUAVIdx      = static_cast<uint>(m_OccludedInstances.uavIndex);
+    cullConsts.OccludedInstancesSRVIdx      = static_cast<uint>(m_OccludedInstances.srvIndex);
+    cullConsts.VisibleMeshletsUAVIdx        = static_cast<uint>(m_VisibleMeshlets.uavIndex);
+    cullConsts.VisibleMeshletsCounterUAVIdx = static_cast<uint>(m_VisibleMeshletsCounter.uavIndex);
+    cullConsts.Phase              = isFirstPhase ? TWO_PASS_PHASE_FIRST : TWO_PASS_PHASE_SECOND;
+    cullConsts.EnableOcclusion    = occlusionEnabled ? 1u : 0u;
+
+    // Double-buffered: Phase 1 → buffer[0], Phase 2 → buffer[1].
+    // Prevents Phase 2's CPU-side memcpy from overwriting Phase 1's data
+    // before the GPU executes Phase 1's dispatch (both are in the same
+    // command list, but upload-heap writes are CPU-side and not deferred).
+    uint cbIdx = isFirstPhase ? 0u : 1u;
+    memcpy(m_TwoPassCullConstantsBuffer[cbIdx].cpuPtr, &cullConsts, sizeof(cullConsts));
 
     cmdList->SetComputeRootSignature(m_MeshletRootSignature.Get());
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
 
-    // Bind CBVs
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetComputeRootConstantBufferView(1, m_CullConstantsBuffer.gpuAddress);
+    cmdList->SetComputeRootConstantBufferView(1, m_TwoPassCullConstantsBuffer[cbIdx].gpuAddress);
 
-    // Bind SRVs by GPU virtual address — no descriptor table / heap layout dependency
-    cmdList->SetComputeRootShaderResourceView(2, model->GetGlobalMeshletBoundsBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(3, model->GetMeshDataBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(4, model->GetInstanceDataBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(8, model->GetGlobalMeshletsBufferAddress()); // t3 space3: GlobalMeshlets
+    // Bind SRVs by GPU virtual address
+    cmdList->SetComputeRootShaderResourceView(2, model->GetInstanceDataBufferAddress());           // t0
+    cmdList->SetComputeRootShaderResourceView(3, model->GetInstanceBoundsBufferAddress());         // t1
+    cmdList->SetComputeRootShaderResourceView(4, model->GetMeshDataBufferAddress());              // t2
+    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalMeshletBoundsBufferAddress());   // t3
+    // NOTE: CandidateMeshlets is intentionally NOT bound as a separate SRV — CullMeshletsCS
+    // reads it directly through the UAV (u0) that CullInstancesCS wrote via, avoiding a
+    // resource-state hazard (same buffer can't be UNORDERED_ACCESS and SRV-readable at once).
 
-    // Transition UAV resources
+    // Transition UAVs
+    GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedInstances, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedInstancesCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_MeshletCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_InstanceCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    // Zero counter (ClearUnorderedAccessViewUint requires shader-visible GPU handle + CPU-only heap handle)
+    // Zero counters — CandidateMeshletsCounter and VisibleMeshletsCounter are always fresh per phase.
+    // OccludedInstancesCounter is only cleared in Phase 1 (first call); Phase 2 reads the list
+    // built up by Phase 1.
     const UINT zeroes[4] = { 0, 0, 0, 0 };
+    cmdList->ClearUnorderedAccessViewUint(
+        GraphicsHelper::GetSRVGPUHandle((UINT)m_CandidateMeshletsCounter.uavIndex),
+        GraphicsHelper::GetCpuUAVHandle((UINT)m_CandidateMeshletsCounter.cpuUavIndex),
+        m_CandidateMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
+    if (isFirstPhase)
+    {
+        cmdList->ClearUnorderedAccessViewUint(
+            GraphicsHelper::GetSRVGPUHandle((UINT)m_OccludedInstancesCounter.uavIndex),
+            GraphicsHelper::GetCpuUAVHandle((UINT)m_OccludedInstancesCounter.cpuUavIndex),
+            m_OccludedInstancesCounter.resource.Get(), zeroes, 0, nullptr);
+    }
     cmdList->ClearUnorderedAccessViewUint(
         GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
         GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
         m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
 
-    // Bind UAVs by GPU virtual address
-    cmdList->SetComputeRootUnorderedAccessView(5, m_VisibleMeshlets.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(6, m_VisibleMeshletsCounter.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(7, m_VisibleMeshletsDebug.gpuAddress);
+    // Bind UAVs
+    cmdList->SetComputeRootUnorderedAccessView(7,  m_CandidateMeshlets.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(8,  m_CandidateMeshletsCounter.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(9,  m_OccludedInstances.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(10, m_OccludedInstancesCounter.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(11, m_VisibleMeshlets.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(12, m_VisibleMeshletsCounter.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(13, m_MeshletCullArgs.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(14, m_InstanceCullArgs.gpuAddress);
 
-    cmdList->SetPipelineState(m_MeshletCullPSO.Get());
+    if (isFirstPhase)
     {
-        MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
-        UINT threadGroups = static_cast<UINT>((totalMeshlets + 63) / 64);
-        cmdList->Dispatch(threadGroups, 1, 1);
+        // ---- Phase 1: CullInstancesCS (direct dispatch) ----
+        {
+            GPU_MARKER(cmdList, L"TwoPassCull Phase1 - CullInstances");
+            cmdList->SetPipelineState(m_CullInstancesPSO.Get());
+            UINT groups = static_cast<UINT>((totalInstances + 63) / 64);
+            cmdList->Dispatch(groups, 1, 1);
+        }
+
+        D3D12_RESOURCE_BARRIER uavBarriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_CandidateMeshlets.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_OccludedInstances.resource.Get()),
+        };
+        cmdList->ResourceBarrier(2, uavBarriers);
+
+        // ---- BuildMeshletCullIndirectArgs ----
+        {
+            cmdList->SetPipelineState(m_BuildMeshletCullIndirectArgsPSO.Get());
+            cmdList->Dispatch(1, 1, 1);
+        }
+
+        D3D12_RESOURCE_BARRIER argsBarrier =
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletCullArgs.resource.Get());
+        cmdList->ResourceBarrier(1, &argsBarrier);
+    }
+    else
+    {
+        // ---- Phase 2: transition OccludedInstances for bindless SRV read ----
+        // Phase 1 wrote to this buffer as UAV. Phase 2's CullInstancesCS reads it
+        // as bindless SRV (via ResourceDescriptorHeap[OccludedInstancesSRVIdx]).
+        GraphicsHelper::TransitionResource(cmdList, m_OccludedInstances,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // ---- Phase 2: BuildInstanceCullIndirectArgs first ----
+        {
+            GPU_MARKER(cmdList, L"TwoPassCull Phase2 - BuildInstanceArgs");
+            cmdList->SetPipelineState(m_BuildInstanceCullIndirectArgsPSO.Get());
+            cmdList->Dispatch(1, 1, 1);
+        }
+
+        D3D12_RESOURCE_BARRIER argsBarrier =
+            CD3DX12_RESOURCE_BARRIER::UAV(m_InstanceCullArgs.resource.Get());
+        cmdList->ResourceBarrier(1, &argsBarrier);
+
+        // ---- Phase 2: CullInstancesCS (indirect dispatch from OccludedInstances) ----
+        GraphicsHelper::TransitionResource(cmdList, m_InstanceCullArgs, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        {
+            GPU_MARKER(cmdList, L"TwoPassCull Phase2 - CullInstances");
+            cmdList->SetPipelineState(m_CullInstancesPSO.Get());
+            cmdList->ExecuteIndirect(m_DispatchCommandSignatureCS.Get(), 1,
+                                     m_InstanceCullArgs.resource.Get(), 0, nullptr, 0);
+        }
+
+        D3D12_RESOURCE_BARRIER uavBarriers[] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_CandidateMeshlets.resource.Get()),
+        };
+        cmdList->ResourceBarrier(1, uavBarriers);
+
+        // ---- BuildMeshletCullIndirectArgs ----
+        GraphicsHelper::TransitionResource(cmdList, m_MeshletCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        {
+            cmdList->SetPipelineState(m_BuildMeshletCullIndirectArgsPSO.Get());
+            cmdList->Dispatch(1, 1, 1);
+        }
+
+        D3D12_RESOURCE_BARRIER argsBarrier2 =
+            CD3DX12_RESOURCE_BARRIER::UAV(m_MeshletCullArgs.resource.Get());
+        cmdList->ResourceBarrier(1, &argsBarrier2);
     }
 
-    // UAV barriers
-    D3D12_RESOURCE_BARRIER barriers[2] = {
+    // ---- CullMeshletsCS (indirect dispatch) — shared by both phases ----
+    GraphicsHelper::TransitionResource(cmdList, m_MeshletCullArgs, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    {
+        GPU_MARKER(cmdList, isFirstPhase ? L"TwoPassCull Phase1 - CullMeshlets"
+                                         : L"TwoPassCull Phase2 - CullMeshlets");
+        cmdList->SetPipelineState(m_CullMeshletsPSO.Get());
+        cmdList->ExecuteIndirect(m_DispatchCommandSignatureCS.Get(), 1,
+                                 m_MeshletCullArgs.resource.Get(), 0, nullptr, 0);
+    }
+
+    // Final barriers
+    D3D12_RESOURCE_BARRIER finalBarriers[] = {
         CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshlets.resource.Get()),
-        CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshletsDebug.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshletsCounter.resource.Get()),
     };
-    cmdList->ResourceBarrier(2, barriers);
+    cmdList->ResourceBarrier(2, finalBarriers);
 }
 
 void MeshletPass::Binning(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress)
@@ -908,4 +1067,49 @@ void MeshletPass::RasterizeDebug(ID3D12GraphicsCommandList* cmdList, ID3D12RootS
             cmdList6->DispatchMesh(1, 1, 1);
         }
     }
+}
+
+// =============================================================================
+// CreateTwoPassCullPipelines — compiles 4 CS PSOs using the unified m_MeshletRootSignature.
+// =============================================================================
+void MeshletPass::CreateTwoPassCullPipelines(ID3D12Device* device)
+{
+    // --- Compile CS PSOs (root signature already created as unified m_MeshletRootSignature) ---
+    auto compileWithDefines = [&](const char* entry, const std::vector<std::pair<std::wstring, std::wstring>>& defines,
+                                   Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso, const char* label)
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/MeshletTwoPassCull.hlsl", entry, "cs_6_6", defines);
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_MeshletRootSignature.Get();
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso)), label);
+        }
+    };
+
+    auto compileNoDefines = [&](const char* entry, Microsoft::WRL::ComPtr<ID3D12PipelineState>& pso, const char* label)
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/MeshletTwoPassCull.hlsl", entry, "cs_6_6");
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = m_MeshletRootSignature.Get();
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso)), label);
+        }
+    };
+
+    std::vector<std::pair<std::wstring, std::wstring>> occlusionDefines = {
+        { L"OCCLUSION_CULL", L"1" }
+    };
+
+    compileWithDefines("CullInstancesCS", occlusionDefines, m_CullInstancesPSO,
+            "[Meshlet] CreateComputePipelineState (CullInstancesCS) failed");
+    compileWithDefines("CullMeshletsCS", occlusionDefines, m_CullMeshletsPSO,
+            "[Meshlet] CreateComputePipelineState (CullMeshletsCS) failed");
+    compileNoDefines(  "BuildMeshletCullIndirectArgsCS", m_BuildMeshletCullIndirectArgsPSO,
+            "[Meshlet] CreateComputePipelineState (BuildMeshletCullIndirectArgs) failed");
+    compileNoDefines(  "BuildInstanceCullIndirectArgsCS", m_BuildInstanceCullIndirectArgsPSO,
+            "[Meshlet] CreateComputePipelineState (BuildInstanceCullIndirectArgs) failed");
 }

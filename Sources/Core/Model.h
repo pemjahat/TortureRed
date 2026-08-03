@@ -133,6 +133,7 @@ public:
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletVerticesBufferAddress() const { return m_GlobalMeshletVertices.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletTrianglesBufferAddress() const { return m_GlobalMeshletTriangles.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletBoundsBufferAddress() const { return m_GlobalMeshletBounds.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetInstanceBoundsBufferAddress() const { return m_InstanceBoundsBuffer.gpuAddress; }
     size_t GetTotalMeshletCount() const { return m_TotalMeshletCount; }
     size_t GetInstanceCount()     const { return m_InstanceDataArray.size(); }
     // CPU-side array accessors — used by DispatchMeshletRasterizeDebug to iterate meshlets
@@ -231,12 +232,23 @@ private:
     std::vector<MeshletBounds>     m_AllMeshletBounds;
 
     // Per-mesh metadata (offsets into the global stream buffers)
+    // Built in Pass 1: iterate GLTFModel::meshes[].primitives[].
+    // One entry per unique primitive. Order is independent of InstanceData.
     std::vector<MeshData> m_MeshDataArray;
     GPUBuffer m_MeshDataBuffer;
 
-    // Per-instance data (1:1 with DrawNodeData for meshlet path)
+    // Per-instance data — built in Pass 2: iterate GLTFModel::nodes[].
+    // Each entry's MeshDataIndex points into m_MeshDataArray.
+    // Multiple instances can reference the same MeshData (shared mesh).
     std::vector<InstanceData> m_InstanceDataArray;
     GPUBuffer m_InstanceDataBuffer;
+
+    // Per-SubMesh LOCAL-space AABB (union of the primitive's meshlet local bounds).
+    // One entry per MeshData — built in Pass 1, indexed by MeshDataIndex.
+    // Cull shaders transform it by the per-frame InstanceData.LocalToWorld,
+    // so culling follows animated instances (no stale load-time transform).
+    std::vector<InstanceBounds> m_InstanceBoundsArray;
+    GPUBuffer m_InstanceBoundsBuffer;
 
     size_t m_TotalMeshletCount = 0;
 };

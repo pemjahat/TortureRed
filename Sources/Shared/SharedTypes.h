@@ -265,20 +265,29 @@ struct MeshData {
 struct InstanceData {
     ROW_MAJOR float4x4 LocalToWorld;
     uint MeshDataIndex;         // Index into global MeshData[] buffer
-    uint _pad0;
+    uint BoundsIndex;           // Index into InstanceBounds[] — currently equal to MeshDataIndex
     uint _pad1;
     uint _pad2;
+};
+
+// LOCAL-space AABB of a SubMesh, sourced from the glTF POSITION accessor's
+// min/max (required by the glTF 2.0 spec — equivalent to the union of meshlet
+// bounds, but tighter and free to obtain).
+// One entry per MeshData, built once on CPU in Model::CreateMeshletResources()
+// Pass 1 (primitive iteration) — bounds are a GEOMETRY property, not an
+// instance property, so shared meshes share one entry.
+// Cull shaders transform this by the instance's PER-FRAME LocalToWorld
+// (D3D12_Research pattern: local bounds × current matrix), so culling
+// follows animated/moving instances correctly.
+struct InstanceBounds {
+    float3 BoundsCenter;   // Local-space center
+    float3 BoundsExtents;  // Local-space half-extents
 };
 
 // Culling token — the unit of work through the cull pipeline
 struct MeshletCandidate {
     uint InstanceID;    // Index into InstanceData[]
     uint MeshletIndex;  // Per-mesh meshlet index
-};
-
-struct MeshletCandidateDebug {
-    uint VertexCount;
-    uint TriangleCount;
 };
 
 // =============================================================================
@@ -351,6 +360,34 @@ struct HZBDebugParams {
     uint OutputUAVIdx; // UAV index of FullScreenDebugTex (R16G16B16A16_FLOAT)
     uint Width;        // Output (FullScreenDebugTex) width
     uint Height;       // Output (FullScreenDebugTex) height
+};
+
+// =============================================================================
+// Two-Pass Occlusion Culling — constants shared by CullInstancesCS / CullMeshletsCS
+// =============================================================================
+
+// Phase selectors (passed as root CBV fields, not shader defines)
+#define TWO_PASS_PHASE_FIRST   0u
+#define TWO_PASS_PHASE_SECOND  1u
+#define TWO_PASS_PHASE_FRUSTUM_ONLY 2u  // Feature-toggle: no occlusion testing (fallback)
+
+struct TwoPassCullConstants {
+    uint  NumInstances;              // Total instances in InstanceData[]
+    uint  NumMeshlets;               // Total meshlets across all instances
+    uint  HZBSRVIdx;                 // Bindless SRV index of the HZB texture (all mips)
+    uint  HZBMipCount;               // Number of HZB mip levels
+    uint  HZBWidth;                  // HZB mip 0 width
+    uint  HZBHeight;                 // HZB mip 0 height
+    uint  CandidateMeshletsCounterIdx; // UAV bindless index of CandidateMeshletsCounter
+    uint  CandidateMeshletsUAVIdx;     // UAV bindless index of CandidateMeshlets[]
+    uint  OccludedInstancesCounterIdx; // UAV bindless index of OccludedInstancesCounter
+    uint  OccludedInstancesUAVIdx;     // UAV bindless index of OccludedInstances[] (write)
+    uint  OccludedInstancesSRVIdx;     // Bindless SRV index of OccludedInstances[] (read by Phase 2)
+    uint  VisibleMeshletsUAVIdx;       // UAV bindless index of VisibleMeshlets[]
+    uint  VisibleMeshletsCounterUAVIdx;// UAV bindless index of VisibleMeshletsCounter
+    uint  Phase;                       // TWO_PASS_PHASE_FIRST / SECOND / FRUSTUM_ONLY
+    uint  EnableOcclusion;             // 0 = frustum-only, 1 = occlusion culling active
+    uint  _pad0;
 };
 
 #endif // SHARED_TYPES_H
