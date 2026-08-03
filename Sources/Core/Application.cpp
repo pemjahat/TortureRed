@@ -484,6 +484,15 @@ void Application::Update(float deltaTime)
     }
 
     m_Renderer.UpdateFrameCB(m_FrameConstants);
+
+    // Freeze culling: refresh the snapshot only while unfrozen, so the toggle
+    // always freezes the view at the moment it is enabled. While frozen the
+    // snapshot stays stale and the cull dispatches bind it instead of m_FrameCB.
+    if (!m_FreezeCulling)
+    {
+        m_CullFrameConstants = m_FrameConstants;
+    }
+    m_Renderer.UpdateCullFrameCB(m_CullFrameConstants);
 }
 
 void Application::Render()
@@ -641,7 +650,13 @@ void Application::Render()
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
                 cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
+                cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
                 cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
+                // Meshlet stream buffers (t0-t15 space3) for GetVertexAttributes' barycentric
+                // reconstruction. Compute and graphics root state are separate in D3D12 — the
+                // graphics-stage binding from MeshletPass::Rasterize does NOT carry over, and
+                // reading space3 through a stale compute table faults the GPU (TDR).
+                cmdList->SetComputeRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)m_Model.GetMeshletStreamSRVBase()));
                 struct {
                     uint32_t Mode;
                     uint32_t VisBufSRVIdx;
@@ -693,7 +708,7 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "Phase1_CullInstances", MP_GREEN);
                     MICROPROFILE_SCOPEGPUI("Phase1_CullInstances", MP_GREEN);
                     GPU_MARKER(cmdList, L"Phase 1 - CullInstances (vs prev HZB)");
-                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 0);
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 0, m_FreezeCulling);
                 }
                 {
                     MICROPROFILE_SCOPEI("Render", "Phase1_Binning", MP_YELLOW);
@@ -711,7 +726,9 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "Phase1_BuildHZB", MP_ORANGE);
                     MICROPROFILE_SCOPEGPUI("Phase1_BuildHZB", MP_ORANGE);
                     GPU_MARKER(cmdList, L"Phase 1 - BuildHZB (fresh, for Phase 2)");
-                    m_Renderer.DispatchBuildHZB();
+                    // Keep the HZB consistent with the frozen cull view (mirrors D3D12_Research)
+                    if (!m_FreezeCulling)
+                        m_Renderer.DispatchBuildHZB();
                 }
 
                 // --- Phase 2: retest occluded instances vs fresh HZB ---
@@ -719,7 +736,7 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
                     MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
                     GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
-                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1);
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1, m_FreezeCulling);
                 }
                 {
                     MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
@@ -737,7 +754,8 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
                     MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
                     GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
-                    m_Renderer.DispatchBuildHZB();
+                    if (!m_FreezeCulling)
+                        m_Renderer.DispatchBuildHZB();
                 }
 
                 // Debug overlay — runs once after final rasterize
@@ -757,7 +775,7 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "MeshletCull", MP_GREEN);
                     MICROPROFILE_SCOPEGPUI("MeshletCull", MP_GREEN);
                     GPU_MARKER(cmdList, L"Meshlet Cull (frustum-only)");
-                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, false, 0);
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, false, 0, m_FreezeCulling);
                 }
                 {
                     MICROPROFILE_SCOPEI("Render", "MeshletBinning", MP_YELLOW);
@@ -775,7 +793,8 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "HZBBuild", MP_ORANGE);
                     MICROPROFILE_SCOPEGPUI("HZBBuild", MP_ORANGE);
                     GPU_MARKER(cmdList, L"HZB Build");
-                    m_Renderer.DispatchBuildHZB();
+                    if (!m_FreezeCulling)
+                        m_Renderer.DispatchBuildHZB();
                 }
 
                 // Debug overlay — runs once after rasterize
@@ -933,6 +952,10 @@ void Application::RenderImGui()
         ImGui::Checkbox("Occlusion Culling (Phase 1+2)", &m_EnableOcclusionCulling);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Two-phase HZB occlusion culling (prev-frame HZB → Phase 1 rasterize → rebuild HZB → Phase 2 retest).\nOff = frustum-only culling (safe rollback).");
+
+        ImGui::Checkbox("Freeze Culling", &m_FreezeCulling);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Freeze the culling frustum/HZB at the current view while the render camera keeps moving.\nMeshlets culled by the frozen view pop in/out as you fly away — verifies instance/meshlet culling works.");
     }
 
     if (m_UseMeshlet && m_Model.IsMeshletReady())

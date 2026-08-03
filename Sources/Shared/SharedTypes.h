@@ -317,16 +317,6 @@ struct RasterParams {
     uint MeshletBinDataIdx;     // SRV index of MeshletOffsetAndCounts[]
 };
 
-// Passed to the debug mesh shader (MeshletRasterizeDebugMS.hlsl) via root param 12 (b1).
-// CPU iterates all meshlets and issues one DispatchMesh(1,1,1) per meshlet,
-// setting InstanceID and MeshletIndex directly — no binning indirection.
-struct DebugRasterParams {
-    uint InstanceID;    // Index into GlobalInstanceData[]
-    uint MeshletIndex;  // Per-instance local meshlet index (into md.MeshletOffset + MeshletIndex)
-    uint _pad0;
-    uint _pad1;
-};
-
 // =============================================================================
 // HZB (Hierarchical Z-Buffer) construction
 // Built via AMD FidelityFX SPD (fetched via CMake FetchContent, see CMakeLists.txt). Bound as a root CBV

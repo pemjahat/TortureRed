@@ -9,14 +9,13 @@ struct FrameConstants;
 // MeshletPass
 //
 // GPU-driven meshlet pipeline: cull -> bin (4-pass GPU sort) -> mesh-shader
-// rasterize. Also owns the CPU-driven per-meshlet debug dispatch path and the
-// visibility-buffer debug overlay PSO (plan001-meshletdebug).
+// rasterize. Also owns the visibility-buffer debug overlay PSO.
 //
 // Named "MeshletPass" (rather than "Meshlet") to avoid colliding with the
 // shared per-mesh `struct Meshlet` GPU data layout defined in Shared/SharedTypes.h.
 //
 // Resource/PSO creation happens once via CreateResources()/CreatePipelines();
-// per-frame work happens via Cull()/Binning()/Rasterize()/RasterizeDebug().
+// per-frame work happens via CullTwoPass()/Binning()/Rasterize().
 // -----------------------------------------------------------------------------
 class MeshletPass
 {
@@ -34,7 +33,6 @@ public:
                      bool occlusionEnabled, int phase); // phase: 0=Phase1 (vs prev HZB), 1=Phase2 (vs fresh HZB)
     void Binning(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress);                    // 4-pass GPU sort: PrepareArgs -> Classify -> AllocateBinRanges -> WriteBins
     void Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model);      // Mesh Shader rasterize per bin (GPU-driven)
-    void RasterizeDebug(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
 
     // ----- HZB (Hierarchical Z-Buffer) -----
     // Builds/rebuilds the HZB mip chain from `depthBuffer` via AMD FidelityFX SPD.
@@ -87,9 +85,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletAllocateBinRangesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletWriteBinsPSO;
 
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];      // Normal render
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterDebugPSO[NUM_RASTER_BINS]; // Debug mode (writes vis buffer)
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterDirectPSO;                 // CPU-driven debug: one DispatchMesh per meshlet
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];      // Normal render (always writes vis buffer token to SV_Target3)
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
 

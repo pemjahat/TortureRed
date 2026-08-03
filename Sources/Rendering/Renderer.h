@@ -83,6 +83,8 @@ public:
 
     // Constant buffer management
     void UpdateFrameCB(const FrameConstants& frameConstants);
+    // Frozen snapshot of FrameConstants used by cull dispatches when freeze culling is on
+    void UpdateCullFrameCB(const FrameConstants& frameConstants);
 
     // Getters
     ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -104,6 +106,7 @@ public:
     ID3D12Resource* GetCurrentBackBuffer() const;
 
     D3D12_GPU_VIRTUAL_ADDRESS GetFrameGPUAddress() const { return m_FrameCB.gpuAddress; }
+    D3D12_GPU_VIRTUAL_ADDRESS GetCullFrameGPUAddress() const { return m_CullFrameCB.gpuAddress; }
     void TransitionBackBuffer(D3D12_RESOURCE_STATES newState);
 
     // Background color
@@ -152,10 +155,9 @@ public:
     // occlusionEnabled=1, phase 0/1: two-phase occlusion culling (vs prev-HZB / fresh HZB).
     // occlusionEnabled=0 (phase must be 0): frustum-only single-phase hierarchical cull.
     void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
-                                     bool occlusionEnabled, int phase);
+                                     bool occlusionEnabled, int phase, bool freezeCulling = false);
     void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
     void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
-    void DispatchMeshletRasterizeDebug(class Model* model); // CPU-driven per-meshlet debug dispatch (no culling/binning)
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
     // HZB (Hierarchical Z-Buffer).
@@ -272,6 +274,7 @@ private:
 
     // Constant Buffers
     GPUBuffer m_FrameCB;
+    GPUBuffer m_CullFrameCB; // Frozen FrameConstants snapshot for freeze-culling debug
 
     // Synchronization
     UINT m_FrameIndex;

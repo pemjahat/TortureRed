@@ -411,6 +411,13 @@ bool Renderer::Initialize(HWND hwnd)
         return false;
     }
 
+    // Frozen snapshot bound to cull dispatches while freeze culling is enabled
+    if (!CreateBuffer(m_CullFrameCB, (sizeof(FrameConstants) + 255) & ~255, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_CullFrameConstants"))
+    {
+        std::cerr << "Failed to create cull frame constant buffer" << std::endl;
+        return false;
+    }
+
     // Create GBuffer — initially at WINDOW_WIDTH x WINDOW_HEIGHT.
     // Will be recreated at internal resolution by CreateInternalResolutionResources().
     CreateGBuffer(WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -952,6 +959,11 @@ void Renderer::UpdateFrameCB(const FrameConstants& frameConstants)
     memcpy(m_FrameCB.cpuPtr, &frameConstants, sizeof(FrameConstants));
 }
 
+void Renderer::UpdateCullFrameCB(const FrameConstants& frameConstants)
+{
+    memcpy(m_CullFrameCB.cpuPtr, &frameConstants, sizeof(FrameConstants));
+}
+
 void Renderer::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)
 {
     *ppAdapter = nullptr;
@@ -1103,9 +1115,12 @@ void Renderer::CreateMeshletPipelines()
 }
 
 void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& frame,
-                                           bool occlusionEnabled, int phase)
+                                           bool occlusionEnabled, int phase, bool freezeCulling)
 {
-    m_Meshlet.CullTwoPass(m_CommandList.Get(), m_FrameCB.gpuAddress, model, occlusionEnabled, phase);
+    // Freeze culling: cull dispatches read the frozen snapshot (m_CullFrameCB)
+    // while binning/rasterize keep the live m_FrameCB.
+    D3D12_GPU_VIRTUAL_ADDRESS cullFrameAddress = freezeCulling ? m_CullFrameCB.gpuAddress : m_FrameCB.gpuAddress;
+    m_Meshlet.CullTwoPass(m_CommandList.Get(), cullFrameAddress, model, occlusionEnabled, phase);
 }
 
 void Renderer::DispatchMeshletBinning()
@@ -1116,10 +1131,5 @@ void Renderer::DispatchMeshletBinning()
 void Renderer::DispatchMeshletRasterize(Model* model)
 {
     m_Meshlet.Rasterize(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model);
-}
-
-void Renderer::DispatchMeshletRasterizeDebug(Model* model)
-{
-    m_Meshlet.RasterizeDebug(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model);
 }
 

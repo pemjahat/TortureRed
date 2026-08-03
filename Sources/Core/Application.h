@@ -37,6 +37,7 @@ private:
     bool m_ShowDemoWindow         = false;
     bool m_UseMeshlet              = false;  // Toggle meshlet vs vertex-buffer rendering
     bool m_EnableOcclusionCulling  = false;  // Toggle two-phase HZB occlusion culling (Phase 1+2)
+    bool m_FreezeCulling           = false;  // Freeze the culling view to visually verify instance/meshlet culling
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 
@@ -50,6 +51,7 @@ private:
     DirectX::XMFLOAT4X4 m_LastViewInverse;
     DirectX::XMFLOAT4 m_LastCameraPos;
     FrameConstants m_FrameConstants;
+    FrameConstants m_CullFrameConstants;     // Frozen snapshot used by cull dispatches while m_FreezeCulling is on
 
     int m_SelectedLightIndex = 0;
 

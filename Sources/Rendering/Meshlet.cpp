@@ -382,27 +382,6 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
                              "[Meshlet] CreatePipelineState (mesh shader raster) failed");
             }
 
-            // Debug PSO — same but with ENABLE_DEBUG_DATA=1
-            {
-                std::vector<std::pair<std::wstring,std::wstring>> defs = {
-                    {L"ALPHA_MASK", alphaMaskVal},
-                    {L"ENABLE_DEBUG_DATA", L"1"}
-                };
-                auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "MSMain", "ms_6_8", defs);
-                auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "PSMain", "ps_6_8", defs);
-                buildMeshPSO(ms, ps, cull, m_MeshletRasterDebugPSO[i],
-                             "[Meshlet] CreatePipelineState (mesh shader raster debug) failed");
-            }
-        }
-
-        // Direct CPU-driven debug PSO — MeshletRasterizeDebugMS.hlsl
-        // No alpha-mask permutation needed: renders all meshlets as opaque for debugging.
-        {
-            std::vector<std::pair<std::wstring,std::wstring>> defs = { {L"ALPHA_MASK", L"0"} };
-            auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeDebugMS.hlsl", "MSMain", "ms_6_8", defs);
-            auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeDebugMS.hlsl", "PSMain", "ps_6_8", defs);
-            buildMeshPSO(ms, ps, D3D12_CULL_MODE_NONE, m_MeshletRasterDirectPSO,
-                         "[Meshlet] CreatePipelineState (mesh shader raster direct debug) failed");
         }
     }
 
@@ -971,10 +950,7 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     // MeshletOffsetAndCounts[binIndex] = uint4(count, 1, 1, offset) — read as SRV by mesh shader for binOffset.
     for (uint32_t binIndex = 0; binIndex < NUM_RASTER_BINS; ++binIndex)
     {
-        // Select PSO: debug mode uses the debug PSO (writes visibility buffer)
-        auto* pso = (m_MeshletDebugMode > 0 && m_MeshletRasterDebugPSO[binIndex])
-                    ? m_MeshletRasterDebugPSO[binIndex].Get()
-                    : m_MeshletRasterPSO[binIndex].Get();
+        auto* pso = m_MeshletRasterPSO[binIndex].Get();
         if (!pso) continue;
 
         // Bind RasterParams (root param 12, b1): BinIndex + bindless SRV indices
@@ -1007,66 +983,6 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_DispatchMeshArgs,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-}
-
-// ---------------------------------------------------------------------------
-// RasterizeDebug
-//
-// CPU-driven debug path: iterates every meshlet across all instances and issues
-// one DispatchMesh(1, 1, 1) per meshlet.  No GPU culling or binning is involved.
-// Use this to verify meshlet data correctness in isolation before enabling the
-// full GPU-driven pipeline.
-// ---------------------------------------------------------------------------
-void MeshletPass::RasterizeDebug(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model)
-{
-    if (!model->IsMeshletReady() || !m_MeshShaderSupported)
-        return;
-    if (!m_MeshletRasterDirectPSO)
-        return;
-
-    // DispatchMesh requires ID3D12GraphicsCommandList6 — query it once up front.
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> cmdList6;
-    CHECK_HR(cmdList->QueryInterface(IID_PPV_ARGS(&cmdList6)), "Failed to get ID3D12GraphicsCommandList6");
-
-    // Use MAIN root signature
-    cmdList->SetGraphicsRootSignature(mainRootSignature);
-    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
-
-    // Bind per-frame constants (root param 0)
-    cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
-
-    // Bind MaterialBuffer (root param 1, t0 space1)
-    cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
-
-    // Bind bindless texture table (root param 3, t0 space0)
-    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-
-    // Bind meshlet stream descriptor table (root param 14, t0-t8 space3)
-    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
-
-    cmdList->SetPipelineState(m_MeshletRasterDirectPSO.Get());
-
-    // Iterate every instance, then every meshlet within that instance
-    const auto& instanceData = model->GetInstanceDataArray();
-    const auto& meshDataArray = model->GetMeshDataArray();
-
-    for (uint32_t instID = 0; instID < (uint32_t)instanceData.size(); ++instID)
-    {
-        const InstanceData& inst = instanceData[instID];
-        const MeshData& md = meshDataArray[inst.MeshDataIndex];
-
-        for (uint32_t meshletIdx = 0; meshletIdx < md.MeshletCount; ++meshletIdx)
-        {
-            // Write InstanceID + MeshletIndex into root param 12 (b1) as DebugRasterParams
-            DebugRasterParams dp = {};
-            dp.InstanceID   = instID;
-            dp.MeshletIndex = meshletIdx;
-            cmdList->SetGraphicsRoot32BitConstants(12, sizeof(DebugRasterParams) / 4, &dp, 0);
-
-            // DispatchMesh requires ID3D12GraphicsCommandList6
-            cmdList6->DispatchMesh(1, 1, 1);
-        }
-    }
 }
 
 // =============================================================================

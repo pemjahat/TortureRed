@@ -14,15 +14,10 @@
     Compile permutations:
         ALPHA_MASK=0  — Opaque bin (back-face cull, no alpha discard)
         ALPHA_MASK=1  — AlphaMasked bin (no cull, alpha discard in PS)
-        ENABLE_DEBUG_DATA=1 — writes extra debug info (used by VisibilityDebugView.hlsl)
 */
 
 #ifndef ALPHA_MASK
 #define ALPHA_MASK 0
-#endif
-
-#ifndef ENABLE_DEBUG_DATA
-#define ENABLE_DEBUG_DATA 0
 #endif
 
 #define NUM_MESHLET_THREADS 32

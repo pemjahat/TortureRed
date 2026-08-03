@@ -15,14 +15,16 @@ struct DebugParams
 ConstantBuffer<DebugParams> DebugCB : register(b2);
 
 // Global stream buffers for barycentric reconstruction (bound via root param 14 descriptor table, t0-t15 space3)
+// Registers must match the CPU-side stream layout (Model.h GetMeshletStreamSRVBase): slot 6 is
+// GlobalMeshletBounds (unused here), so MeshData/InstanceData sit at t7/t8 like in MeshletRasterizeMS.hlsl.
 StructuredBuffer<float3>          GlobalPositions         : register(t0, space3);
 StructuredBuffer<uint>            GlobalNormals           : register(t1, space3);
 StructuredBuffer<uint>            GlobalUVs               : register(t2, space3);
 StructuredBuffer<Meshlet>         GlobalMeshlets          : register(t3, space3);
 StructuredBuffer<uint>            GlobalMeshletVertices   : register(t4, space3);
 StructuredBuffer<MeshletTriangle> GlobalMeshletTriangles  : register(t5, space3);
-StructuredBuffer<MeshData>        GlobalMeshData          : register(t6, space3);
-StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t7, space3);
+StructuredBuffer<MeshData>        GlobalMeshData          : register(t7, space3);
+StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t8, space3);
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
@@ -48,18 +50,18 @@ void DebugRenderCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (UnpackVisBuffer(visData, candidateIndex, primitiveID))
     {
         MeshletCandidate candidate = visibleMeshlets[candidateIndex];
-        InstanceData instance = GlobalInstanceData[candidate.InstanceID];
+        //InstanceData instance = GlobalInstanceData[candidate.InstanceID];
         uint meshletIndex = candidate.MeshletIndex;
 
         // Reconstruct vertex attributes for wireframe
-        float2 viewportInv = float2(1.0f / float(DebugCB.Width), 1.0f / float(DebugCB.Height));
-        VisBufferVertexAttribute vertex = GetVertexAttributes(
-            screenUV, FrameCB.viewProj, viewportInv,
-            visibleMeshlets,
-            GlobalInstanceData, GlobalMeshData,
-            GlobalMeshlets, GlobalMeshletVertices, GlobalMeshletTriangles,
-            GlobalPositions, GlobalNormals, GlobalUVs,
-            candidateIndex, primitiveID);
+         float2 viewportInv = float2(1.0f / float(DebugCB.Width), 1.0f / float(DebugCB.Height));
+         VisBufferVertexAttribute vertex = GetVertexAttributes(
+             screenUV, FrameCB.viewProj, viewportInv,
+             visibleMeshlets,
+             GlobalInstanceData, GlobalMeshData,
+             GlobalMeshlets, GlobalMeshletVertices, GlobalMeshletTriangles,
+             GlobalPositions, GlobalNormals, GlobalUVs,
+             candidateIndex, primitiveID);
 
         if (DebugCB.Mode == 1)
         {
