@@ -47,6 +47,10 @@ public:
     void DrawOccludedRects(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                            D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output,
                            uint32_t outputWidth, uint32_t outputHeight);
+    // task007 mode 5: emit one depth-duel text label per occluded record into the debug text buffer
+    void EmitDepthReadout(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                          uint32_t dataUAVIdx, uint32_t glyphSRVIdx, float fontSize,
+                          uint32_t backbufferWidth, uint32_t backbufferHeight);
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
@@ -101,6 +105,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBDebugViewPSO;                  // HZB mip viewer (task007 mode 2)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_OccludedRectBackgroundPSO;        // Occluded-rect overlay background (task007 mode 1)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_OccludedRectsPSO;                 // Occluded-rect rasterizer (task007 mode 1)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DepthReadoutPSO;                  // Depth-duel label producer (task007 mode 5)
 
     // HZB PSOs (main root signature — bindless heap access via ResourceDescriptorHeap[])
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBInitPSO;

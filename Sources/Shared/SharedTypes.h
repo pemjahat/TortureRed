@@ -370,6 +370,8 @@ struct OccludedRectDebug {
     uint   Phase;        // TWO_PASS_PHASE_* of the cull pass that occluded it
     uint   Kind;         // 0 = meshlet, 1 = instance
     uint   _pad0;
+    float2 SampleMinNDC; // NDC rect spanned by the 4 HZB sample texels (step 5)
+    float2 SampleMaxNDC; // — compare against RectMin/MaxNDC for the texel:object ratio
 };
 
 // Meshlet debug view mode that tints surviving meshlets by the HZB mip their
@@ -388,6 +390,76 @@ struct OccludedRectDrawParams {
     uint _pad0;
     uint _pad1;
     uint _pad2;
+};
+
+// =============================================================================
+// GPU on-screen debug text/lines — Sources/Shaders/DebugTextRender.hlsli/.hlsl
+//
+// Any shader appends packed text/line instances to one RWByteAddressBuffer via
+// the producer API; at end of frame a 1-thread CS builds two indirect draw args
+// (resetting the counters) and two ExecuteIndirect draws rasterize glyphs+lines
+// onto the backbuffer. Port of D3D12_Research ShaderDebugRenderer, bindless variant.
+// =============================================================================
+#define DEBUG_TEXT_MAX_CHARS 8192
+#define DEBUG_TEXT_MAX_LINES 32768
+
+// RWByteAddressBuffer layout offsets (bytes) — must match DebugTextRenderer::Data
+#define DEBUG_TEXT_COUNTER_OFFSET   0
+#define DEBUG_LINE_COUNTER_OFFSET   4
+#define DEBUG_TEXT_COUNTERS_SIZE    16
+#define DEBUG_TEXT_INSTANCES_OFFSET DEBUG_TEXT_COUNTERS_SIZE
+#define DEBUG_LINE_INSTANCES_OFFSET (DEBUG_TEXT_INSTANCES_OFFSET + DEBUG_TEXT_MAX_CHARS * 32)
+
+// One glyph of the debug font atlas (built from an ImFontAtlas)
+struct DebugGlyph {
+    float2 MinUV;
+    float2 MaxUV;
+    float2 Dimensions;   // Quad size in pixels at scale 1
+    float2 Offset;       // Offset from cursor to quad top-left
+    float  AdvanceX;     // Cursor advance in pixels
+    float  _pad0;
+    float  _pad1;
+    float  _pad2;
+};
+
+// Unpacked instances (32 bytes each) — pack later if bandwidth matters
+struct DebugCharInstance {
+    float2 Position;     // Pixels, top-left of glyph quad
+    uint   Character;    // ASCII codepoint
+    float  Scale;        // Size multiplier (1 = native font size)
+    float4 Color;
+};
+
+struct DebugLineInstance {
+    float3 A;
+    uint   ColorA;       // RGBA8; LSB of ColorA = screen-space ([0,1]) flag
+    float3 B;
+    uint   ColorB;       // RGBA8; world-space endpoints need FrameCB in the line VS
+};
+
+// End-of-frame pass parameters — root constants b1 (main root signature param 12,
+// shared by the args-builder CS and the glyph/line raster PSOs)
+struct DebugTextRenderParams {
+    uint  DataSRVIdx;      // ByteAddressBuffer SRV (instances)
+    uint  DataUAVIdx;      // RWByteAddressBuffer UAV (args builder resets counters)
+    uint  ArgsUAVIdx;      // RWStructuredBuffer<uint4> indirect draw args (2 entries)
+    uint  GlyphSRVIdx;     // StructuredBuffer<DebugGlyph>
+    uint  FontAtlasSRVIdx; // Texture2D<float4> font atlas
+    float TargetWidth;     // Backbuffer width in pixels
+    float TargetHeight;    // Backbuffer height in pixels
+    uint  _pad0;
+};
+
+// Depth-readout producer (mode 5) parameters — root constants b2 (param 13)
+struct DepthReadoutParams {
+    uint  RectsSRVIdx;      // Bindless SRV of the OccludedRectDebug buffer
+    uint  RectsCountSRVIdx; // Bindless SRV of the record counter
+    uint  DataUAVIdx;       // Debug text render-data UAV
+    uint  GlyphSRVIdx;      // StructuredBuffer<DebugGlyph>
+    float FontSize;         // Native font size in pixels
+    float BackbufferWidth;
+    float BackbufferHeight;
+    uint  MaxLabels;        // Cap on labels emitted per frame
 };
 
 // =============================================================================

@@ -48,9 +48,9 @@ float4 PSMain(PSInput input) : SV_Target {
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
 
     // Sky pixels — output background (transparent black). Reverse-Z: clear = 0.0 (far plane).
-    if (depth <= 0.0f) {
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
-    }
+    //if (depth <= 0.0f) {
+        //return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    //}
 
     // Single unified debug input — all debug modes pre-combine into this texture
     Texture2D<float4> debugTex = ResourceDescriptorHeap[g_Indices.InputIdx0];

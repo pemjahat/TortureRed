@@ -7,6 +7,7 @@
 #include "Graphics/GraphicsHelper.h"
 #include "AccelerationStructure.h"
 #include "Meshlet.h"
+#include "DebugTextRenderer.h"
 #include "PathTracing.h"
 #include "Denoise.h"
 #include "RestirDI.h"
@@ -174,6 +175,17 @@ public:
     void SetOccludedRectDebug(bool enabled) { m_Meshlet.SetDebugRecordOccluded(enabled); }
     void DispatchOccludedRectsDebug(D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output, uint32_t width, uint32_t height)
     { m_Meshlet.DrawOccludedRects(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, output, width, height); }
+    // GPU on-screen debug text/lines: rasterize all recorded instances onto the backbuffer
+    void RenderDebugTextOverlay(D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height)
+    { m_DebugTextRenderer.Render(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, rtv, width, height); }
+    uint32_t GetDebugRenderDataUAVIndex() const { return m_DebugTextRenderer.GetRenderDataUAVIndex(); }
+    uint32_t GetDebugGlyphSRVIndex() const { return m_DebugTextRenderer.GetGlyphSRVIndex(); }
+    float GetDebugFontSize() const { return m_DebugTextRenderer.GetFontSize(); }
+    // producer: emit one depth-duel label per occluded record into the debug text buffer
+    void DispatchDepthReadout(uint32_t backbufferWidth, uint32_t backbufferHeight)
+    { m_Meshlet.EmitDepthReadout(m_CommandList.Get(), m_RootSignature.Get(),
+                                 GetDebugRenderDataUAVIndex(), GetDebugGlyphSRVIndex(), GetDebugFontSize(),
+                                 backbufferWidth, backbufferHeight); }
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }
@@ -297,6 +309,7 @@ private:
     // ----- Meshlet Pipeline -----
     bool m_MeshShaderSupported = false;
     MeshletPass m_Meshlet;
+    DebugTextRenderer m_DebugTextRenderer; // GPU on-screen debug text/lines (task008)
 
     // Prevent copying
     Renderer(const Renderer&) = delete;

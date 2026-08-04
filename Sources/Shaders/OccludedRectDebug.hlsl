@@ -12,6 +12,8 @@
 //
 // Colors:  meshlet  phase 1 = red,    phase 2 = orange
 //          instance phase 1 = purple, phase 2 = cyan
+//          HZB sample-footprint rect (the 4 texels the test read) = yellow —
+//          compare it against the object rect to judge the texel:object ratio
 
 #include "Shared/SharedTypes.h"
 
@@ -65,5 +67,26 @@ void OccludedRectsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         outTex[int2(pmin.x, y)] = float4(color, 1.0f);
         outTex[int2(pmax.x, y)] = float4(color, 1.0f);
+    }
+
+    // HZB sample-footprint rect: the rect spanned by the 4 texels the occlusion
+    // test sampled at rec.Mip. A good mip choice puts this close to the object
+    // rect above (~1:1 texel:object ratio); a much larger yellow rect means the
+    // sampled texel summarizes a far bigger area than the object (weak test).
+    const float3 sampleColor = float3(1.0f, 0.9f, 0.1f); // yellow
+    float2 smin = float2(rec.SampleMinNDC.x, -rec.SampleMaxNDC.y) * 0.5f + 0.5f;
+    float2 smax = float2(rec.SampleMaxNDC.x, -rec.SampleMinNDC.y) * 0.5f + 0.5f;
+    int2 spmin = clamp((int2)(smin * float2(DrawParams.Width, DrawParams.Height)), int2(0, 0), int2(DrawParams.Width - 1, DrawParams.Height - 1));
+    int2 spmax = clamp((int2)(smax * float2(DrawParams.Width, DrawParams.Height)), int2(0, 0), int2(DrawParams.Width - 1, DrawParams.Height - 1));
+
+    for (int x = spmin.x; x <= spmax.x; ++x)
+    {
+        outTex[int2(x, spmin.y)] = float4(sampleColor, 1.0f);
+        outTex[int2(x, spmax.y)] = float4(sampleColor, 1.0f);
+    }
+    for (int y = spmin.y; y <= spmax.y; ++y)
+    {
+        outTex[int2(spmin.x, y)] = float4(sampleColor, 1.0f);
+        outTex[int2(spmax.x, y)] = float4(sampleColor, 1.0f);
     }
 }

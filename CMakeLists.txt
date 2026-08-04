@@ -6,9 +6,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Set output directories
+# Runtime artifacts (exe/DLLs) go to the shared Bin so the app, Content, and DLLs
+# stay in one run location. Static/import libs stay inside each preset's own
+# build tree — sharing them across toolchains/configs let different builds
+# silently overwrite each other's .lib files in Build/<config>/.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/Bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/Bin)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/Build)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Lib)
 
 # Set build type to Release if not specified
 if(NOT CMAKE_BUILD_TYPE)

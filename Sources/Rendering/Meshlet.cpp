@@ -480,6 +480,19 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
         }
     }
 
+    // --- Depth readout producer PSO (CS) ---
+    {
+        auto cs = GraphicsHelper::CompileShader("Shaders/DepthReadout.hlsl", "DepthReadoutCS", "cs_6_6");
+        if (!cs.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = mainRootSignature;
+            desc.CS = { cs.data(), cs.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_DepthReadoutPSO)),
+                     "[Meshlet] CreateComputePipelineState (depth readout) failed");
+        }
+    }
+
     CreateHZBPipelines(device);
 
     std::cout << "[Meshlet] Pipelines created" << std::endl;
@@ -687,6 +700,40 @@ void MeshletPass::DrawOccludedRects(ID3D12GraphicsCommandList* cmdList, ID3D12Ro
 
     cmdList->SetPipelineState(m_OccludedRectsPSO.Get());
     cmdList->Dispatch(MAX_OCCLUDED_RECT_DEBUG / 64, 1, 1);
+}
+
+// -----------------------------------------------------------------------------
+// EmitDepthReadout (task007 mode 5 / task008)
+//
+// Emits one depth-duel text label per occluded record into the debug text
+// render-data buffer; the DebugTextRenderer rasterizes them at end of frame.
+// -----------------------------------------------------------------------------
+void MeshletPass::EmitDepthReadout(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                                   uint32_t dataUAVIdx, uint32_t glyphSRVIdx, float fontSize,
+                                   uint32_t backbufferWidth, uint32_t backbufferHeight)
+{
+    if (!m_DepthReadoutPSO || !m_OccludedRects.resource)
+        return;
+
+    // Records were in UAV state for the cull passes → SRV for reading
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedRects, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedRectsCounter, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    DepthReadoutParams params = {};
+    params.RectsSRVIdx      = static_cast<uint32_t>(m_OccludedRects.srvIndex);
+    params.RectsCountSRVIdx = static_cast<uint32_t>(m_OccludedRectsCounter.srvIndex);
+    params.DataUAVIdx       = dataUAVIdx;
+    params.GlyphSRVIdx      = glyphSRVIdx;
+    params.FontSize         = fontSize;
+    params.BackbufferWidth  = static_cast<float>(backbufferWidth);
+    params.BackbufferHeight = static_cast<float>(backbufferHeight);
+    params.MaxLabels        = 64; // cap to keep the screen readable
+
+    cmdList->SetComputeRootSignature(mainRootSignature);
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetPipelineState(m_DepthReadoutPSO.Get());
+    cmdList->SetComputeRoot32BitConstants(13, sizeof(DepthReadoutParams) / 4, &params, 0); // b2
+    cmdList->Dispatch(1, 1, 1); // 64 threads ≥ MaxLabels
 }
 
 // =============================================================================

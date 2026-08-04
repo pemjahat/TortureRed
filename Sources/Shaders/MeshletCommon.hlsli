@@ -29,23 +29,43 @@ float2 UnpackUVRG16(StructuredBuffer<uint> uvs, uint offset, uint index)
 }
 
 // Frustum culling: world-space AABB vs view-projection matrix — conservative test.
-// Returns true if the AABB is at least partially visible.
-bool FrustumCullAABB(float3 worldCenter, float3 worldExtents, float4x4 viewProj)
-{
-    float3 ext = worldExtents;
+// Adria-style shared projection (Adria workspace: Assets/Shaders/Meshlets/
+// GpuDrivenRendering.hlsli, FrustumCull): the 8 corners are projected ONCE and the
+// NDC rect + nearest depth are returned alongside visibility, so HZBCull can
+// consume the rect directly instead of re-projecting the AABB.
+struct FrustumCullData {
+    bool   IsVisible;
+    float3 RectMin; // NDC min xy (z = farthest corner; kept for symmetry, unused)
+    float3 RectMax; // NDC max xy (z = nearest corner — reverse-Z: larger = closer)
+};
 
-    // Transform all 8 corners to clip space and test
-    float4 corners[8];
-    corners[0] = mul(float4(worldCenter + float3(-ext.x, -ext.y, -ext.z), 1.0), viewProj);
-    corners[1] = mul(float4(worldCenter + float3( ext.x, -ext.y, -ext.z), 1.0), viewProj);
-    corners[2] = mul(float4(worldCenter + float3(-ext.x,  ext.y, -ext.z), 1.0), viewProj);
-    corners[3] = mul(float4(worldCenter + float3( ext.x,  ext.y, -ext.z), 1.0), viewProj);
-    corners[4] = mul(float4(worldCenter + float3(-ext.x, -ext.y,  ext.z), 1.0), viewProj);
-    corners[5] = mul(float4(worldCenter + float3( ext.x, -ext.y,  ext.z), 1.0), viewProj);
-    corners[6] = mul(float4(worldCenter + float3(-ext.x,  ext.y,  ext.z), 1.0), viewProj);
-    corners[7] = mul(float4(worldCenter + float3( ext.x,  ext.y,  ext.z), 1.0), viewProj);
+FrustumCullData FrustumCullAABB(float3 worldCenter, float3 worldExtents, float4x4 viewProj)
+{
+    FrustumCullData data = (FrustumCullData)0;
+    data.IsVisible = true;
+
+    // 8 clip-space corners via 3 axis vectors (4 muls + adds instead of 8 muls)
+    float3x4 axis;
+    axis[0] = mul(float4(worldExtents.x * 2, 0, 0, 0), viewProj);
+    axis[1] = mul(float4(0, worldExtents.y * 2, 0, 0), viewProj);
+    axis[2] = mul(float4(0, 0, worldExtents.z * 2, 0), viewProj);
+
+    float4 pos000 = mul(float4(worldCenter - worldExtents, 1.0), viewProj);
+    float4 pos100 = pos000 + axis[0];
+    float4 pos010 = pos000 + axis[1];
+    float4 pos110 = pos010 + axis[0];
+    float4 pos001 = pos000 + axis[2];
+    float4 pos101 = pos100 + axis[2];
+    float4 pos011 = pos010 + axis[2];
+    float4 pos111 = pos110 + axis[2];
+
+    float minW = min(min(min(pos000.w, pos100.w), min(pos010.w, pos110.w)),
+                     min(min(pos001.w, pos101.w), min(pos011.w, pos111.w)));
+    float maxW = max(max(max(pos000.w, pos100.w), max(pos010.w, pos110.w)),
+                     max(max(pos001.w, pos101.w), max(pos011.w, pos111.w)));
 
     // Check if ALL corners are outside the same plane → culled
+    float4 corners[8] = { pos000, pos100, pos010, pos110, pos001, pos101, pos011, pos111 };
     bool allOutsideLeft   = true;
     bool allOutsideRight  = true;
     bool allOutsideTop    = true;
@@ -71,7 +91,35 @@ bool FrustumCullAABB(float3 worldCenter, float3 worldExtents, float4x4 viewProj)
 
     bool culled = allOutsideLeft || allOutsideRight || allOutsideTop ||
                   allOutsideBottom || allOutsideNear || allOutsideFar;
-    return !culled;
+    data.IsVisible = !culled && (maxW > 0.0f);
+
+    // NDC divide → screen rect + nearest depth (reverse-Z: nearest = max ndc.z).
+    // Unguarded like Adria: the minW/maxW fixup below sanitizes the only case
+    // where the divide is meaningless.
+    float3 ssPos000 = pos000.xyz / pos000.w;
+    float3 ssPos100 = pos100.xyz / pos100.w;
+    float3 ssPos010 = pos010.xyz / pos010.w;
+    float3 ssPos110 = pos110.xyz / pos110.w;
+    float3 ssPos001 = pos001.xyz / pos001.w;
+    float3 ssPos101 = pos101.xyz / pos101.w;
+    float3 ssPos011 = pos011.xyz / pos011.w;
+    float3 ssPos111 = pos111.xyz / pos111.w;
+
+    data.RectMin = min(min(min(ssPos000, ssPos100), min(ssPos010, ssPos110)),
+                       min(min(ssPos001, ssPos101), min(ssPos011, ssPos111)));
+    data.RectMax = max(max(max(ssPos000, ssPos100), max(ssPos010, ssPos110)),
+                       max(max(ssPos001, ssPos101), max(ssPos011, ssPos111)));
+
+    // Near-plane straddle: some corner is behind the camera, so the projected
+    // positions are meaningless — force the widest, closest possible footprint
+    // (z=1 is the nearest depth in reverse-Z) so occlusion can never falsely cull.
+    if (minW <= 0.0f && maxW > 0.0f)
+    {
+        data.RectMin = float3(-1.0f, -1.0f, 0.0f);
+        data.RectMax = float3( 1.0f,  1.0f, 1.0f);
+    }
+
+    return data;
 }
 
 // Transform a local-space AABB by localToWorld → conservative world-space AABB.
@@ -82,12 +130,12 @@ void TransformAABBToWorld(float3 localCenter, float3 localExtents, float4x4 loca
                           out float3 worldCenter, out float3 worldExtents)
 {
     worldCenter  = mul(float4(localCenter, 1.0f), localToWorld).xyz;
-    worldExtents = mul(localExtents, abs((float3x3)localToWorld));
+    worldExtents = mul(localExtents, (float3x3)localToWorld);
 }
 
 // Frustum culling: meshlet-space AABB → world → clip, conservative test.
-// Returns true if the AABB is at least partially visible.
-bool FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 viewProj)
+// Returns the shared FrustumCullData (visibility + NDC rect + nearest depth).
+FrustumCullData FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 viewProj)
 {
     float3 worldCenter, worldExtents;
     TransformAABBToWorld(bounds.LocalCenter, bounds.LocalExtents, localToWorld,

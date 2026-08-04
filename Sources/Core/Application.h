@@ -36,10 +36,12 @@ private:
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
     bool m_UseMeshlet              = false;  // Toggle meshlet vs vertex-buffer rendering
-    bool m_EnableOcclusionCulling  = false;  // Toggle two-phase HZB occlusion culling (Phase 1+2)
+    bool m_EnableOcclusionCulling  = false;  // Toggle two-phase HZB occlusion culling
     bool m_FreezeCulling           = false;  // Freeze the culling view to visually verify instance/meshlet culling
-    int  m_HZBDebugMip             = -1;     // -1=Off, else HZB mip visualized as grayscale (task007 mode 2)
-    bool m_OccludedRectDebug       = false;  // Draw NDC rects of HZB-occluded instances/meshlets (task007 mode 1)
+    int  m_HZBDebugMip             = -1;     // -1=Off, else HZB mip visualized as grayscale
+    bool m_OccludedRectDebug       = false;  // Draw NDC rects of HZB-occluded instances/meshlets
+    bool m_DebugScreenText         = false;  // GPU on-screen debug text/lines overlay, master switch
+    bool m_DebugDepthLabels        = false;  // Depth-duel labels for occluded records
     float m_Exposure = 1.0f;
     SDL_Window* m_Window;
 

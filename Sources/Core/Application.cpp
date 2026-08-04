@@ -494,8 +494,9 @@ void Application::Update(float deltaTime)
     }
     m_Renderer.UpdateCullFrameCB(m_CullFrameConstants);
 
-    // Occluded-rect recording toggle (task007 mode 1) — read by the cull dispatches this frame
-    m_Renderer.SetOccludedRectDebug(m_OccludedRectDebug);
+    // Occluded-rect recording toggle — read by the cull dispatches this frame.
+    // Recording also runs when only the depth labels need the records.
+    m_Renderer.SetOccludedRectDebug(m_OccludedRectDebug || (m_DebugScreenText && m_DebugDepthLabels));
 }
 
 void Application::Render()
@@ -742,31 +743,31 @@ void Application::Render()
                 }
 
                 // --- Phase 2: retest occluded instances vs fresh HZB ---
-                // {
-                //     MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
-                //     MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
-                //     GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
-                //     m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1, m_FreezeCulling);
-                // }
-                // {
-                //     MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
-                //     MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
-                //     GPU_MARKER(cmdList, L"Phase 2 - Binning");
-                //     m_Renderer.DispatchMeshletBinning();
-                // }
-                // {
-                //     MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
-                //     MICROPROFILE_SCOPEGPUI("Phase2_Rasterize", MP_BLUE);
-                //     GPU_MARKER(cmdList, L"Phase 2 - Rasterize (Preserve depth)");
-                //     doMeshletRasterize(false); // Preserve depth/color from Phase 1
-                // }
-                // {
-                //     MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
-                //     MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
-                //     GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
-                //     if (!m_FreezeCulling)
-                //         m_Renderer.DispatchBuildHZB();
-                // }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_CullInstances", MP_GREEN);
+                    MICROPROFILE_SCOPEGPUI("Phase2_CullInstances", MP_GREEN);
+                    GPU_MARKER(cmdList, L"Phase 2 - CullInstances (vs fresh HZB)");
+                    m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, true, 1, m_FreezeCulling);
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
+                    MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
+                    GPU_MARKER(cmdList, L"Phase 2 - Binning");
+                    m_Renderer.DispatchMeshletBinning();
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
+                    MICROPROFILE_SCOPEGPUI("Phase2_Rasterize", MP_BLUE);
+                    GPU_MARKER(cmdList, L"Phase 2 - Rasterize (Preserve depth)");
+                    doMeshletRasterize(false); // Preserve depth/color from Phase 1
+                }
+                {
+                    MICROPROFILE_SCOPEI("Render", "Phase2_BuildHZB", MP_ORANGE);
+                    MICROPROFILE_SCOPEGPUI("Phase2_BuildHZB", MP_ORANGE);
+                    GPU_MARKER(cmdList, L"Phase 2 - BuildHZB (complete, for next frame)");
+                    if (!m_FreezeCulling)
+                        m_Renderer.DispatchBuildHZB();
+                }
 
                 // Debug overlay — runs once after final rasterize
                 runDebugOverlay();
@@ -857,7 +858,7 @@ void Application::Render()
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
 
-        // Occluded-rect overlay (task007 mode 1) — draw NDC rects of HZB-rejected
+        // Occluded-rect overlay — draw NDC rects of HZB-rejected
         // instances/meshlets over a dimmed scene-albedo background.
         if (m_UseMeshlet && m_OccludedRectDebug)
         {
@@ -868,6 +869,14 @@ void Application::Render()
                                                   m_InternalWidth, m_InternalHeight);
             GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+
+        // Depth-duel labels — producer for the on-screen debug text
+        // pass that runs at end of frame. Emits into the shared text buffer.
+        if (m_UseMeshlet && m_DebugScreenText && m_DebugDepthLabels)
+        {
+            GPU_MARKER(cmdList, L"Depth Readout");
+            m_Renderer.DispatchDepthReadout(m_OutputWidth, m_OutputHeight);
         }
 
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
@@ -943,6 +952,15 @@ void Application::Render()
         cmdList->RSSetScissorRects(1, &outputScissor);
     }
 
+    // GPU on-screen debug text/lines — draw on top of the final image, under ImGui
+    if (m_DebugScreenText)
+    {
+        GPU_MARKER(cmdList, L"Debug Text Overlay");
+        m_Renderer.RenderDebugTextOverlay(m_Renderer.GetFrameGPUAddress(),
+                                          m_Renderer.GetCurrentBackBufferRTV(),
+                                          m_OutputWidth, m_OutputHeight);
+    }
+
     // Start the Dear ImGui frame
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplSDL2_NewFrame();
@@ -1016,12 +1034,22 @@ void Application::RenderImGui()
         ImGui::Checkbox("Occluded Rects Overlay", &m_OccludedRectDebug);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Draws the screen-space rects of instances/meshlets rejected by HZBCull,\nover a dimmed scene background (via the FullScreenDebug pass).\nMeshlet: red = occluded phase 1, orange = phase 2.\nInstance: purple = phase 1, cyan = phase 2.");
+
+        ImGui::Checkbox("On-Screen Debug Text", &m_DebugScreenText);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Rasterize GPU-recorded debug text/lines onto the final image (under ImGui).\nMaster switch — pair it with the options below that emit text.");
+        ImGui::Checkbox("Occluded Depth Labels", &m_DebugDepthLabels);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Print the HZB depth duel (nearestDepth<hzbDepth m<mip>) above each\noccluded instance/meshlet, directly on the scene.\nRequires On-Screen Debug Text + Occlusion Culling (Phase 1+2).");
     }
-    else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0 || m_OccludedRectDebug)
+    else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0 || m_OccludedRectDebug
+             || m_DebugScreenText || m_DebugDepthLabels)
     {
         m_Renderer.SetMeshletDebugMode(0); // Reset debug when meshlet is disabled
         m_HZBDebugMip = -1;
         m_OccludedRectDebug = false;
+        m_DebugScreenText = false;
+        m_DebugDepthLabels = false;
     }
 
     if (m_Renderer.IsRayTracingSupported())

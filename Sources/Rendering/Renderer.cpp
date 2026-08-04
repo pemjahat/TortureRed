@@ -299,6 +299,8 @@ void Renderer::CheckAndReloadShaders()
     // CreateRayTracingPipeline() internally when RT is supported.
     CreatePipelineState();
 
+    CreateMeshletPipelines();
+
     // CreateRasterIndirectGIPipelines rebuilds all compute GI/SHaRC/ReSTIR PSOs
     // and calls SetupShaderTimestamps() at the end to refresh the timestamp map.
     CreateRasterIndirectGIPipelines();
@@ -336,6 +338,16 @@ bool Renderer::Initialize(HWND hwnd)
         D3D_FEATURE_LEVEL_11_0,
         IID_PPV_ARGS(&m_Device)
     ), "D3D12CreateDevice failed");
+
+    // Pin GPU clocks for stable profiling/debugging timestamps. Requires Windows
+    // Developer Mode or an elevated process; harmless warning otherwise.
+    // Call once, right after device creation (per Microsoft docs).
+    {
+        HRESULT hrStable = m_Device->SetStablePowerState(TRUE);
+        if (FAILED(hrStable))
+            std::cerr << "[Renderer] SetStablePowerState failed (0x" << std::hex << hrStable << std::dec
+                      << ") — enable Developer Mode or run elevated; GPU clocks will boost normally" << std::endl;
+    }
 
     // QI to ID3D12Device2 for CreatePipelineState (pipeline state streams, required for Mesh Shader PSOs)
     CHECK_HR(m_Device->QueryInterface(IID_PPV_ARGS(&m_Device2)), "QueryInterface ID3D12Device2 failed");
@@ -488,6 +500,13 @@ bool Renderer::Initialize(HWND hwnd)
     // Meshlet pipeline resources and PSOs
     CreateMeshletResources();
     CreateMeshletPipelines();
+
+    // GPU on-screen debug text renderer
+    if (!m_DebugTextRenderer.Initialize(m_Device.Get(), m_CommandQueue.Get(), m_RootSignature.Get()))
+    {
+        std::cerr << "Failed to initialize debug text renderer" << std::endl;
+        return false;
+    }
 
     return true;
 }

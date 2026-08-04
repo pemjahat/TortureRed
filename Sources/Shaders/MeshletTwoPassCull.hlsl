@@ -70,57 +70,25 @@ struct HZBCullDebug {
     uint   Mip;          // HZB mip the test used
     uint   Valid;        // 1 = a full occlusion test ran (0 on the near-plane/degenerate early-outs)
     uint2  _pad;
+    float2 SampleMinNDC; // NDC rect spanned by the 4 HZB sample texels (step 5)
+    float2 SampleMaxNDC;
 };
 
-bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
+bool HZBCull(FrustumCullData fc,
              uint hzbSRVIdx, uint hzbMipCount, uint hzbWidth, uint hzbHeight,
              out HZBCullDebug dbg)
 {
     dbg = (HZBCullDebug)0;
 
-    // --- Step 1: Project all 8 AABB corners to NDC ---
-    float3 corners[8];
-    corners[0] = worldCenter + float3(-worldExtents.x, -worldExtents.y, -worldExtents.z);
-    corners[1] = worldCenter + float3( worldExtents.x, -worldExtents.y, -worldExtents.z);
-    corners[2] = worldCenter + float3(-worldExtents.x,  worldExtents.y, -worldExtents.z);
-    corners[3] = worldCenter + float3( worldExtents.x,  worldExtents.y, -worldExtents.z);
-    corners[4] = worldCenter + float3(-worldExtents.x, -worldExtents.y,  worldExtents.z);
-    corners[5] = worldCenter + float3( worldExtents.x, -worldExtents.y,  worldExtents.z);
-    corners[6] = worldCenter + float3(-worldExtents.x,  worldExtents.y,  worldExtents.z);
-    corners[7] = worldCenter + float3( worldExtents.x,  worldExtents.y,  worldExtents.z);
-
-    // --- Step 2: Compute NDC bounding rect ---
-    float minNDCx =  1.0f, minNDCy =  1.0f;
-    float maxNDCx = -1.0f, maxNDCy = -1.0f;
-    float nearestDepth = 0.0f; // Reverse-Z: nearest = largest (we'll max())
-
-    [unroll]
-    for (int i = 0; i < 8; i++)
-    {
-        float4 clip = mul(float4(corners[i], 1.0f), viewProj);
-        if (clip.w <= 0.0f)
-        {
-            // Corner is behind the near plane or at infinity — conservative: bounding rect
-            // extends to the full screen edge, so occlusion test cannot falsely cull.
-            minNDCx = -1.0f; maxNDCx = 1.0f;
-            minNDCy = -1.0f; maxNDCy = 1.0f;
-            // Don't skip depth — use the corner's expected depth after clamping
-            continue;
-        }
-        float3 ndc = clip.xyz / clip.w;
-        minNDCx = min(minNDCx, ndc.x);
-        maxNDCx = max(maxNDCx, ndc.x);
-        minNDCy = min(minNDCy, ndc.y);
-        maxNDCy = max(maxNDCy, ndc.y);
-        nearestDepth = max(nearestDepth, ndc.z); // Reverse-Z: larger = closer
-    }
-
+    // --- Steps 1-3: projection, NDC rect, nearest depth, near-plane fallback ---
+    // Done ONCE by FrustumCullAABB (Adria-style shared projection, see
+    // MeshletCommon.hlsli) — here we just consume its output.
     // Clamp NDC to [-1,1] range (RT-safe)
-    minNDCx = clamp(minNDCx, -1.0f, 1.0f);
-    maxNDCx = clamp(maxNDCx, -1.0f, 1.0f);
-    minNDCy = clamp(minNDCy, -1.0f, 1.0f);
-    maxNDCy = clamp(maxNDCy, -1.0f, 1.0f);
-    nearestDepth = saturate(nearestDepth);
+    float minNDCx = clamp(fc.RectMin.x, -1.0f, 1.0f);
+    float maxNDCx = clamp(fc.RectMax.x, -1.0f, 1.0f);
+    float minNDCy = clamp(fc.RectMin.y, -1.0f, 1.0f);
+    float maxNDCy = clamp(fc.RectMax.y, -1.0f, 1.0f);
+    float nearestDepth = saturate(fc.RectMax.z); // Reverse-Z: larger = closer
 
     // If the rect is invalid or covers the full screen, don't cull
     float rectWidth  = maxNDCx - minNDCx;
@@ -129,13 +97,20 @@ bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
         return false;
 
     // --- Step 3: Map NDC to HZB pixel coords (mip 0) ---
-    // NDC [-1,1] → [0,1] UV → pixel coords
+    // NDC [-1,1] → [0,1] UV → pixel coords.
+    // Y must be FLIPPED: NDC y=+1 is the top of the screen, but HZB texel row 0 is also the
+    // top of the screen (HZBInitCS Gather()s the depth buffer with the same row convention as
+    // rasterization), so pixelY = (-ndc.y*0.5+0.5) * height — matching every other NDC->UV
+    // conversion in this codebase (MotionVectors.hlsl, RestirDI/GI_Temporal.hlsl,
+    // NrdPrepareGuides.hlsl) and Adria/D3D12_Research's HZBCull (float2(0.5,-0.5) swizzle in
+    // GpuDrivenRendering.hlsli). minNDCy (bottom of screen) maps to the LARGER pixel Y, so
+    // min/max swap under the flip. See docs/bug_hzbcull_ndcflip.md.
     float2 rectMinPixel = float2(
         (minNDCx * 0.5f + 0.5f) * (float)hzbWidth,
-        (minNDCy * 0.5f + 0.5f) * (float)hzbHeight);
+        (-maxNDCy * 0.5f + 0.5f) * (float)hzbHeight);
     float2 rectMaxPixel = float2(
         (maxNDCx * 0.5f + 0.5f) * (float)hzbWidth,
-        (maxNDCy * 0.5f + 0.5f) * (float)hzbHeight);
+        (-minNDCy * 0.5f + 0.5f) * (float)hzbHeight);
 
     float2 rectSize = max(rectMaxPixel - rectMinPixel, 1.0f.xx);
 
@@ -150,25 +125,47 @@ bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
     float mipScale = exp2(-float(mipLevel));
     float2 mipRectMin = rectMinPixel * mipScale;
     float2 mipRectMax = rectMaxPixel * mipScale;
+    //int4 mipRect = int4(rectMinPixel >> mipLevel;
+    //float2 mipRectMax = rectMaxPixel >> mipLevel;
 
-    // --- Step 5: Sample 4×4 footprint at the chosen mip ---
-    // 4 bilinear samples at the corners cover a 4×4 texel area.
+    // --- Step 5: Sample the footprint at the chosen mip ---
+    // Snap OUTWARD to the integer texel rect that fully encloses the object rect
+    // ([floor(min), ceil(max)-1]) and tap its 4 corner texels. Sampling at
+    // (mipRectMin + 0.5) instead would round the min side INWARD whenever the
+    // rect starts in the upper half of a texel, leaving a strip of the object
+    // uncovered by any depth sample (visible in the debug overlay as the object
+    // rect sticking out of the sampled-texel rect).
+    float2 mipTexelMin = floor(mipRectMin);
+    float2 mipTexelMax = ceil(mipRectMax) - 1.0f;
+
     Texture2D<float> hzb = ResourceDescriptorHeap[hzbSRVIdx];
-    float hzbSample0 = hzb.SampleLevel(PointClampSampler, (mipRectMin + 0.5f) / float2(hzbWidth >> mipLevel, hzbHeight >> mipLevel), mipLevel);
-    float hzbSample1 = hzb.SampleLevel(PointClampSampler, (float2(mipRectMax.x, mipRectMin.y) + 0.5f) / float2(hzbWidth >> mipLevel, hzbHeight >> mipLevel), mipLevel);
-    float hzbSample2 = hzb.SampleLevel(PointClampSampler, (float2(mipRectMin.x, mipRectMax.y) + 0.5f) / float2(hzbWidth >> mipLevel, hzbHeight >> mipLevel), mipLevel);
-    float hzbSample3 = hzb.SampleLevel(PointClampSampler, (mipRectMax + 0.5f) / float2(hzbWidth >> mipLevel, hzbHeight >> mipLevel), mipLevel);
+    float2 texelSize = 1.f / uint2(hzbWidth, hzbHeight) * (1u << mipLevel);
+    float hzbSample0 = hzb.SampleLevel(PointClampSampler, (mipTexelMin + 0.5f) * texelSize, mipLevel);
+    float hzbSample1 = hzb.SampleLevel(PointClampSampler, (float2(mipTexelMax.x, mipTexelMin.y) + 0.5f) * texelSize, mipLevel);
+    float hzbSample2 = hzb.SampleLevel(PointClampSampler, (float2(mipTexelMin.x, mipTexelMax.y) + 0.5f) * texelSize, mipLevel);
+    float hzbSample3 = hzb.SampleLevel(PointClampSampler, (mipTexelMax + 0.5f) * texelSize, mipLevel);
 
     // --- Step 6: Min-reduce (reverse-Z: farthest = smallest) ---
     float hzbDepth = min(min(hzbSample0, hzbSample1), min(hzbSample2, hzbSample3));
 
-    // Debug record output (task007 mode 1) — consumed when this test occludes the candidate
+    // Debug record output — consumed when this test occludes the candidate
     dbg.RectMinNDC   = float2(minNDCx, minNDCy);
     dbg.RectMaxNDC   = float2(maxNDCx, maxNDCy);
     dbg.NearestDepth = nearestDepth;
     dbg.HZBDepth     = hzbDepth;
     dbg.Mip          = mipLevel;
     dbg.Valid        = 1;
+    // NDC rect of the sampled HZB texel block — encloses RectMin/MaxNDC by
+    // construction; comparing sizes shows the texel:object ratio of the test.
+    // Inverts the Step 3 Y-flip: pixel space is flipped relative to NDC, so the smaller pixel
+    // row (top of screen) maps to the LARGER NDC y and vice versa (min/max swap on Y only).
+    float2 hzbDims = float2((float)hzbWidth, (float)hzbHeight);
+    float2 sampleMinPixel = mipTexelMin * (float)(1u << mipLevel);
+    float2 sampleMaxPixel = (mipTexelMax + 1.0f) * (float)(1u << mipLevel);
+    dbg.SampleMinNDC = float2(sampleMinPixel.x / hzbDims.x * 2.0f - 1.0f,
+                              1.0f - 2.0f * (sampleMaxPixel.y / hzbDims.y));
+    dbg.SampleMaxNDC = float2(sampleMaxPixel.x / hzbDims.x * 2.0f - 1.0f,
+                              1.0f - 2.0f * (sampleMinPixel.y / hzbDims.y));
 
     // --- Step 7: Occlusion test ---
     // Object is occluded if its nearest point is farther than everything in the HZB.
@@ -205,6 +202,8 @@ void RecordOccludedRect(HZBCullDebug dbg, uint phase, uint kind)
     rec.Phase        = phase;
     rec.Kind         = kind;
     rec._pad0        = 0;
+    rec.SampleMinNDC = dbg.SampleMinNDC;
+    rec.SampleMaxNDC = dbg.SampleMaxNDC;
     rects[slot] = rec;
 }
 
@@ -250,8 +249,10 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     TransformAABBToWorld(bound.BoundsCenter, bound.BoundsExtents, inst.LocalToWorld,
                          worldCenter, worldExtents);
 
-    // Frustum cull (fresh world-space AABB)
-    if (!FrustumCullAABB(worldCenter, worldExtents, FrameCB.viewProj))
+    // Frustum cull (fresh world-space AABB) — shared projection; the NDC rect
+    // is reused by HZBCull below instead of re-projecting the bounds.
+    FrustumCullData fc = FrustumCullAABB(worldCenter, worldExtents, FrameCB.viewProj);
+    if (!fc.IsVisible)
         return;
 
     // Occlusion cull (only if enabled and not frustum-only mode)
@@ -259,9 +260,10 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (CullConst.EnableOcclusion)    
     {
         HZBCullDebug dbg;
-        occluded = HZBCull(worldCenter, worldExtents, FrameCB.viewProj,
-                           CullConst.HZBSRVIdx, CullConst.HZBMipCount,
+        occluded = HZBCull(fc, CullConst.HZBSRVIdx, CullConst.HZBMipCount,
                            CullConst.HZBWidth, CullConst.HZBHeight, dbg);
+
+        // if (!occluded)
         if (occluded)
             RecordOccludedRect(dbg, CullConst.Phase, 1); // kind 1 = instance
     }
@@ -311,21 +313,17 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Load meshlet bounds
     MeshletBounds bounds = MeshletBoundsBuf[md.MeshletBoundsOffset + cand.MeshletIndex];
 
-    // transformToWorld
-    if (!FrustumCullMeshlet(bounds, inst.LocalToWorld, FrameCB.viewProj))
+    // transformToWorld + frustum cull — shared projection; the NDC rect is
+    // reused by HZBCull below (extents are expanded by abs(linear part) inside
+    // TransformAABBToWorld, so rotated/scaled instances stay conservative).
+    FrustumCullData fc = FrustumCullMeshlet(bounds, inst.LocalToWorld, FrameCB.viewProj);
+    if (!fc.IsVisible)
         return;
 
-    // Occlusion cull — transform local bounds by per-frame LocalToWorld
-    // (extents must be expanded by abs(linear part), not passed through raw,
-    // otherwise rotated/scaled instances get an underestimated AABB).
     HZBCullDebug dbg = (HZBCullDebug)0;
     if (CullConst.EnableOcclusion)
     {
-        float3 worldCenter, worldExtents;
-        TransformAABBToWorld(bounds.LocalCenter, bounds.LocalExtents, inst.LocalToWorld,
-                             worldCenter, worldExtents);
-        if (HZBCull(worldCenter, worldExtents, FrameCB.viewProj,
-                    CullConst.HZBSRVIdx, CullConst.HZBMipCount,
+        if (HZBCull(fc, CullConst.HZBSRVIdx, CullConst.HZBMipCount,
                     CullConst.HZBWidth, CullConst.HZBHeight, dbg))
         {
             RecordOccludedRect(dbg, CullConst.Phase, 0); // kind 0 = meshlet
