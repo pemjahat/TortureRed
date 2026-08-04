@@ -1080,8 +1080,9 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
     CreateTexture(m_FinalSpecularTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, 1, 1, "Tex_FinalSpecular");
 
-    // ---- Visibility buffer (meshlet debug overlay R32_UINT) ----
+    // ---- Visibility buffer (meshlet debug overlay R32_UINT) + HZB ----
     m_Meshlet.RecreateVisibilityBuffer(w, h);
+    m_GPUCulling.RecreateHZB(w, h);
 
     // ---- Re-initialize NRD at new resolution ----
     if (m_Denoise.IsInitialized())
@@ -1120,16 +1121,18 @@ void Renderer::DispatchNaiveTsr(const FrameConstants& frame, const GPUTexture& i
 }
 
 // =============================================================================
-// Meshlet Pipeline — thin delegation to Rendering/Meshlet.h/.cpp
+// Meshlet Pipeline — thin delegation to GPUCulling + Meshlet
 // =============================================================================
 
 void Renderer::CreateMeshletResources()
 {
     m_Meshlet.CreateResources(m_InternalWidth, m_InternalHeight);
+    m_GPUCulling.CreateResources(m_InternalWidth, m_InternalHeight);
 }
 
 void Renderer::CreateMeshletPipelines()
 {
+    m_GPUCulling.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
     m_Meshlet.CreatePipelines(m_Device.Get(), m_Device2.Get(), m_RootSignature.Get(), m_MeshShaderSupported);
 }
 
@@ -1139,16 +1142,20 @@ void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& fr
     // Freeze culling: cull dispatches read the frozen snapshot (m_CullFrameCB)
     // while binning/rasterize keep the live m_FrameCB.
     D3D12_GPU_VIRTUAL_ADDRESS cullFrameAddress = freezeCulling ? m_CullFrameCB.gpuAddress : m_FrameCB.gpuAddress;
-    m_Meshlet.CullTwoPass(m_CommandList.Get(), cullFrameAddress, model, occlusionEnabled, phase);
+    m_GPUCulling.CullTwoPass(m_CommandList.Get(), cullFrameAddress, model, occlusionEnabled, phase);
 }
 
 void Renderer::DispatchMeshletBinning()
 {
-    m_Meshlet.Binning(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress);
+    m_Meshlet.Binning(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
+                       m_GPUCulling.GetVisibleMeshletsSRVIndex(),
+                       m_GPUCulling.GetVisibleMeshletsCounterSRVIndex(),
+                       m_GPUCulling.GetVisibleMeshletsCounterUAVIndex());
 }
 
 void Renderer::DispatchMeshletRasterize(Model* model)
 {
-    m_Meshlet.Rasterize(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model);
+    m_Meshlet.Rasterize(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model,
+                         m_GPUCulling.GetVisibleMeshletsSRVIndex());
 }
 

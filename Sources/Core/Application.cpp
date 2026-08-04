@@ -650,7 +650,7 @@ void Application::Render()
                 MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                // Mip-tint sideband (task007 mode 3): cull writes it as UAV, overlay reads as SRV
+                // Mip-tint sideband : cull writes it as UAV, overlay reads as SRV
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibleMeshletMipsBuffer(),
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
@@ -842,7 +842,7 @@ void Application::Render()
             m_Renderer.DispatchRestirGI(&m_Model, m_FrameConstants);
         }
 
-        // HZB mip viewer (task007 mode 2) — visualize the selected HZB mip as grayscale.
+        // HZB mip viewer  — visualize the selected HZB mip as grayscale.
         // Runs after all HZB builds, so it shows this frame's freshest chain; the
         // FullScreenDebug pass then blits FullScreenDebugTex in place of the lighting pass.
         if (m_UseMeshlet && m_HZBDebugMip >= 0)
@@ -1022,7 +1022,12 @@ void Application::RenderImGui()
         const char* debugModes[] = { "Off", "InstanceID", "MeshletID", "PrimitiveID", "HZB Mip Tint" };
         int debugMode = m_Renderer.GetMeshletDebugMode();
         if (ImGui::Combo("Meshlet Debug View", &debugMode, debugModes, IM_ARRAYSIZE(debugModes)))
+        {
             m_Renderer.SetMeshletDebugMode(debugMode);
+            // Mip-tint sideband — the cull shader writes one mip per visible
+            // meshlet slot; the flag must be forwarded to GPUCulling before dispatch.
+            m_Renderer.SetDebugRecordMip(debugMode == 4);
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Overlay meshlet debug visualization.\nInstanceID = random color per instance\nMeshletID = random color per meshlet\nPrimitiveID = random color per triangle (wireframe)\nHZB Mip Tint = color by the HZB mip each meshlet's occlusion test used\n  (blue = fine mip / small object, red = coarse mip / large object,\n   gray = no occlusion test ran — enable Occlusion Culling for this mode)");
 

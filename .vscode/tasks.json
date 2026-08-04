@@ -7,9 +7,8 @@
             "command": "cmake",
             "args": [
                 "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Debug"
+                "--preset",
+                "msvc-debug"
             ],
             "group": {
                 "kind": "build",
@@ -29,9 +28,8 @@
             "command": "cmake",
             "args": [
                 "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Release"
+                "--preset",
+                "msvc-release"
             ],
             "group": "build",
             "presentation": {
@@ -41,24 +39,6 @@
                 "panel": "shared"
             },
             "problemMatcher": "$msCompile"
-        },
-        {
-            "label": "configure",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "-S",
-                "${workspaceFolder}",
-                "-B",
-                "${workspaceFolder}/build"
-            ],
-            "group": "build",
-            "presentation": {
-                "echo": true,
-                "reveal": "silent",
-                "focus": false,
-                "panel": "shared"
-            }
         },
         {
             "label": "build-llvm-debug",
@@ -123,6 +103,38 @@
             "args": [
                 "--preset",
                 "llvm-debug"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "configure-msvc-release",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--preset",
+                "msvc-release"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "configure-msvc-debug",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--preset",
+                "msvc-debug"
             ],
             "group": "build",
             "presentation": {

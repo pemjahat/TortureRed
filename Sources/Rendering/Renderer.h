@@ -7,6 +7,7 @@
 #include "Graphics/GraphicsHelper.h"
 #include "AccelerationStructure.h"
 #include "Meshlet.h"
+#include "GPUCulling.h"
 #include "DebugTextRenderer.h"
 #include "PathTracing.h"
 #include "Denoise.h"
@@ -152,46 +153,38 @@ public:
     // Meshlet pipeline
     void CreateMeshletResources();
     void CreateMeshletPipelines();
-    // Hierarchical two-stage meshlet culling: CullInstancesCS → CullMeshletsCS.
-    // occlusionEnabled=1, phase 0/1: two-phase occlusion culling (vs prev-HZB / fresh HZB).
-    // occlusionEnabled=0 (phase must be 0): frustum-only single-phase hierarchical cull.
+    // Hierarchical two-stage meshlet culling: CullInstancesCS → CullMeshletsCS (GPUCulling).
     void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
                                      bool occlusionEnabled, int phase, bool freezeCulling = false);
     void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
     void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
-    // HZB (Hierarchical Z-Buffer).
-    // Builds the HZB mip chain from the current GBuffer depth via AMD FidelityFX SPD. Not yet
-    // consumed for occlusion culling — Cull()'s two-phase rewrite is kept for a follow-up step.
-    void DispatchBuildHZB() { m_Meshlet.BuildHZB(m_CommandList.Get(), m_GBufferPass.GetGBuffer().depth); }
-    GPUTexture& GetHZB() { return m_Meshlet.GetHZB(); }
-    uint32_t GetHZBMips() const { return m_Meshlet.GetHZBMips(); }
-    // HZB mip viewer (task007 mode 2): renders one HZB mip as grayscale into a bindless UAV
-    // (FullScreenDebugTex), displayed by the FullScreenDebug pass which replaces the lighting pass.
+    // HZB (Hierarchical Z-Buffer) — GPUCulling owns the HZB chain.
+    void DispatchBuildHZB() { m_GPUCulling.BuildHZB(m_CommandList.Get(), m_GBufferPass.GetGBuffer().depth); }
+    GPUTexture& GetHZB() { return m_GPUCulling.GetHZB(); }
+    uint32_t GetHZBMips() const { return m_GPUCulling.GetHZBMips(); }
     void DispatchHZBDebugView(uint32_t outputUAVIdx, uint32_t width, uint32_t height, int mipLevel)
-    { m_Meshlet.DebugViewHZB(m_CommandList.Get(), m_RootSignature.Get(), outputUAVIdx, width, height, mipLevel); }
-    // Occluded-rect overlay (task007 mode 1): draws NDC rects of HZB-rejected instances/meshlets
-    void SetOccludedRectDebug(bool enabled) { m_Meshlet.SetDebugRecordOccluded(enabled); }
+    { m_GPUCulling.DebugViewHZB(m_CommandList.Get(), m_RootSignature.Get(), outputUAVIdx, width, height, mipLevel); }
+    void SetOccludedRectDebug(bool enabled) { m_GPUCulling.SetDebugRecordOccluded(enabled); }
+    void SetDebugRecordMip(bool enabled) { m_GPUCulling.SetDebugRecordMip(enabled); }
     void DispatchOccludedRectsDebug(D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output, uint32_t width, uint32_t height)
-    { m_Meshlet.DrawOccludedRects(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, output, width, height); }
-    // GPU on-screen debug text/lines: rasterize all recorded instances onto the backbuffer
+    { m_GPUCulling.DrawOccludedRects(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, output, width, height); }
     void RenderDebugTextOverlay(D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height)
     { m_DebugTextRenderer.Render(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, rtv, width, height); }
     uint32_t GetDebugRenderDataUAVIndex() const { return m_DebugTextRenderer.GetRenderDataUAVIndex(); }
     uint32_t GetDebugGlyphSRVIndex() const { return m_DebugTextRenderer.GetGlyphSRVIndex(); }
     float GetDebugFontSize() const { return m_DebugTextRenderer.GetFontSize(); }
-    // producer: emit one depth-duel label per occluded record into the debug text buffer
     void DispatchDepthReadout(uint32_t backbufferWidth, uint32_t backbufferHeight)
-    { m_Meshlet.EmitDepthReadout(m_CommandList.Get(), m_RootSignature.Get(),
+    { m_GPUCulling.EmitDepthReadout(m_CommandList.Get(), m_RootSignature.Get(),
                                  GetDebugRenderDataUAVIndex(), GetDebugGlyphSRVIndex(), GetDebugFontSize(),
                                  backbufferWidth, backbufferHeight); }
 
-    // Visibility buffer for meshlet debug overlay (plan001)
+    // Visibility buffer for meshlet debug overlay — delegated to MeshletPass (vis buf) / GPUCulling (mips)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }
-    int GetVisibleMeshletsSRVIndex() const { return m_Meshlet.GetVisibleMeshletsSRVIndex(); }
-    int GetVisibleMeshletMipsSRVIndex() const { return m_Meshlet.GetVisibleMeshletMipsSRVIndex(); }
-    GPUBuffer& GetVisibleMeshletMipsBuffer() { return m_Meshlet.GetVisibleMeshletMipsBuffer(); }
+    int GetVisibleMeshletsSRVIndex() const { return m_GPUCulling.GetVisibleMeshletsSRVIndex(); }
+    int GetVisibleMeshletMipsSRVIndex() const { return m_GPUCulling.GetVisibleMeshletMipsSRVIndex(); }
+    GPUBuffer& GetVisibleMeshletMipsBuffer() { return m_GPUCulling.GetVisibleMeshletMipsBuffer(); }
     ID3D12PipelineState* GetMeshletDebugViewPSO() const { return m_Meshlet.GetDebugViewPSO(); }
     int GetMeshletDebugMode() const { return m_Meshlet.GetDebugMode(); }
     void SetMeshletDebugMode(int mode) { m_Meshlet.SetDebugMode(mode); }
@@ -309,6 +302,7 @@ private:
     // ----- Meshlet Pipeline -----
     bool m_MeshShaderSupported = false;
     MeshletPass m_Meshlet;
+    GPUCulling  m_GPUCulling;
     DebugTextRenderer m_DebugTextRenderer; // GPU on-screen debug text/lines (task008)
 
     // Prevent copying

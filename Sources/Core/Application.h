@@ -35,8 +35,8 @@ private:
     bool m_DebugShadowMap        = false;
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
-    bool m_UseMeshlet              = false;  // Toggle meshlet vs vertex-buffer rendering
-    bool m_EnableOcclusionCulling  = false;  // Toggle two-phase HZB occlusion culling
+    bool m_UseMeshlet              = true;   // Toggle meshlet vs vertex-buffer rendering
+    bool m_EnableOcclusionCulling  = true;   // Toggle two-phase HZB occlusion culling
     bool m_FreezeCulling           = false;  // Freeze the culling view to visually verify instance/meshlet culling
     int  m_HZBDebugMip             = -1;     // -1=Off, else HZB mip visualized as grayscale
     bool m_OccludedRectDebug       = false;  // Draw NDC rects of HZB-occluded instances/meshlets
