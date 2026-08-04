@@ -352,6 +352,44 @@ struct HZBDebugParams {
     uint Height;       // Output (FullScreenDebugTex) height
 };
 
+// -----------------------------------------------------------------------------
+// Occluded-rect debug recording (task007 mode 1) — Sources/Shaders/OccludedRectDebug.hlsl
+//
+// Cull shaders (MeshletTwoPassCull.hlsl) append one record per instance/meshlet
+// rejected by HZBCull; the draw pass rasterizes the recorded NDC rects over a
+// dimmed scene-albedo background into FullScreenDebugTex.
+// -----------------------------------------------------------------------------
+#define MAX_OCCLUDED_RECT_DEBUG 16384
+
+struct OccludedRectDebug {
+    float2 RectMinNDC;   // Clamped NDC rect (HZBCull step 2/4 output)
+    float2 RectMaxNDC;
+    float  NearestDepth; // Object side of the step-7 compare (reverse-Z: larger = closer)
+    float  HZBDepth;     // HZB side of the compare
+    uint   Mip;          // HZB mip the test used (step 5)
+    uint   Phase;        // TWO_PASS_PHASE_* of the cull pass that occluded it
+    uint   Kind;         // 0 = meshlet, 1 = instance
+    uint   _pad0;
+};
+
+// Meshlet debug view mode that tints surviving meshlets by the HZB mip their
+// occlusion test used (task007 mode 3). Matches the combo in Application::RenderImGui
+// and ViewMode in VisibilityDebugView.hlsl. 0=Off, 1=Instance, 2=Meshlet, 3=Primitive.
+#define MESHLET_DEBUG_MIP_TINT 4
+
+// Draw-pass parameters — root constants at main-root-signature param 13 (b2),
+// same slot as HZBDebugParams (debug-only PSOs, never bound simultaneously).
+struct OccludedRectDrawParams {
+    uint RectsSRVIdx;      // Bindless SRV of the OccludedRectDebug buffer
+    uint RectsCountSRVIdx; // Bindless SRV of the record counter
+    uint OutputUAVIdx;     // UAV index of FullScreenDebugTex
+    uint Width;            // Output (FullScreenDebugTex) width
+    uint Height;           // Output height
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
 // =============================================================================
 // Two-Pass Occlusion Culling — constants shared by CullInstancesCS / CullMeshletsCS
 // =============================================================================
@@ -377,7 +415,16 @@ struct TwoPassCullConstants {
     uint  VisibleMeshletsCounterUAVIdx;// UAV bindless index of VisibleMeshletsCounter
     uint  Phase;                       // TWO_PASS_PHASE_FIRST / SECOND / FRUSTUM_ONLY
     uint  EnableOcclusion;             // 0 = frustum-only, 1 = occlusion culling active
-    uint  _pad0;
+    // Occluded-rect debug recording (task007 mode 1). When DebugRecordOccluded is 0
+    // the cull shaders never touch the debug buffers (zero overhead).
+    uint  DebugRecordOccluded;         // 1 = append OccludedRectDebug records for HZB-rejected candidates
+    uint  OccludedRectsUAVIdx;         // UAV bindless index of OccludedRectDebug[]
+    uint  OccludedRectsCounterUAVIdx;  // UAV bindless index of the record counter
+
+    // Mip-selection tint (task007 mode 3): one mip value per visible-meshlet slot,
+    // read back by the debug overlay via the vis token's candidateIndex.
+    uint  DebugRecordMip;              // 1 = write the occlusion test's mip per surviving meshlet
+    uint  VisibleMeshletMipsUAVIdx;    // UAV bindless index of VisibleMeshletMips[]
 };
 
 #endif // SHARED_TYPES_H

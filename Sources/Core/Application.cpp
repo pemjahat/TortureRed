@@ -493,6 +493,9 @@ void Application::Update(float deltaTime)
         m_CullFrameConstants = m_FrameConstants;
     }
     m_Renderer.UpdateCullFrameCB(m_CullFrameConstants);
+
+    // Occluded-rect recording toggle (task007 mode 1) — read by the cull dispatches this frame
+    m_Renderer.SetOccludedRectDebug(m_OccludedRectDebug);
 }
 
 void Application::Render()
@@ -646,6 +649,9 @@ void Application::Render()
                 MICROPROFILE_SCOPEGPUI("MeshletDebug", MP_PURPLE);
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                // Mip-tint sideband (task007 mode 3): cull writes it as UAV, overlay reads as SRV
+                GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibleMeshletMipsBuffer(),
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cmdList->SetComputeRootSignature(m_Renderer.GetRootSignature());
@@ -664,6 +670,8 @@ void Application::Render()
                     uint32_t OutputUAVIdx;
                     uint32_t Width;
                     uint32_t Height;
+                    uint32_t MipsSRVIdx;
+                    uint32_t HZBMipCount;
                 } debugParams;
                 debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
                 debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
@@ -671,6 +679,8 @@ void Application::Render()
                 debugParams.OutputUAVIdx     = m_Renderer.GetFullScreenDebugTex().uavIndex;
                 debugParams.Width            = m_InternalWidth;
                 debugParams.Height           = m_InternalHeight;
+                debugParams.MipsSRVIdx       = (uint32_t)m_Renderer.GetVisibleMeshletMipsSRVIndex();
+                debugParams.HZBMipCount      = m_Renderer.GetHZBMips();
                 cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
                 cmdList->Dispatch(
                     (m_InternalWidth  + 7) / 8,
@@ -847,6 +857,19 @@ void Application::Render()
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
 
+        // Occluded-rect overlay (task007 mode 1) — draw NDC rects of HZB-rejected
+        // instances/meshlets over a dimmed scene-albedo background.
+        if (m_UseMeshlet && m_OccludedRectDebug)
+        {
+            GPU_MARKER(cmdList, L"Occluded Rects Debug");
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_Renderer.DispatchOccludedRectsDebug(m_Renderer.GetFrameGPUAddress(), m_Renderer.GetFullScreenDebugTex(),
+                                                  m_InternalWidth, m_InternalHeight);
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetFullScreenDebugTex(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
 
         // Determine if any full-screen debug mode is active.
@@ -854,6 +877,7 @@ void Application::Render()
         const bool debugActive =
             (m_Renderer.GetMeshletDebugMode() > 0) ||
             (m_UseMeshlet && m_HZBDebugMip >= 0) ||
+            (m_UseMeshlet && m_OccludedRectDebug) ||
             (m_FrameConstants.sharcDebug != 0) ||
             (m_FrameConstants.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF) ||
             (m_FrameConstants.restirDIDebugMode != RESTIR_DI_DEBUG_OFF);
@@ -977,22 +1001,27 @@ void Application::RenderImGui()
 
     if (m_UseMeshlet && m_Model.IsMeshletReady())
     {
-        const char* debugModes[] = { "Off", "InstanceID", "MeshletID", "PrimitiveID" };
+        const char* debugModes[] = { "Off", "InstanceID", "MeshletID", "PrimitiveID", "HZB Mip Tint" };
         int debugMode = m_Renderer.GetMeshletDebugMode();
         if (ImGui::Combo("Meshlet Debug View", &debugMode, debugModes, IM_ARRAYSIZE(debugModes)))
             m_Renderer.SetMeshletDebugMode(debugMode);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Overlay meshlet debug visualization.\nInstanceID = random color per instance\nMeshletID = random color per meshlet\nPrimitiveID = random color per triangle (wireframe)");
+            ImGui::SetTooltip("Overlay meshlet debug visualization.\nInstanceID = random color per instance\nMeshletID = random color per meshlet\nPrimitiveID = random color per triangle (wireframe)\nHZB Mip Tint = color by the HZB mip each meshlet's occlusion test used\n  (blue = fine mip / small object, red = coarse mip / large object,\n   gray = no occlusion test ran — enable Occlusion Culling for this mode)");
 
         int hzbMipMax = (int)m_Renderer.GetHZBMips() - 1;
         ImGui::SliderInt("HZB Mip Viewer", &m_HZBDebugMip, -1, hzbMipMax, m_HZBDebugMip < 0 ? "Off" : "Mip %d");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Visualize one HZB mip as grayscale (reverse-Z: white = near, black = far/sky).\nDisplayed via the FullScreenDebug pass (replaces lighting).\nOverrides the Meshlet Debug View overlay when both are active.");
+
+        ImGui::Checkbox("Occluded Rects Overlay", &m_OccludedRectDebug);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Draws the screen-space rects of instances/meshlets rejected by HZBCull,\nover a dimmed scene background (via the FullScreenDebug pass).\nMeshlet: red = occluded phase 1, orange = phase 2.\nInstance: purple = phase 1, cyan = phase 2.");
     }
-    else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0)
+    else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0 || m_OccludedRectDebug)
     {
         m_Renderer.SetMeshletDebugMode(0); // Reset debug when meshlet is disabled
         m_HZBDebugMip = -1;
+        m_OccludedRectDebug = false;
     }
 
     if (m_Renderer.IsRayTracingSupported())

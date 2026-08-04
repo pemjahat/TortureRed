@@ -170,10 +170,16 @@ public:
     // (FullScreenDebugTex), displayed by the FullScreenDebug pass which replaces the lighting pass.
     void DispatchHZBDebugView(uint32_t outputUAVIdx, uint32_t width, uint32_t height, int mipLevel)
     { m_Meshlet.DebugViewHZB(m_CommandList.Get(), m_RootSignature.Get(), outputUAVIdx, width, height, mipLevel); }
+    // Occluded-rect overlay (task007 mode 1): draws NDC rects of HZB-rejected instances/meshlets
+    void SetOccludedRectDebug(bool enabled) { m_Meshlet.SetDebugRecordOccluded(enabled); }
+    void DispatchOccludedRectsDebug(D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output, uint32_t width, uint32_t height)
+    { m_Meshlet.DrawOccludedRects(m_CommandList.Get(), m_RootSignature.Get(), frameCBAddress, output, width, height); }
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }
     int GetVisibleMeshletsSRVIndex() const { return m_Meshlet.GetVisibleMeshletsSRVIndex(); }
+    int GetVisibleMeshletMipsSRVIndex() const { return m_Meshlet.GetVisibleMeshletMipsSRVIndex(); }
+    GPUBuffer& GetVisibleMeshletMipsBuffer() { return m_Meshlet.GetVisibleMeshletMipsBuffer(); }
     ID3D12PipelineState* GetMeshletDebugViewPSO() const { return m_Meshlet.GetDebugViewPSO(); }
     int GetMeshletDebugMode() const { return m_Meshlet.GetDebugMode(); }
     void SetMeshletDebugMode(int mode) { m_Meshlet.SetDebugMode(mode); }

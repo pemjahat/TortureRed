@@ -5,14 +5,25 @@
 // --- Debug overlay parameters (CPU→GPU via root constants b2) ---
 struct DebugParams
 {
-    uint Mode;             // 0 = Off, 1 = Instance, 2 = Meshlet, 3 = Primitive
+    uint Mode;             // 0 = Off, 1 = Instance, 2 = Meshlet, 3 = Primitive, 4 = HZB mip tint
     uint VisBufSRVIdx;     // Descriptor-heap SRV index for visibility buffer (R32_UINT texture)
     uint CandidatesSRVIdx; // Descriptor-heap SRV index for VisibleMeshlets StructuredBuffer
     uint OutputUAVIdx;     // Descriptor-heap UAV index for output color (R16G16B16A16_FLOAT texture)
     uint Width;
     uint Height;
+    uint MipsSRVIdx;       // Descriptor-heap SRV index for VisibleMeshletMips (mode 4)
+    uint HZBMipCount;      // HZB mip count (mode 4 color ramp normalization)
 };
 ConstantBuffer<DebugParams> DebugCB : register(b2);
+
+// Heat ramp for the mip tint : fine mips (0) = blue → green → coarse mips = red
+float3 MipTintColor(uint mip, uint mipCount)
+{
+    float t = (mipCount > 1) ? (float)mip / (float)(mipCount - 1) : 0.0f;
+    return float3(saturate(t * 2.0f - 0.5f),
+                  saturate(1.0f - abs(t * 2.0f - 1.0f)),
+                  saturate(1.5f - t * 2.0f));
+}
 
 // Global stream buffers for barycentric reconstruction (bound via root param 14 descriptor table, t0-t15 space3)
 // Registers must match the CPU-side stream layout (Model.h GetMeshletStreamSRVBase): slot 6 is
@@ -77,6 +88,13 @@ void DebugRenderCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             uint seed = SeedThread(primitiveID);
             color = RandomColor(seed);
+        }
+        else if (DebugCB.Mode == MESHLET_DEBUG_MIP_TINT) // 4 — HZB mip-selection tint (task007 mode 3)
+        {
+            StructuredBuffer<uint> mips = ResourceDescriptorHeap[DebugCB.MipsSRVIdx];
+            uint mip = mips[candidateIndex];
+            // 0xFF sentinel: no occlusion test ran for this meshlet (frustum-only / near-plane fallback)
+            color = (mip == 0xFFu) ? float3(0.15f, 0.15f, 0.15f) : MipTintColor(mip, DebugCB.HZBMipCount);
         }
 
         // Wireframe overlay on all debug modes

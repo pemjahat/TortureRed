@@ -42,10 +42,17 @@ public:
     // task007 mode 2: visualize one HZB mip as grayscale into a bindless UAV (FullScreenDebugTex)
     void DebugViewHZB(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                       uint32_t outputUAVIdx, uint32_t outputWidth, uint32_t outputHeight, int mipLevel);
+    // record HZB-occluded instances/meshlets and draw their NDC rects
+    void SetDebugRecordOccluded(bool enabled) { m_DebugRecordOccluded = enabled; }
+    void DrawOccludedRects(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                           D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output,
+                           uint32_t outputWidth, uint32_t outputHeight);
 
     // Visibility buffer for meshlet debug overlay (plan001)
     GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
     int GetVisibleMeshletsSRVIndex() const { return m_VisibleMeshlets.srvIndex; }
+    int GetVisibleMeshletMipsSRVIndex() const { return m_VisibleMeshletMips.srvIndex; }
+    GPUBuffer& GetVisibleMeshletMipsBuffer() { return m_VisibleMeshletMips; }
     ID3D12PipelineState* GetDebugViewPSO() const { return m_MeshletDebugViewPSO.Get(); }
     int GetDebugMode() const { return m_MeshletDebugMode; }
     void SetDebugMode(int mode) { m_MeshletDebugMode = mode; }
@@ -92,6 +99,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBDebugViewPSO;                  // HZB mip viewer (task007 mode 2)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_OccludedRectBackgroundPSO;        // Occluded-rect overlay background (task007 mode 1)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_OccludedRectsPSO;                 // Occluded-rect rasterizer (task007 mode 1)
 
     // HZB PSOs (main root signature — bindless heap access via ResourceDescriptorHeap[])
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_HZBInitPSO;
@@ -117,6 +126,14 @@ private:
     GPUBuffer m_MeshletCullArgs;                // Indirect dispatch args for CullMeshletsCS (uint3)
     GPUBuffer m_InstanceCullArgs;               // Indirect dispatch args for Phase 2 CullInstancesCS (uint3)
     GPUBuffer m_TwoPassCullConstantsBuffer[2];  // Upload-heap CBV, double-buffered: [0]=Phase1, [1]=Phase2
+
+    // Occluded-rect debug recording (task007 mode 1)
+    GPUBuffer m_OccludedRects;                  // RWStructuredBuffer<OccludedRectDebug>
+    GPUBuffer m_OccludedRectsCounter;           // RWStructuredBuffer<uint>[1] — append counter
+    bool m_DebugRecordOccluded = false;
+
+    // Mip-selection tint sideband (task007 mode 3)
+    GPUBuffer m_VisibleMeshletMips;             // RWStructuredBuffer<uint> — one mip per visible-meshlet slot
 
     // Two-pass cull PSOs
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_CullInstancesPSO;

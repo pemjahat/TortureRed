@@ -61,9 +61,23 @@ RWStructuredBuffer<uint> InstanceCullArgs    : register(u7);  // uint3 dispatch 
 //      (i.e. the closest point of the object is farther than everything in the HZB)
 // =============================================================================
 
+// Debug data captured by HZBCull for the occluded-rect overlay (task007 mode 1).
+struct HZBCullDebug {
+    float2 RectMinNDC;   // Clamped NDC rect (end of step 4)
+    float2 RectMaxNDC;
+    float  NearestDepth; // Object's closest point (reverse-Z: larger = closer)
+    float  HZBDepth;     // Farthest occluder sampled from the HZB
+    uint   Mip;          // HZB mip the test used
+    uint   Valid;        // 1 = a full occlusion test ran (0 on the near-plane/degenerate early-outs)
+    uint2  _pad;
+};
+
 bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
-             uint hzbSRVIdx, uint hzbMipCount, uint hzbWidth, uint hzbHeight)
+             uint hzbSRVIdx, uint hzbMipCount, uint hzbWidth, uint hzbHeight,
+             out HZBCullDebug dbg)
 {
+    dbg = (HZBCullDebug)0;
+
     // --- Step 1: Project all 8 AABB corners to NDC ---
     float3 corners[8];
     corners[0] = worldCenter + float3(-worldExtents.x, -worldExtents.y, -worldExtents.z);
@@ -148,6 +162,14 @@ bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
     // --- Step 6: Min-reduce (reverse-Z: farthest = smallest) ---
     float hzbDepth = min(min(hzbSample0, hzbSample1), min(hzbSample2, hzbSample3));
 
+    // Debug record output (task007 mode 1) — consumed when this test occludes the candidate
+    dbg.RectMinNDC   = float2(minNDCx, minNDCy);
+    dbg.RectMaxNDC   = float2(maxNDCx, maxNDCy);
+    dbg.NearestDepth = nearestDepth;
+    dbg.HZBDepth     = hzbDepth;
+    dbg.Mip          = mipLevel;
+    dbg.Valid        = 1;
+
     // --- Step 7: Occlusion test ---
     // Object is occluded if its nearest point is farther than everything in the HZB.
     // Reverse-Z: nearest = larger, farthest = smaller.
@@ -155,6 +177,35 @@ bool HZBCull(float3 worldCenter, float3 worldExtents, float4x4 viewProj,
     // If nearestDepth < hzbDepth, the object's closest point is farther than the
     // farthest thing the HZB contains → object is behind all HZB geometry → occluded.
     return nearestDepth < hzbDepth;
+}
+
+// =============================================================================
+// Occluded-rect debug recording (task007 mode 1)
+// Appends an OccludedRectDebug record for a candidate rejected by HZBCull.
+// No-op unless the CPU enabled recording via CullConst.DebugRecordOccluded.
+// =============================================================================
+void RecordOccludedRect(HZBCullDebug dbg, uint phase, uint kind)
+{
+    if (!CullConst.DebugRecordOccluded)
+        return;
+
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[CullConst.OccludedRectsCounterUAVIdx];
+    uint slot;
+    InterlockedAdd(counter[0], 1, slot);
+    if (slot >= MAX_OCCLUDED_RECT_DEBUG)
+        return;
+
+    RWStructuredBuffer<OccludedRectDebug> rects = ResourceDescriptorHeap[CullConst.OccludedRectsUAVIdx];
+    OccludedRectDebug rec;
+    rec.RectMinNDC   = dbg.RectMinNDC;
+    rec.RectMaxNDC   = dbg.RectMaxNDC;
+    rec.NearestDepth = dbg.NearestDepth;
+    rec.HZBDepth     = dbg.HZBDepth;
+    rec.Mip          = dbg.Mip;
+    rec.Phase        = phase;
+    rec.Kind         = kind;
+    rec._pad0        = 0;
+    rects[slot] = rec;
 }
 
 // =============================================================================
@@ -207,9 +258,12 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     bool occluded = false;
     if (CullConst.EnableOcclusion)    
     {
+        HZBCullDebug dbg;
         occluded = HZBCull(worldCenter, worldExtents, FrameCB.viewProj,
                            CullConst.HZBSRVIdx, CullConst.HZBMipCount,
-                           CullConst.HZBWidth, CullConst.HZBHeight);
+                           CullConst.HZBWidth, CullConst.HZBHeight, dbg);
+        if (occluded)
+            RecordOccludedRect(dbg, CullConst.Phase, 1); // kind 1 = instance
     }
 
     if (occluded)
@@ -264,6 +318,7 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Occlusion cull — transform local bounds by per-frame LocalToWorld
     // (extents must be expanded by abs(linear part), not passed through raw,
     // otherwise rotated/scaled instances get an underestimated AABB).
+    HZBCullDebug dbg = (HZBCullDebug)0;
     if (CullConst.EnableOcclusion)
     {
         float3 worldCenter, worldExtents;
@@ -271,8 +326,9 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
                              worldCenter, worldExtents);
         if (HZBCull(worldCenter, worldExtents, FrameCB.viewProj,
                     CullConst.HZBSRVIdx, CullConst.HZBMipCount,
-                    CullConst.HZBWidth, CullConst.HZBHeight))
+                    CullConst.HZBWidth, CullConst.HZBHeight, dbg))
         {
+            RecordOccludedRect(dbg, CullConst.Phase, 0); // kind 0 = meshlet
             return;
         }
     }
@@ -280,6 +336,14 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint slot;
     InterlockedAdd(VisibleMeshletsCounter[0], 1, slot);
     VisibleMeshlets[slot] = cand;
+
+    // Mip-selection tint sideband (task007 mode 3): record the mip this meshlet's
+    // occlusion test used; 0xFF = no test ran (frustum-only / near-plane fallback).
+    if (CullConst.DebugRecordMip)
+    {
+        RWStructuredBuffer<uint> mips = ResourceDescriptorHeap[CullConst.VisibleMeshletMipsUAVIdx];
+        mips[slot] = dbg.Valid ? dbg.Mip : 0xFFu;
+    }
 }
 
 // =============================================================================

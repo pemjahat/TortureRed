@@ -125,6 +125,22 @@ void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeigh
                       D3D12_RESOURCE_STATE_GENERIC_READ, false, false, "CB_TwoPassCullConstants_1"))
         std::cerr << "[Meshlet] Failed to create TwoPassCullConstantsBuffer[1]" << std::endl;
 
+    // Occluded-rect debug recording buffers
+    if (!CreateStructuredBuffer(m_OccludedRects, sizeof(OccludedRectDebug), MAX_OCCLUDED_RECT_DEBUG,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                "SB_OccludedRectsDebug"))
+        std::cerr << "[Meshlet] Failed to create occluded-rects debug buffer" << std::endl;
+    if (!CreateBuffer(m_OccludedRectsCounter, sizeof(uint32_t),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      true, true, "SB_OccludedRectsDebugCounter"))
+        std::cerr << "[Meshlet] Failed to create occluded-rects debug counter" << std::endl;
+
+    // Mip-selection tint sideband : one mip value per visible-meshlet slot
+    if (!CreateStructuredBuffer(m_VisibleMeshletMips, sizeof(uint32_t), MAX_VISIBLE_MESHLETS,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                "SB_VisibleMeshletMips"))
+        std::cerr << "[Meshlet] Failed to create VisibleMeshletMips buffer" << std::endl;
+
     CreateHZBResources(internalWidth, internalHeight);
 }
 
@@ -442,6 +458,28 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2, 
         }
     }
 
+    // --- Occluded-rect debug draw PSOs (CS) ---
+    {
+        auto csBg = GraphicsHelper::CompileShader("Shaders/OccludedRectDebug.hlsl", "OccludedRectBackgroundCS", "cs_6_6");
+        if (!csBg.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = mainRootSignature;
+            desc.CS = { csBg.data(), csBg.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_OccludedRectBackgroundPSO)),
+                     "[Meshlet] CreateComputePipelineState (occluded-rect background) failed");
+        }
+        auto csRects = GraphicsHelper::CompileShader("Shaders/OccludedRectDebug.hlsl", "OccludedRectsCS", "cs_6_6");
+        if (!csRects.empty())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = mainRootSignature;
+            desc.CS = { csRects.data(), csRects.size() };
+            CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_OccludedRectsPSO)),
+                     "[Meshlet] CreateComputePipelineState (occluded-rects) failed");
+        }
+    }
+
     CreateHZBPipelines(device);
 
     std::cout << "[Meshlet] Pipelines created" << std::endl;
@@ -611,6 +649,46 @@ void MeshletPass::DebugViewHZB(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     cmdList->Dispatch((outputWidth + 7) / 8, (outputHeight + 7) / 8, 1);
 }
 
+// -----------------------------------------------------------------------------
+// DrawOccludedRects
+//
+// Renders the recorded occluded instance/meshlet NDC rects into `output`
+// (FullScreenDebugTex) over a dimmed scene-albedo background. `output` must be
+// in UNORDERED_ACCESS state; the caller transitions it to SRV afterwards.
+// -----------------------------------------------------------------------------
+void MeshletPass::DrawOccludedRects(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                                    D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, GPUTexture& output,
+                                    uint32_t outputWidth, uint32_t outputHeight)
+{
+    if (!m_OccludedRectBackgroundPSO || !m_OccludedRectsPSO || !m_OccludedRects.resource)
+        return;
+
+    // Debug buffers were in UAV state for the cull passes → SRV for reading
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedRects, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    GraphicsHelper::TransitionResource(cmdList, m_OccludedRectsCounter, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    OccludedRectDrawParams params = {};
+    params.RectsSRVIdx      = static_cast<uint32_t>(m_OccludedRects.srvIndex);
+    params.RectsCountSRVIdx = static_cast<uint32_t>(m_OccludedRectsCounter.srvIndex);
+    params.OutputUAVIdx     = static_cast<uint32_t>(output.uavIndex);
+    params.Width            = outputWidth;
+    params.Height           = outputHeight;
+
+    cmdList->SetComputeRootSignature(mainRootSignature);
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
+    cmdList->SetComputeRoot32BitConstants(13, sizeof(OccludedRectDrawParams) / 4, &params, 0); // b2
+
+    cmdList->SetPipelineState(m_OccludedRectBackgroundPSO.Get());
+    cmdList->Dispatch((outputWidth + 7) / 8, (outputHeight + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(output.resource.Get());
+    cmdList->ResourceBarrier(1, &uavBarrier);
+
+    cmdList->SetPipelineState(m_OccludedRectsPSO.Get());
+    cmdList->Dispatch(MAX_OCCLUDED_RECT_DEBUG / 64, 1, 1);
+}
+
 // =============================================================================
 // CullTwoPass — hierarchical two-stage culling (instance → meshlet), used for
 // both two-phase occlusion culling and the frustum-only single-phase mode.
@@ -653,6 +731,11 @@ void MeshletPass::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRT
     cullConsts.VisibleMeshletsCounterUAVIdx = static_cast<uint>(m_VisibleMeshletsCounter.uavIndex);
     cullConsts.Phase              = isFirstPhase ? TWO_PASS_PHASE_FIRST : TWO_PASS_PHASE_SECOND;
     cullConsts.EnableOcclusion    = occlusionEnabled ? 1u : 0u;
+    cullConsts.DebugRecordOccluded        = m_DebugRecordOccluded ? 1u : 0u;
+    cullConsts.OccludedRectsUAVIdx        = static_cast<uint>(m_OccludedRects.uavIndex);
+    cullConsts.OccludedRectsCounterUAVIdx = static_cast<uint>(m_OccludedRectsCounter.uavIndex);
+    cullConsts.DebugRecordMip             = (m_MeshletDebugMode == MESHLET_DEBUG_MIP_TINT) ? 1u : 0u;
+    cullConsts.VisibleMeshletMipsUAVIdx   = static_cast<uint>(m_VisibleMeshletMips.uavIndex);
 
     // Double-buffered: Phase 1 → buffer[0], Phase 2 → buffer[1].
     // Prevents Phase 2's CPU-side memcpy from overwriting Phase 1's data
@@ -686,6 +769,10 @@ void MeshletPass::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRT
     GraphicsHelper::TransitionResource(cmdList, m_MeshletCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_InstanceCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // Mip-tint sideband (task007 mode 3) is written by the cull via bindless UAV
+    if (m_MeshletDebugMode == MESHLET_DEBUG_MIP_TINT)
+        GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletMips, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     // Zero counters — CandidateMeshletsCounter and VisibleMeshletsCounter are always fresh per phase.
     // OccludedInstancesCounter is only cleared in Phase 1 (first call); Phase 2 reads the list
     // built up by Phase 1.
@@ -705,6 +792,18 @@ void MeshletPass::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRT
         GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
         GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
         m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
+
+    // Occluded-rect debug: records accumulate across both phases,
+    // so clear once per frame — at the first-phase call — when recording is enabled.
+    if (isFirstPhase && m_DebugRecordOccluded)
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_OccludedRects, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        GraphicsHelper::TransitionResource(cmdList, m_OccludedRectsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdList->ClearUnorderedAccessViewUint(
+            GraphicsHelper::GetSRVGPUHandle((UINT)m_OccludedRectsCounter.uavIndex),
+            GraphicsHelper::GetCpuUAVHandle((UINT)m_OccludedRectsCounter.cpuUavIndex),
+            m_OccludedRectsCounter.resource.Get(), zeroes, 0, nullptr);
+    }
 
     // Bind UAVs
     cmdList->SetComputeRootUnorderedAccessView(7,  m_CandidateMeshlets.gpuAddress);
