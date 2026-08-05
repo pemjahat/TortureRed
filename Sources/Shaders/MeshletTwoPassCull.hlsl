@@ -45,6 +45,35 @@ RWStructuredBuffer<uint>             VisibleMeshletsCounter : register(u5);
 RWStructuredBuffer<uint> MeshletCullArgs     : register(u6);  // uint3 dispatch args
 RWStructuredBuffer<uint> InstanceCullArgs    : register(u7);  // uint3 dispatch args
 
+// Recover (P00, P11, zNear) from FrameCB.projectionInverseUnjittered — the exact inverse
+// of Camera::GetProjMatrix()'s reverse-Z infinite-far layout (verified algebraically):
+//   projInv[0][0] = 1/P00, projInv[1][1] = 1/P11, projInv[2][3] = 1/zNear
+// Using the *unjittered* inverse (same rationale as MotionVectors.hlsl) means these three
+// scalars are jitter-immune even though jitter perturbs other entries of the matrix.
+// Feeds FrustumCullSphere/FrustumCullMeshletSphere (MeshletCommon.hlsli), which need these
+// to recover Niagara-style view-space quantities directly from clip space (no separate
+// view matrix is stored in FrameConstants).
+float3 GetProjScaleAndNear(float4x4 projInvUnjittered)
+{
+    return float3(1.0f / projInvUnjittered[0][0],
+                 1.0f / projInvUnjittered[1][1],
+                 1.0f / projInvUnjittered[2][3]);
+}
+
+// Which camera basis does CullConst.Phase's occlusion test actually sample the HZB in?
+//   Phase 1 (FIRST)  — previous frame's HZB (built at the end of LAST frame, before this
+//                       frame's own rasterize ran) → must project with viewProjPrevious,
+//                       or the rect lands in the wrong place whenever the camera moved.
+//   Phase 2 (SECOND) — THIS frame's fresh HZB, rebuilt from Phase 1's own depth output
+//                       earlier in the same frame → already aligned with viewProj.
+// See the GPU markers in Application.cpp: "Phase 1 - CullInstances (vs prev HZB)" /
+// "Phase 2 - CullInstances (vs fresh HZB)". Frustum-only mode (no occlusion) never reads
+// this — its value doesn't matter, so it just falls through to viewProj.
+float4x4 GetHZBViewProj()
+{
+    return (CullConst.Phase == TWO_PASS_PHASE_FIRST) ? FrameCB.viewProjPrevious : FrameCB.viewProj;
+}
+
 // =============================================================================
 // HZB Occlusion Culling (reverse-Z)
 //
@@ -52,7 +81,8 @@ RWStructuredBuffer<uint> InstanceCullArgs    : register(u7);  // uint3 dispatch 
 // The HZB stores the FARTHEST depth per texel (min-reduce, since far=0 < near=1).
 //
 // Occlusion test:
-//   1. Project the object's world-space AABB to NDC
+//   1. Analytically project the object's world-space bounding SPHERE to an NDC rect
+//      (Mara/McGuire 2013 — see FrustumCullSphere in MeshletCommon.hlsli)
 //   2. Find the NDC bounding rect and the object's nearest (largest) depth
 //   3. Map rect to HZB pixel coords and pick an appropriate mip level
 //   4. Sample a 4x4 texel footprint at that mip (4 bilinear samples at corners)
@@ -81,7 +111,7 @@ bool HZBCull(FrustumCullData fc,
     dbg = (HZBCullDebug)0;
 
     // --- Steps 1-3: projection, NDC rect, nearest depth, near-plane fallback ---
-    // Done ONCE by FrustumCullAABB (Adria-style shared projection, see
+    // Done ONCE by FrustumCullSphere (Niagara-style analytic sphere projection, see
     // MeshletCommon.hlsli) — here we just consume its output.
     // Clamp NDC to [-1,1] range (RT-safe)
     float minNDCx = clamp(fc.RectMin.x, -1.0f, 1.0f);
@@ -211,12 +241,14 @@ void RecordOccludedRect(HZBCullDebug dbg, uint phase, uint kind)
 // CullInstancesCS — Instance-level frustum + occlusion culling.
 //
 // Phase 0 (FIRST):  dispatchThreadID is the instance index into InstanceData[].
+//                   Tests against LAST frame's HZB (see GetHZBViewProj above).
 //                   On occlusion, defers to OccludedInstances[] for Phase 2.
 // Phase 1 (SECOND): dispatchThreadID indexes into OccludedInstances[] (built by
 //                   Phase 1). The real instance index is OccludedInstances[threadID].
-//                   No further deferral — occluded instances are silently discarded.
-//                   Uses the same previous-frame HZB as Phase 1 (conservative
-//                   retest — catches boundary cases from Phase 1 thread-wave divergence).
+//                   Tests against THIS frame's fresh HZB (rebuilt from Phase 1's own
+//                   depth output earlier this frame — catches instances Phase 1 wrongly
+//                   thought were still occluded). No further deferral — occluded
+//                   instances are silently discarded.
 // =============================================================================
 
 [numthreads(64, 1, 1)]
@@ -239,19 +271,21 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     InstanceData inst    = InstanceDataBuf[instanceIdx];
-    InstanceBounds bound = InstanceBoundsBuf[inst.BoundsIndex]; // LOCAL-space AABB
+    InstanceBounds bound = InstanceBoundsBuf[inst.BoundsIndex]; // LOCAL-space bounding sphere
     MeshData      md     = MeshDataBuf[inst.MeshDataIndex];
 
     // Transform local bounds by the PER-FRAME LocalToWorld (updated each frame by
     // Model::UpdateNodeBuffer) — culling follows animated/moving instances.
     // Same pattern as D3D12_Research: FrustumCull(LocalBounds, LocalToWorld, viewProj).
-    float3 worldCenter, worldExtents;
-    TransformAABBToWorld(bound.BoundsCenter, bound.BoundsExtents, inst.LocalToWorld,
-                         worldCenter, worldExtents);
+    float3 worldCenter; float worldRadius;
+    TransformSphereToWorld(bound.BoundsCenter, bound.BoundsRadius, inst.LocalToWorld,
+                           worldCenter, worldRadius);
 
-    // Frustum cull (fresh world-space AABB) — shared projection; the NDC rect
-    // is reused by HZBCull below instead of re-projecting the bounds.
-    FrustumCullData fc = FrustumCullAABB(worldCenter, worldExtents, FrameCB.viewProj);
+    // Frustum cull (fresh world-space sphere) against the CURRENT camera. The HZB rect
+    // uses a separate projection (GetHZBViewProj) since Phase 1 samples last frame's HZB.
+    float3 projParams = GetProjScaleAndNear(FrameCB.projectionInverseUnjittered);
+    FrustumCullData fc = FrustumCullSphere(worldCenter, worldRadius, FrameCB.viewProj, GetHZBViewProj(),
+                                           projParams.x, projParams.y, projParams.z);
     if (!fc.IsVisible)
         return;
 
@@ -310,13 +344,16 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     InstanceData     inst  = InstanceDataBuf[cand.InstanceID];
     MeshData         md    = MeshDataBuf[inst.MeshDataIndex];
 
-    // Load meshlet bounds
+    // Load meshlet bounds (bounding sphere)
     MeshletBounds bounds = MeshletBoundsBuf[md.MeshletBoundsOffset + cand.MeshletIndex];
 
-    // transformToWorld + frustum cull — shared projection; the NDC rect is
-    // reused by HZBCull below (extents are expanded by abs(linear part) inside
-    // TransformAABBToWorld, so rotated/scaled instances stay conservative).
-    FrustumCullData fc = FrustumCullMeshlet(bounds, inst.LocalToWorld, FrameCB.viewProj);
+    // transformToWorld + frustum cull against the CURRENT camera (radius is scaled by the
+    // transform's max axis scale inside TransformSphereToWorld, so rotated/scaled instances
+    // stay conservative). The HZB rect uses a separate projection (GetHZBViewProj) since
+    // Phase 1 samples last frame's HZB.
+    float3 projParams = GetProjScaleAndNear(FrameCB.projectionInverseUnjittered);
+    FrustumCullData fc = FrustumCullMeshletSphere(bounds, inst.LocalToWorld, FrameCB.viewProj, GetHZBViewProj(),
+                                                  projParams.x, projParams.y, projParams.z);
     if (!fc.IsVisible)
         return;
 

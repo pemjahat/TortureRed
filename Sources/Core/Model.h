@@ -47,13 +47,17 @@ struct GLTFPrimitive
     AlphaMode alphaMode = AlphaMode::Opaque;
     uint32_t globalVertexOffset = 0;
     uint32_t globalIndexOffset = 0;
-    DirectX::BoundingBox aabb;
 
     // Meshlet data (CPU-side, uploaded to GPU in CreateMeshletResources)
     std::vector<Meshlet>         meshlets;
     std::vector<uint32_t>        meshletVertices;   // vertex indirection table
     std::vector<MeshletTriangle> meshletTriangles;
-    std::vector<MeshletBounds>   meshletBounds;
+    std::vector<MeshletBounds>   meshletBounds;      // per-meshlet bounding sphere
+
+    // Primitive-level bounding sphere — enclosing sphere of the union of
+    // meshletBounds, computed in Model::BuildMeshlets(). Feeds InstanceBounds
+    DirectX::XMFLOAT3 boundsSphereCenter = { 0.0f, 0.0f, 0.0f };
+    float              boundsSphereRadius = 0.0f;
 };
 
 struct GLTFMesh
@@ -69,7 +73,6 @@ struct GLTFNode
     std::vector<GLTFNode*> children;
     DirectX::XMFLOAT4X4 transform;
     GLTFNode* parent = nullptr;
-    DirectX::BoundingBox worldAabb;
     // TRS for animation
     DirectX::XMFLOAT3 translation = {0.0f, 0.0f, 0.0f};
     DirectX::XMFLOAT4 rotation = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -165,7 +168,6 @@ private:
     void BuildMeshlets(GLTFPrimitive& prim);
     void CreateMeshletResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
-    void ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
     void LoadTextures(Renderer* renderer);
     void LoadMaterials();

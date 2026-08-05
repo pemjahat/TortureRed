@@ -11,7 +11,7 @@
 namespace MeshletCache {
 
 static constexpr uint32_t MAGIC   = 0x4D534854; // 'MSHT'
-static constexpr uint32_t VERSION = 1;
+static constexpr uint32_t VERSION = 2; // v2: MeshletBounds switched from AABB (center+extents) to bounding sphere (center+radius)
 
 struct Header {
     uint32_t magic         = MAGIC;

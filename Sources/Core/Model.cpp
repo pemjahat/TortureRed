@@ -144,43 +144,6 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
                 }
             }
 
-            // Compute AABB
-            DirectX::XMFLOAT3 minPos, maxPos;
-            if (positionAccessor->has_min && positionAccessor->has_max)
-            {
-                minPos.x = positionAccessor->min[0];
-                minPos.y = positionAccessor->min[1];
-                minPos.z = positionAccessor->min[2];
-                maxPos.x = positionAccessor->max[0];
-                maxPos.y = positionAccessor->max[1];
-                maxPos.z = positionAccessor->max[2];
-            }
-            else
-            {
-                minPos = {FLT_MAX, FLT_MAX, FLT_MAX};
-                maxPos = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-                for (const auto& v : gltfPrim.vertices)
-                {
-                    minPos.x = std::min(minPos.x, v.position[0]);
-                    minPos.y = std::min(minPos.y, v.position[1]);
-                    minPos.z = std::min(minPos.z, v.position[2]);
-                    maxPos.x = std::max(maxPos.x, v.position[0]);
-                    maxPos.y = std::max(maxPos.y, v.position[1]);
-                    maxPos.z = std::max(maxPos.z, v.position[2]);
-                }
-            }
-            DirectX::XMFLOAT3 center = {
-                (minPos.x + maxPos.x) * 0.5f,
-                (minPos.y + maxPos.y) * 0.5f,
-                (minPos.z + maxPos.z) * 0.5f
-            };
-            DirectX::XMFLOAT3 extents = {
-                (maxPos.x - minPos.x) * 0.5f,
-                (maxPos.y - minPos.y) * 0.5f,
-                (maxPos.z - minPos.z) * 0.5f
-            };
-            gltfPrim.aabb = DirectX::BoundingBox(center, extents);
-
             // Read normals (if available)
             if (normalAccessor)
             {
@@ -699,12 +662,6 @@ void Model::BuildNodeHierarchy()
     // Set debug counters
     m_TotalNodes = m_GltfModel.nodes.size();
     m_TotalRootNodes = m_GltfModel.rootNodes.size();
-
-    // Compute world AABBs
-    for (auto* rootNode : m_GltfModel.rootNodes)
-    {
-        ComputeWorldAABBs(rootNode, DirectX::XMMatrixIdentity());
-    }
 }
 
 void Model::UpdateNodeBuffer()
@@ -780,60 +737,6 @@ void Model::UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTr
     for (auto* child : node->children)
     {
         UpdateNodeBufferRecursive(child, world);
-    }
-}
-
-void Model::ComputeWorldAABBs(GLTFNode* node, DirectX::XMMATRIX parentTransform)
-{
-    DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
-
-    // Recurse FIRST (Post-order) so children's worldAabbs are calculated
-    for (auto* child : node->children)
-    {
-        ComputeWorldAABBs(child, world);
-    }
-
-    // Now compute this node's world AABB including its meshes and all children
-    bool initialized = false;
-    if (node->mesh)
-    {
-        for (auto& prim : node->mesh->primitives)
-        {
-            DirectX::BoundingBox transformedAabb;
-            prim.aabb.Transform(transformedAabb, world);
-            if (!initialized)
-            {
-                node->worldAabb = transformedAabb;
-                initialized = true;
-            }
-            else
-            {
-                DirectX::BoundingBox::CreateMerged(node->worldAabb, node->worldAabb, transformedAabb);
-            }
-        }
-    }
-
-    for (auto* child : node->children)
-    {
-        if (!initialized)
-        {
-            node->worldAabb = child->worldAabb;
-            initialized = true;
-        }
-        else
-        {
-            DirectX::BoundingBox::CreateMerged(node->worldAabb, node->worldAabb, child->worldAabb);
-        }
-    }
-
-    if (!initialized)
-    {
-        // If no mesh and no children, set a default AABB at the node's position
-        DirectX::XMVECTOR scale, rot, trans;
-        DirectX::XMMatrixDecompose(&scale, &rot, &trans, world);
-        DirectX::XMFLOAT3 pos;
-        DirectX::XMStoreFloat3(&pos, trans);
-        node->worldAabb = DirectX::BoundingBox(pos, DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f));
     }
 }
 
@@ -986,12 +889,6 @@ void Model::UpdateAnimation(float deltaTime)
         DirectX::XMStoreFloat4x4(&channel.targetNode->transform, m);
     }
 
-    // Recompute world AABBs and update GPU node buffer after all local transforms are updated
-    for (auto* rootNode : m_GltfModel.rootNodes)
-    {
-        ComputeWorldAABBs(rootNode, DirectX::XMMatrixIdentity());
-    }
-    
     UpdateNodeBuffer();
 }
 
@@ -1266,12 +1163,6 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
 // RenderNode recursively (Keep it for debugging or future culling, but not used by ExecuteIndirect right now)
 void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode)
 {
-    // Frustum culling
-    if (node->worldAabb.Intersects(frustum) == false)
-    {
-        return;
-    }
-
     // Increment debug counter
     ++m_NodesSurviveFrustum;
 
@@ -1483,32 +1374,36 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
         }
         triangleOffset += m.triangle_count;
 
-        // AABB bounds from the final (post-optimization) vertex indirection table.
-        // Kept as AABB — FrustumCullMeshlet (MeshletCommon.hlsli) consumes LocalCenter/LocalExtents.
-        float3 minBounds = { FLT_MAX, FLT_MAX, FLT_MAX };
-        float3 maxBounds = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-        for (uint32_t v = 0; v < m.vertex_count; ++v)
-        {
-            const uint32_t globalIdx = prim.meshletVertices[m.vertex_offset + v];
-            float3 pos = { positions[globalIdx * 3 + 0],
-                           positions[globalIdx * 3 + 1],
-                           positions[globalIdx * 3 + 2] };
-            minBounds.x = std::min(minBounds.x, pos.x);
-            minBounds.y = std::min(minBounds.y, pos.y);
-            minBounds.z = std::min(minBounds.z, pos.z);
-            maxBounds.x = std::max(maxBounds.x, pos.x);
-            maxBounds.y = std::max(maxBounds.y, pos.y);
-            maxBounds.z = std::max(maxBounds.z, pos.z);
-        }
-        MeshletBounds& bounds  = prim.meshletBounds[i];
-        bounds.LocalCenter.x  = (minBounds.x + maxBounds.x) * 0.5f;
-        bounds.LocalCenter.y  = (minBounds.y + maxBounds.y) * 0.5f;
-        bounds.LocalCenter.z  = (minBounds.z + maxBounds.z) * 0.5f;
-        bounds.LocalExtents.x = (maxBounds.x - minBounds.x) * 0.5f;
-        bounds.LocalExtents.y = (maxBounds.y - minBounds.y) * 0.5f;
-        bounds.LocalExtents.z = (maxBounds.z - minBounds.z) * 0.5f;
+        // Bounding SPHERE from the final (post-optimization) vertex indirection table,
+        // via meshoptimizer's own cluster-bounds generator (tighter than an AABB-diagonal
+        // sphere; the same utility Niagara's offline meshlet builder uses). Takes the
+        // meshlet's LOCAL vertex/triangle slices directly — no temp global-index buffer needed.
+        meshopt_Bounds mb = meshopt_computeMeshletBounds(
+            &prim.meshletVertices[m.vertex_offset],
+            meshletTriangles.data() + m.triangle_offset,
+            m.triangle_count,
+            positions.data(), uniqueVertices, sizeof(float) * 3);
+
+        MeshletBounds& bounds = prim.meshletBounds[i];
+        bounds.LocalCenter = { mb.center[0], mb.center[1], mb.center[2] };
+        bounds.LocalRadius = mb.radius;
     }
     prim.meshletTriangles.resize(triangleOffset);
+
+    // Primitive-level bounding sphere: the enclosing sphere of the union of all
+    // meshlet bounding spheres just computed above (meshopt_computeSphereBounds —
+    // "creates bounding sphere around a set of spheres"). Tighter than an
+    // AABB-diagonal sphere and reuses data already on hand; feeds InstanceBounds
+    // in CreateMeshletResources(). MeshletBounds is {float3 LocalCenter; float LocalRadius;}
+    // so the center/radius arrays are just strided views into prim.meshletBounds.
+    if (!prim.meshletBounds.empty())
+    {
+        meshopt_Bounds primBounds = meshopt_computeSphereBounds(
+            &prim.meshletBounds[0].LocalCenter.x, prim.meshletBounds.size(), sizeof(MeshletBounds),
+            &prim.meshletBounds[0].LocalRadius, sizeof(MeshletBounds));
+        prim.boundsSphereCenter = { primBounds.center[0], primBounds.center[1], primBounds.center[2] };
+        prim.boundsSphereRadius = primBounds.radius;
+    }
 
     std::cout << "[Meshlet] Generated " << meshletCount << " meshlets from "
               << uniqueVertices << " vertices, " << indexCount << " triangles" << std::endl;
@@ -1583,17 +1478,16 @@ void Model::CreateMeshletResources(Renderer* renderer)
             m_MeshDataArray.push_back(md);
             m_TotalMeshletCount += md.MeshletCount;
 
-            // LOCAL-space AABB, taken directly from the glTF POSITION accessor's
-            // min/max (required by the glTF 2.0 spec; parsed at load into prim.aabb
-            // with a vertex-scan fallback). Meshlets partition the same vertices,
-            // so the accessor min/max is equivalent to the union of meshlet bounds
-            // — but tighter and free (no per-meshlet iteration).
+            // LOCAL-space bounding SPHERE — the enclosing sphere of the union of this
+            // primitive's meshlet bounding spheres, computed once in BuildMeshlets()
+            // (meshopt_computeSphereBounds over prim.meshletBounds). Tighter than an
+            // AABB-diagonal sphere and free (already computed at meshlet-build time).
             // One entry per MeshData — indexed by MeshDataIndex from the cull shaders,
             // which apply the instance's per-frame LocalToWorld at cull time.
             {
                 InstanceBounds ib = {};
-                ib.BoundsCenter  = prim.aabb.Center;
-                ib.BoundsExtents = prim.aabb.Extents;
+                ib.BoundsCenter = prim.boundsSphereCenter;
+                ib.BoundsRadius = prim.boundsSphereRadius;
                 m_InstanceBoundsArray.push_back(ib);
             }
 

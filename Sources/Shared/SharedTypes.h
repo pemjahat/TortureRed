@@ -240,9 +240,15 @@ struct MeshletTriangle {
     uint    : 2;  // padding
 };
 
+// Bounding SPHERE (not AABB) — chosen over AABB because a sphere transforms
+// trivially under any affine LocalToWorld (center = mul(center,M), radius scaled
+// by the matrix's max axis scale), whereas an AABB must be fully recomputed from
+// its 8 corners on every transform. Computed once at load time via meshoptimizer's
+// meshopt_computeMeshletBounds (tight cluster bounding sphere), consumed by
+// FrustumCullMeshletSphere/HZBCull in MeshletCommon.hlsli / MeshletTwoPassCull.hlsl.
 struct MeshletBounds {
     float3 LocalCenter;
-    float3 LocalExtents;
+    float  LocalRadius;
 };
 
 // Replaces DrawNodeData for the meshlet path
@@ -270,9 +276,9 @@ struct InstanceData {
     uint _pad2;
 };
 
-// LOCAL-space AABB of a SubMesh, sourced from the glTF POSITION accessor's
-// min/max (required by the glTF 2.0 spec — equivalent to the union of meshlet
-// bounds, but tighter and free to obtain).
+// LOCAL-space bounding SPHERE of a SubMesh — the enclosing sphere of the union
+// of that SubMesh's meshlet bounding spheres (meshopt_computeSphereBounds over
+// prim.meshletBounds), computed once on CPU in Model::BuildMeshlets().
 // One entry per MeshData, built once on CPU in Model::CreateMeshletResources()
 // Pass 1 (primitive iteration) — bounds are a GEOMETRY property, not an
 // instance property, so shared meshes share one entry.
@@ -281,7 +287,7 @@ struct InstanceData {
 // follows animated/moving instances correctly.
 struct InstanceBounds {
     float3 BoundsCenter;   // Local-space center
-    float3 BoundsExtents;  // Local-space half-extents
+    float  BoundsRadius;   // Local-space bounding-sphere radius
 };
 
 // Culling token — the unit of work through the cull pipeline

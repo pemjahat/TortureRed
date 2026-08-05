@@ -28,119 +28,137 @@ float2 UnpackUVRG16(StructuredBuffer<uint> uvs, uint offset, uint index)
     return float2(f16tof32(u16), f16tof32(v16));
 }
 
-// Frustum culling: world-space AABB vs view-projection matrix — conservative test.
-// Adria-style shared projection (Adria workspace: Assets/Shaders/Meshlets/
-// GpuDrivenRendering.hlsli, FrustumCull): the 8 corners are projected ONCE and the
-// NDC rect + nearest depth are returned alongside visibility, so HZBCull can
-// consume the rect directly instead of re-projecting the AABB.
+// Frustum + HZB culling: world-space bounding SPHERE — conservative test.
+// Ported from Niagara (D:\niagara\src\shaders\drawcull.comp.glsl / clustercull.comp.glsl /
+// math.h::projectSphere). A sphere is cheaper to test AND cheaper to keep up to date under an
+// affine LocalToWorld than an AABB: the center just transforms, and the radius only needs
+// scaling by the transform's max axis scale — no re-derivation from 8 corners on every
+// transform like an AABB requires (see TransformSphereToWorld below).
+//
+// Niagara operates in true view space (mat4 view, plus P00/P11/znear from the projection).
+// TortureRed only carries a combined viewProj (no separate view matrix) — so instead of
+// transforming to view space, this recovers the exact same quantities Niagara's "c" (view-
+// space center) needs directly from clip space:
+//   clipPos = mul(worldCenter, viewProj);  clipPos.w == -viewSpace.z (Camera::GetProjMatrix's
+//   reverse-Z infinite-far layout: clip.w = -view.z, clip.x = view.x*P00, clip.y = view.y*P11)
+//   => c = float3(clipPos.x / P00, clipPos.y / P11, clipPos.w)  is EXACTLY Niagara's
+//      positive-forward view-space center, with zero extra matrix math.
+// P00/P11/zNear themselves come from FrameCB.projectionInverseUnjittered (see call sites):
+//   P00 = 1/projInv[0][0], P11 = 1/projInv[1][1], zNear = 1/projInv[2][3] — exact inverse
+//   of Camera::GetProjMatrix()'s layout, verified algebraically, jitter-immune by construction.
+//
+// viewProj vs hzbViewProj: the frustum VISIBILITY decision must always use the CURRENT
+// camera (viewProj) — "is this in view this frame". But the HZB rect/depth is a lookup
+// into a texture that may have been built from a DIFFERENT camera than the current one
+// (Phase 1 of the two-pass cull samples last frame's HZB, built with last frame's camera).
+// Take separate projection matrices: viewProj for the frustum test, hzbViewProj for
+// everything the HZB lookup consumes (near-plane guard, tangent rect, nearest depth).
+// Call sites pass hzbViewProj = FrameCB.viewProjPrevious for Phase 1 (prev HZB) and
+// FrameCB.viewProj for Phase 2 (fresh HZB, already aligned with the current camera).
 struct FrustumCullData {
     bool   IsVisible;
-    float3 RectMin; // NDC min xy (z = farthest corner; kept for symmetry, unused)
-    float3 RectMax; // NDC max xy (z = nearest corner — reverse-Z: larger = closer)
+    float3 RectMin; // NDC min xy (z unused, kept for symmetry with RectMax)
+    float3 RectMax; // NDC max xy (z = nearest depth — reverse-Z: larger = closer)
 };
 
-FrustumCullData FrustumCullAABB(float3 worldCenter, float3 worldExtents, float4x4 viewProj)
+FrustumCullData FrustumCullSphere(float3 worldCenter, float worldRadius,
+                                  float4x4 viewProj, float4x4 hzbViewProj,
+                                  float P00, float P11, float zNear)
 {
     FrustumCullData data = (FrustumCullData)0;
-    data.IsVisible = true;
 
-    // 8 clip-space corners via 3 axis vectors (4 muls + adds instead of 8 muls)
-    float3x4 axis;
-    axis[0] = mul(float4(worldExtents.x * 2, 0, 0, 0), viewProj);
-    axis[1] = mul(float4(0, worldExtents.y * 2, 0, 0), viewProj);
-    axis[2] = mul(float4(0, 0, worldExtents.z * 2, 0), viewProj);
+    // --- Frustum visibility test: ALWAYS against the CURRENT camera (viewProj) ---
+    float4 clipPos = mul(float4(worldCenter, 1.0f), viewProj);
+    // Pseudo view-space center: c.z > 0 in front of the camera (Niagara convention).
+    float3 c = float3(clipPos.x / P00, clipPos.y / P11, clipPos.w);
 
-    float4 pos000 = mul(float4(worldCenter - worldExtents, 1.0), viewProj);
-    float4 pos100 = pos000 + axis[0];
-    float4 pos010 = pos000 + axis[1];
-    float4 pos110 = pos010 + axis[0];
-    float4 pos001 = pos000 + axis[2];
-    float4 pos101 = pos100 + axis[2];
-    float4 pos011 = pos010 + axis[2];
-    float4 pos111 = pos110 + axis[2];
+    // Frustum test: sphere vs symmetric frustum planes (Niagara drawcull.comp.glsl).
+    // frustumX/Y are the normalized (P00,1)/(P11,1) plane coefficients — testing left/right
+    // (resp. top/bottom) simultaneously via abs(c.x)/abs(c.y) frustum symmetry.
+    float2 frustumX = normalize(float2(P00, 1.0f));
+    float2 frustumY = normalize(float2(P11, 1.0f));
+    bool visible = true;
+    visible = visible && (c.z * frustumX.y - abs(c.x) * frustumX.x > -worldRadius);
+    visible = visible && (c.z * frustumY.y - abs(c.y) * frustumY.x > -worldRadius);
+    visible = visible && (c.z + worldRadius > zNear); // near-plane only — proj is infinite-far
 
-    float minW = min(min(min(pos000.w, pos100.w), min(pos010.w, pos110.w)),
-                     min(min(pos001.w, pos101.w), min(pos011.w, pos111.w)));
-    float maxW = max(max(max(pos000.w, pos100.w), max(pos010.w, pos110.w)),
-                     max(max(pos001.w, pos101.w), max(pos011.w, pos111.w)));
+    data.IsVisible = visible;
+    if (!visible)
+        return data;
 
-    // Check if ALL corners are outside the same plane → culled
-    float4 corners[8] = { pos000, pos100, pos010, pos110, pos001, pos101, pos011, pos111 };
-    bool allOutsideLeft   = true;
-    bool allOutsideRight  = true;
-    bool allOutsideTop    = true;
-    bool allOutsideBottom = true;
-    bool allOutsideNear   = true;
-    bool allOutsideFar    = true;
+    // --- HZB rect: projected with hzbViewProj — the basis the HZB texture that will
+    // actually be sampled was built in (see comment above the struct). Re-derive the
+    // pseudo view-space center from scratch using hzbViewProj instead of reusing "c",
+    // since the two projections can legitimately disagree when the camera moved. ---
+    float4 hzbClipPos = mul(float4(worldCenter, 1.0f), hzbViewProj);
+    float3 hc = float3(hzbClipPos.x / P00, hzbClipPos.y / P11, hzbClipPos.w);
 
-    [unroll]
-    for (int i = 0; i < 8; i++)
+    // --- Analytic sphere → NDC rect (Mara/McGuire, "2D Polyhedral Bounds of a Clipped,
+    // Perspective-Projected 3D Sphere", 2013) — ported from Niagara's projectSphere(). ---
+    if (hc.z < worldRadius + zNear)
     {
-        float w = abs(corners[i].w);
-        float x = corners[i].x;
-        float y = corners[i].y;
-        float z = corners[i].z;
-
-        allOutsideLeft   = allOutsideLeft   && (x < -w);
-        allOutsideRight  = allOutsideRight  && (x >  w);
-        allOutsideTop    = allOutsideTop    && (y >  w);
-        allOutsideBottom = allOutsideBottom && (y < -w);
-        allOutsideNear   = allOutsideNear   && (z <  0.0);
-        allOutsideFar    = allOutsideFar    && (z >  w);
-    }
-
-    bool culled = allOutsideLeft || allOutsideRight || allOutsideTop ||
-                  allOutsideBottom || allOutsideNear || allOutsideFar;
-    data.IsVisible = !culled && (maxW > 0.0f);
-
-    // NDC divide → screen rect + nearest depth (reverse-Z: nearest = max ndc.z).
-    // Unguarded like Adria: the minW/maxW fixup below sanitizes the only case
-    // where the divide is meaningless.
-    float3 ssPos000 = pos000.xyz / pos000.w;
-    float3 ssPos100 = pos100.xyz / pos100.w;
-    float3 ssPos010 = pos010.xyz / pos010.w;
-    float3 ssPos110 = pos110.xyz / pos110.w;
-    float3 ssPos001 = pos001.xyz / pos001.w;
-    float3 ssPos101 = pos101.xyz / pos101.w;
-    float3 ssPos011 = pos011.xyz / pos011.w;
-    float3 ssPos111 = pos111.xyz / pos111.w;
-
-    data.RectMin = min(min(min(ssPos000, ssPos100), min(ssPos010, ssPos110)),
-                       min(min(ssPos001, ssPos101), min(ssPos011, ssPos111)));
-    data.RectMax = max(max(max(ssPos000, ssPos100), max(ssPos010, ssPos110)),
-                       max(max(ssPos001, ssPos101), max(ssPos011, ssPos111)));
-
-    // Near-plane straddle: some corner is behind the camera, so the projected
-    // positions are meaningless — force the widest, closest possible footprint
-    // (z=1 is the nearest depth in reverse-Z) so occlusion can never falsely cull.
-    if (minW <= 0.0f && maxW > 0.0f)
-    {
+        // Sphere straddles/behind the near plane (in the HZB's camera basis) — tangent-line
+        // geometry below is meaningless. Same near-plane-straddle policy as the old AABB
+        // path: force the widest, closest possible footprint so occlusion can never
+        // falsely cull. Also naturally covers "object didn't exist in last frame's view".
         data.RectMin = float3(-1.0f, -1.0f, 0.0f);
         data.RectMax = float3( 1.0f,  1.0f, 1.0f);
+        return data;
     }
+
+    float3 cr = hc * worldRadius;
+    float czr2 = hc.z * hc.z - worldRadius * worldRadius; // >= 0 guaranteed by the guard above
+
+    float vx = sqrt(hc.x * hc.x + czr2);
+    float minx = (vx * hc.x - cr.z) / (vx * hc.z + cr.x);
+    float maxx = (vx * hc.x + cr.z) / (vx * hc.z - cr.x);
+
+    float vy = sqrt(hc.y * hc.y + czr2);
+    float miny = (vy * hc.y - cr.z) / (vy * hc.z + cr.y);
+    float maxy = (vy * hc.y + cr.z) / (vy * hc.z - cr.y);
+
+    // minx/maxx/miny/maxy are dimensionless view-space slopes (x/z, y/z) at the tangent
+    // points; multiplying by P00/P11 gives NDC x/y directly (no perspective divide needed —
+    // that's the whole point of solving via tangent geometry instead of per-corner project).
+    data.RectMin = float3(clamp(minx * P00, -1.0f, 1.0f), clamp(miny * P11, -1.0f, 1.0f), 0.0f);
+    data.RectMax.x = clamp(maxx * P00, -1.0f, 1.0f);
+    data.RectMax.y = clamp(maxy * P11, -1.0f, 1.0f);
+
+    // Nearest depth (reverse-Z: larger = closer). The sphere's closest point along the
+    // view axis is at view-depth (hc.z - radius); convert to reverse-Z NDC depth the same
+    // way Camera::GetProjMatrix() does: ndc.z = zNear / viewDepth (matches Niagara's
+    // depthSphere = znear/(center.z-radius) exactly). Guard above guarantees the
+    // denominator is >= zNear > 0.
+    data.RectMax.z = saturate(zNear / (hc.z - worldRadius));
 
     return data;
 }
 
-// Transform a local-space AABB by localToWorld → conservative world-space AABB.
-// Center is fully transformed; extents are expanded by the absolute value of the
-// linear part (row-vector convention: worldExtents_i = dot(extents, abs(column_i))).
-// Exact for the AABB of a transformed box — required for rotated/scaled instances.
-void TransformAABBToWorld(float3 localCenter, float3 localExtents, float4x4 localToWorld,
-                          out float3 worldCenter, out float3 worldExtents)
+// Transform a local-space bounding sphere by localToWorld → conservative world-space sphere.
+// Center is fully transformed; radius is scaled by the transform's largest per-axis scale
+// (max row length of the 3x3 linear part) — exact for uniform scale, conservative for
+// non-uniform scale/rotation (assumes no shear, true for standard TRS node transforms).
+void TransformSphereToWorld(float3 localCenter, float localRadius, float4x4 localToWorld,
+                            out float3 worldCenter, out float worldRadius)
 {
-    worldCenter  = mul(float4(localCenter, 1.0f), localToWorld).xyz;
-    worldExtents = mul(localExtents, (float3x3)localToWorld);
+    worldCenter = mul(float4(localCenter, 1.0f), localToWorld).xyz;
+    float scaleX = length(localToWorld[0].xyz);
+    float scaleY = length(localToWorld[1].xyz);
+    float scaleZ = length(localToWorld[2].xyz);
+    worldRadius = localRadius * max(scaleX, max(scaleY, scaleZ));
 }
 
-// Frustum culling: meshlet-space AABB → world → clip, conservative test.
+// Frustum culling: meshlet-space bounding sphere → world → clip, conservative test.
 // Returns the shared FrustumCullData (visibility + NDC rect + nearest depth).
-FrustumCullData FrustumCullMeshlet(MeshletBounds bounds, float4x4 localToWorld, float4x4 viewProj)
+// See FrustumCullSphere above for why viewProj and hzbViewProj are separate.
+FrustumCullData FrustumCullMeshletSphere(MeshletBounds bounds, float4x4 localToWorld,
+                                         float4x4 viewProj, float4x4 hzbViewProj,
+                                         float P00, float P11, float zNear)
 {
-    float3 worldCenter, worldExtents;
-    TransformAABBToWorld(bounds.LocalCenter, bounds.LocalExtents, localToWorld,
-                         worldCenter, worldExtents);
-    return FrustumCullAABB(worldCenter, worldExtents, viewProj);
+    float3 worldCenter; float worldRadius;
+    TransformSphereToWorld(bounds.LocalCenter, bounds.LocalRadius, localToWorld,
+                           worldCenter, worldRadius);
+    return FrustumCullSphere(worldCenter, worldRadius, viewProj, hzbViewProj, P00, P11, zNear);
 }
 
 // --- Wireframe edge detection from barycentric coordinates ---
