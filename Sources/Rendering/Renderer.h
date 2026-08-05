@@ -157,7 +157,8 @@ public:
     void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
                                      bool occlusionEnabled, int phase, bool freezeCulling = false);
     void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
-    void DispatchMeshletRasterize(class Model* model); // Mesh Shader rasterize per bin
+    void DispatchMeshletRasterize(class Model* model, bool useVisibilityBuffer); // Mesh Shader rasterize per bin
+    void DispatchVisibilityGBufferResolve(class Model* model); // Full-screen: visibility token -> albedo/normal/material
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
     // HZB (Hierarchical Z-Buffer) — GPUCulling owns the HZB chain.

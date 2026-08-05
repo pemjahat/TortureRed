@@ -36,6 +36,7 @@ private:
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
     bool m_UseMeshlet              = true;   // Toggle meshlet vs vertex-buffer rendering
+    bool m_UseVisibilityBuffer    = true;   // Toggle Visibility Buffer (MeshletRasterizeMS token + VisibilityGBuffer resolve) vs direct-to-GBuffer (MeshletRasterizeGBufferMS)
     bool m_EnableTwoPassCulling = true;     // Toggle two-phase culling
     bool m_EnableOcclusionCulling = true;   // Toggle HZB occlusion culling
     bool m_FreezeCulling           = false;  // Freeze the culling view to visually verify instance/meshlet culling

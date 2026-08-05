@@ -615,39 +615,94 @@ void Application::Render()
     }
     else
     {
-        // Helper: perform GBuffer + rasterize render targets transitions, clear, and dispatch.
+        // Helper: rasterize the meshlets.
+        // m_UseVisibilityBuffer=true  -> visibility-only pass (writes R32_UINT token +
+        //     depth, 1 RTV); GBuffer is reconstructed afterward by the "Visibility
+        //     GBuffer Resolve" full-screen pass below.
+        // m_UseVisibilityBuffer=false -> direct-to-GBuffer pass (MeshletRasterizeGBufferMS.hlsl,
+        //     4 RTVs: albedo/normal/material/visToken) — classic per-fragment shading,
+        //     no resolve pass needed.
         // clearTargets=true for Phase 1 / frustum-only (clear RTVs + depth),
-        // clearTargets=false for Phase 2 — preserve BOTH depth and RTVs so Phase 2's
-        // newly-revealed meshlets composite on top of Phase 1's GBuffer output.
+        // clearTargets=false for Phase 2 — preserve depth/RTVs so Phase 2's
+        // newly-revealed meshlets composite on top of Phase 1's output.
         auto doMeshletRasterize = [&](bool clearTargets)
         {
+            GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
+
+            if (m_UseVisibilityBuffer)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[1] = {
+                    m_Renderer.GetVisibilityBuffer().rtvHandle
+                };
+                cmdList->OMSetRenderTargets(1, rtvs, FALSE, &dsv);
+
+                if (clearTargets)
+                {
+                    const float clearVis[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    cmdList->ClearRenderTargetView(rtvs[0], clearVis, 0, nullptr);
+                    cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                }
+            }
+            else
+            {
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+                D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+                    gbuffer.albedo.rtvHandle,
+                    gbuffer.normal.rtvHandle,
+                    gbuffer.material.rtvHandle,
+                    m_Renderer.GetVisibilityBuffer().rtvHandle
+                };
+                cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+
+                if (clearTargets)
+                {
+                    const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    const float clearVis[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
+                    cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
+                    cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
+                    cmdList->ClearRenderTargetView(rtvs[3], clearVis, 0, nullptr);
+                    cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                }
+            }
+
+            m_Renderer.DispatchMeshletRasterize(&m_Model, m_UseVisibilityBuffer);
+        };
+
+        // Helper: full-screen Visibility Buffer resolve — reconstructs GBuffer
+        // (albedo/normal/material) from the visibility token written by the
+        // rasterize pass(es) above. Discards sky/background pixels, so the GBuffer
+        // targets must be cleared to zero first.
+        auto doVisibilityGBufferResolve = [&]()
+        {
+            MICROPROFILE_SCOPEI("Render", "VisibilityGBuffer", MP_BLUE);
+            MICROPROFILE_SCOPEGPUI("VisibilityGBuffer", MP_BLUE);
+            GPU_MARKER(cmdList, L"Visibility GBuffer Resolve");
+
             GraphicsHelper::TransitionResource(cmdList, gbuffer.albedo, D3D12_RESOURCE_STATE_RENDER_TARGET);
             GraphicsHelper::TransitionResource(cmdList, gbuffer.normal, D3D12_RESOURCE_STATE_RENDER_TARGET);
             GraphicsHelper::TransitionResource(cmdList, gbuffer.material, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-            GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            GraphicsHelper::TransitionResource(cmdList, m_Renderer.GetVisibilityBuffer(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
+            const float clearCol[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            cmdList->ClearRenderTargetView(gbuffer.albedo.rtvHandle, clearCol, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.normal.rtvHandle, clearCol, 0, nullptr);
+            cmdList->ClearRenderTargetView(gbuffer.material.rtvHandle, clearCol, 0, nullptr);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
                 gbuffer.albedo.rtvHandle,
                 gbuffer.normal.rtvHandle,
-                gbuffer.material.rtvHandle,
-                m_Renderer.GetVisibilityBuffer().rtvHandle
+                gbuffer.material.rtvHandle
             };
-            D3D12_CPU_DESCRIPTOR_HANDLE dsv = gbuffer.depth.dsvHandle;
-            cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+            cmdList->OMSetRenderTargets(_countof(rtvs), rtvs, FALSE, nullptr);
 
-            if (clearTargets)
-            {
-                const float clearCol[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
-                const float clearVis[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
-                cmdList->ClearRenderTargetView(rtvs[0], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[1], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[2], clearCol, 0, nullptr);
-                cmdList->ClearRenderTargetView(rtvs[3], clearVis, 0, nullptr);
-                cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-            }
-
-            m_Renderer.DispatchMeshletRasterize(&m_Model);
+            m_Renderer.DispatchVisibilityGBufferResolve(&m_Model);
         };
 
         // Debug overlay for meshlet visibility buffer — runs once per frame, after
@@ -785,6 +840,14 @@ void Application::Render()
                         m_Renderer.DispatchBuildHZB();
                 }
             }
+
+            // Visibility Buffer resolve — runs once after the final rasterize pass
+            // (Phase 2 if two-pass culling is on, otherwise Phase 1/frustum-only),
+            // reconstructing GBuffer (albedo/normal/material) from the visibility token.
+            // Skipped when m_UseVisibilityBuffer is off — MeshletRasterizeGBufferMS.hlsl
+            // already wrote the GBuffer directly during rasterize.
+            if (m_UseVisibilityBuffer)
+                doVisibilityGBufferResolve();
 
             // Debug overlay — runs once after final rasterize
             runDebugOverlay();
@@ -985,6 +1048,10 @@ void Application::RenderImGui()
 
     if (m_UseMeshlet)
     {
+        ImGui::Checkbox("Use Visibility Buffer", &m_UseVisibilityBuffer);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("On = MeshletRasterizeMS writes only a visibility token; GBuffer is\nreconstructed by the VisibilityGBuffer full-screen resolve pass.\nOff = MeshletRasterizeGBufferMS shades GBuffer directly per-fragment\n(classic path, no resolve pass) — useful for A/B comparison.");
+
         ImGui::Checkbox("Two-Pass Occlusion (Phase 1+2)", &m_EnableTwoPassCulling);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Two-phase HZB occlusion: Phase 1 vs prev-frame HZB → rasterize → rebuild HZB → Phase 2 retest.\nOff = single-pass (Phase 1 only, cheaper, fewer draw calls).");

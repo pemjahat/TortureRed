@@ -1153,9 +1153,15 @@ void Renderer::DispatchMeshletBinning()
                        m_GPUCulling.GetVisibleMeshletsCounterUAVIndex());
 }
 
-void Renderer::DispatchMeshletRasterize(Model* model)
+void Renderer::DispatchMeshletRasterize(Model* model, bool useVisibilityBuffer)
 {
     m_Meshlet.Rasterize(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model,
-                         m_GPUCulling.GetVisibleMeshletsSRVIndex());
+                         m_GPUCulling.GetVisibleMeshletsSRVIndex(), useVisibilityBuffer);
+}
+
+void Renderer::DispatchVisibilityGBufferResolve(Model* model)
+{
+    m_Meshlet.ResolveVisibilityGBuffer(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model,
+                                        m_GPUCulling.GetVisibleMeshletsSRVIndex());
 }
 

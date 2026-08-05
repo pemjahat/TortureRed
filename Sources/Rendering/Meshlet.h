@@ -36,9 +36,23 @@ public:
                   int visibleMeshletsCounterUAVIdx);
 
     // Mesh Shader rasterize per bin (GPU-driven via ExecuteIndirect).
+    // useVisibilityBuffer=true  -> MeshletRasterizeMS.hlsl, writes ONLY the visibility
+    //                              token (R32_UINT) + depth. Caller binds 1 RTV.
+    // useVisibilityBuffer=false -> MeshletRasterizeGBufferMS.hlsl, writes GBuffer
+    //                              (albedo/normal/material) + visibility token directly.
+    //                              Caller binds 4 RTVs.
     void Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                     D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
-                    int visibleMeshletsSRVIdx);
+                    int visibleMeshletsSRVIdx, bool useVisibilityBuffer);
+
+    // Full-screen Visibility Buffer resolve: reconstructs GBuffer (albedo/normal/material)
+    // from the visibility token written by Rasterize(). Run once per frame, after both
+    // rasterize phases (Phase 1 / Phase 2) complete. Caller must have already bound the
+    // GBuffer albedo/normal/material RTVs (no depth) and transitioned the visibility
+    // buffer to a shader-readable state.
+    void ResolveVisibilityGBuffer(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                                   D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
+                                   int visibleMeshletsSRVIdx);
 
     // ----- Visibility buffer for meshlet debug overlay -----
     GPUTexture& GetVisibilityBuffer() { return m_VisibilityBuffer; }
@@ -66,8 +80,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletClassifyPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletAllocateBinRangesPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletWriteBinsPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterPSO[NUM_RASTER_BINS];        // Visibility-only (1 RTV)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletRasterGBufferPSO[NUM_RASTER_BINS]; // Direct-to-GBuffer (4 RTVs)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_MeshletDebugViewPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_VisibilityGBufferPSO; // Full-screen VisibilityGBuffer.hlsl resolve
 
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignatureCS;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchMeshSignature;

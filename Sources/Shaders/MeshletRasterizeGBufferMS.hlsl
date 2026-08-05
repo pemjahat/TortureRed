@@ -2,22 +2,23 @@
 #include "VisibilityBuffer.hlsli"
 
 /*
-    Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization.
+    Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization —
+    DIRECT-TO-GBUFFER variant.
 
-    Proper Visibility Buffer split (mirrors D3D12_Research's MeshletRasterize.hlsl):
-    this pass ONLY rasterizes geometry and writes the compact per-pixel visibility
-    token (candidate index + primitive ID) plus depth. No material sampling and no
-    GBuffer output happens here — that work is deferred to the full-screen
-    VisibilityGBuffer.hlsl resolve pass, which runs once per screen pixel instead of
-    once per rasterized fragment (avoids redundant shading of overlapping/occluded
-    triangles and keeps this pass's PS trivially cheap).
+    Used when the Visibility Buffer pipeline is disabled (m_UseVisibilityBuffer=false
+    in Application.cpp). Unlike MeshletRasterizeMS.hlsl (which writes only a compact
+    visibility token and defers shading to VisibilityGBuffer.hlsl), this shader does
+    the full material sampling / GBuffer write inline in the pixel shader — one shade
+    per rasterized fragment, same as the classic forward+deferred hybrid used before
+    the Visibility Buffer split. Useful for A/B comparison and as a fallback path.
+
+    It still writes the visibility token to SV_Target3 so the meshlet debug overlay
+    (VisibilityDebugView.hlsl) keeps working regardless of which path is active.
 
     MSMain: one thread group per visible meshlet (SV_GroupID → bin indirection → MeshletCandidate).
             32 threads process up to MESHLET_MAX_VERTICES vertices and MESHLET_MAX_TRIANGLES triangles.
-    PSMain: writes ONLY the visibility token (R32_UINT) to SV_Target0.
-            ALPHA_MASK permutation samples the base color texture to alpha-test
-            before the token is written (so invisible fragments never occlude
-            geometry behind them).
+    PSMain: writes GBuffers directly — albedo (R8G8B8A8_UNORM), normal (R16G16B16A16_FLOAT),
+            roughness|metallic (R8G8B8A8_UNORM), plus visibility token (R32_UINT).
 
     Compile permutations:
         ALPHA_MASK=0  — Opaque bin (back-face cull, no alpha discard)
@@ -33,7 +34,7 @@
 // --- Bindless resource declarations ---
 // Meshlet stream buffers (contiguous in heap, bound via root param 14 descriptor table t0-t8 space3)
 StructuredBuffer<float3>           GlobalPositions         : register(t0, space3);
-StructuredBuffer<uint>             GlobalNormals           : register(t1, space3); // unused here (moved to VisibilityGBuffer.hlsl)
+StructuredBuffer<uint>             GlobalNormals           : register(t1, space3);
 StructuredBuffer<uint>             GlobalUVs               : register(t2, space3);
 StructuredBuffer<Meshlet>          GlobalMeshlets          : register(t3, space3);
 StructuredBuffer<uint>             GlobalMeshletVertices   : register(t4, space3);
@@ -42,10 +43,10 @@ StructuredBuffer<MeshletBounds>    GlobalMeshletBounds     : register(t6, space3
 StructuredBuffer<MeshData>         GlobalMeshData          : register(t7, space3);
 StructuredBuffer<InstanceData>     GlobalInstanceData      : register(t8, space3);
 
-// Material buffer (root SRV param 1, t0 space1) — only needed by the ALPHA_MASK permutation
+// Material buffer (root SRV param 1, t0 space1)
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
-// Bindless textures (space0) — only needed by the ALPHA_MASK permutation
+// Bindless textures (space0)
 Texture2D g_Textures[] : register(t0, space0);
 SamplerState g_LinearSampler : register(s0);
 
@@ -62,17 +63,14 @@ struct PrimitiveAttribute
     uint CandidateIndex : CANDIDATE_INDEX;
 };
 
-// --- Per-vertex output ---
-// Visibility-only: just clip position, plus UV/MaterialID for the alpha-masked bin's
-// alpha test. Surface attributes (world pos/normal) are reconstructed later by
-// VisibilityGBuffer.hlsl from the candidate + primitiveID token, not carried here.
+// --- Per-vertex output (full surface data, needed for inline GBuffer shading) ---
 struct VertexAttribute
 {
     float4 Position : SV_Position;
-#if ALPHA_MASK
+    float3 WorldPos : WORLD_POS;
+    float3 Normal   : NORMAL;
     float2 UV       : TEXCOORD;
     nointerpolation uint MaterialID : MATERIAL_ID;
-#endif
 };
 
 // --- Mesh Shader Entry Point ---
@@ -108,13 +106,15 @@ void MSMain(
         float3 localPos   = GlobalPositions[md.PositionOffset + globalVtxIdx];
         float4 worldPos   = mul(float4(localPos, 1.0), inst.LocalToWorld);
         float4 clipPos    = mul(worldPos, FrameCB.viewProj);
+        float3 localNormal = UnpackNormalRGB10A2(GlobalNormals, md.NormalOffset, globalVtxIdx);
+        float3 worldNormal = mul(localNormal, (float3x3)inst.LocalToWorld);
 
         VertexAttribute v;
         v.Position   = clipPos;
-#if ALPHA_MASK
+        v.WorldPos   = worldPos.xyz;
+        v.Normal     = worldNormal;
         v.UV         = UnpackUVRG16(GlobalUVs, md.UVOffset, globalVtxIdx);
         v.MaterialID = md.MaterialIndex;
-#endif
         verts[i] = v;
     }
 
@@ -132,30 +132,51 @@ void MSMain(
 }
 
 // --- Pixel Shader ---
-// Outputs a single render target:
-//   SV_Target0: R32_UINT — visibility token (candidate index + primitive ID)
-// No material/GBuffer work happens here — see VisibilityGBuffer.hlsl.
-struct VisOutput
+// Outputs 4 render targets:
+//   SV_Target0: R8G8B8A8_UNORM       — albedo
+//   SV_Target1: R16G16B16A16_FLOAT   — packed normal (world-space, [0,1])
+//   SV_Target2: R8G8B8A8_UNORM       — roughness | metallic
+//   SV_Target3: R32_UINT             — visibility token (debug overlay only — no resolve pass reads it)
+// Material sampling mirrors Gbuffer.hlsl PSMain / VisibilityGBuffer.hlsl exactly.
+struct GBufferOutput
 {
-    uint visToken : SV_Target0;
+    float4 albedo   : SV_Target0;
+    float4 normal   : SV_Target1;
+    float4 material : SV_Target2;
+    uint   visToken : SV_Target3;
 };
 
-VisOutput PSMain(
+GBufferOutput PSMain(
     VertexAttribute vertexData,
     PrimitiveAttribute primitiveData)
 {
-#if ALPHA_MASK
-    // Alpha discard must happen during rasterization: a discarded fragment must not
-    // occlude/win the depth test, so it must never reach the visibility buffer.
     MaterialConstants matConstants = MaterialBuffer[vertexData.MaterialID];
+
+    // --- Albedo ---
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
         albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
+
+    // --- Alpha discard (only for alpha-masked bin) ---
+#if ALPHA_MASK
     if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
         discard;
 #endif
 
-    VisOutput output;
+    // --- Roughness / Metallic ---
+    float roughness = matConstants.roughnessFactor;
+    float metallic  = matConstants.metallicFactor;
+    if (matConstants.metallicRoughnessTextureIndex >= 0)
+    {
+        float4 mr = g_Textures[matConstants.metallicRoughnessTextureIndex].Sample(g_LinearSampler, vertexData.UV);
+        roughness *= mr.g;
+        metallic  *= mr.b;
+    }
+
+    GBufferOutput output;
+    output.albedo   = albedo;
+    output.normal   = float4(normalize(vertexData.Normal) * 0.5f + 0.5f, 1.0f);
+    output.material = float4(roughness, metallic, 0.0f, 1.0f);
     output.visToken = PackVisBuffer(primitiveData.CandidateIndex, primitiveData.PrimitiveID);
     return output;
 }

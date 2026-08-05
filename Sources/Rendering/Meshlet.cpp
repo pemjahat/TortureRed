@@ -111,6 +111,7 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2,
             const std::vector<char>& ms,
             const std::vector<char>& ps,
             D3D12_CULL_MODE cullMode,
+            bool directToGBuffer,
             Microsoft::WRL::ComPtr<ID3D12PipelineState>& outPSO,
             const char* label)
         {
@@ -146,12 +147,25 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2,
 
             stream.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
+            // Visibility-only output: a single R32_UINT visibility token
+            // (GBuffer is reconstructed by the separate VisibilityGBuffer full-screen
+            // resolve pass). directToGBuffer=true instead writes the classic 4-target
+            // layout (albedo/normal/material/visToken) used when the Visibility
+            // Buffer toggle is off (MeshletRasterizeGBufferMS.hlsl).
             D3D12_RT_FORMAT_ARRAY rtFormats = {};
-            rtFormats.NumRenderTargets = 4;
-            rtFormats.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtFormats.RTFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            rtFormats.RTFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtFormats.RTFormats[3] = DXGI_FORMAT_R32_UINT;
+            if (directToGBuffer)
+            {
+                rtFormats.NumRenderTargets = 4;
+                rtFormats.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                rtFormats.RTFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                rtFormats.RTFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                rtFormats.RTFormats[3] = DXGI_FORMAT_R32_UINT;
+            }
+            else
+            {
+                rtFormats.NumRenderTargets = 1;
+                rtFormats.RTFormats[0] = DXGI_FORMAT_R32_UINT;
+            }
             stream.RTVFormats = rtFormats;
 
             DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
@@ -166,12 +180,22 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2,
         {
             D3D12_CULL_MODE cull = (i == 0) ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
             std::wstring alphaMaskVal = (i == 0) ? L"0" : L"1";
+            std::vector<std::pair<std::wstring,std::wstring>> defs = { {L"ALPHA_MASK", alphaMaskVal} };
+
+            // Visibility-only variant (used when m_UseVisibilityBuffer=true)
             {
-                std::vector<std::pair<std::wstring,std::wstring>> defs = { {L"ALPHA_MASK", alphaMaskVal} };
                 auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "MSMain", "ms_6_8", defs);
                 auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeMS.hlsl", "PSMain", "ps_6_8", defs);
-                buildMeshPSO(ms, ps, cull, m_MeshletRasterPSO[i],
-                             "[Meshlet] CreatePipelineState (mesh shader raster) failed");
+                buildMeshPSO(ms, ps, cull, /*directToGBuffer=*/false, m_MeshletRasterPSO[i],
+                             "[Meshlet] CreatePipelineState (mesh shader raster, visibility) failed");
+            }
+
+            // Direct-to-GBuffer variant (used when m_UseVisibilityBuffer=false)
+            {
+                auto ms = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeGBufferMS.hlsl", "MSMain", "ms_6_8", defs);
+                auto ps = GraphicsHelper::CompileShader("Shaders/MeshletRasterizeGBufferMS.hlsl", "PSMain", "ps_6_8", defs);
+                buildMeshPSO(ms, ps, cull, /*directToGBuffer=*/true, m_MeshletRasterGBufferPSO[i],
+                             "[Meshlet] CreatePipelineState (mesh shader raster, direct GBuffer) failed");
             }
         }
     }
@@ -213,6 +237,35 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2,
             desc.CS = { cs.data(), cs.size() };
             CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_MeshletDebugViewPSO)),
                      "[Meshlet] CreateComputePipelineState (debug view) failed");
+        }
+    }
+
+    // --- VisibilityGBuffer PSO (full-screen resolve: visibility token -> albedo/normal/material) ---
+    {
+        std::vector<char> vs = GraphicsHelper::CompileShader("Shaders/VisibilityGBuffer.hlsl", "VSMain", "vs_6_8");
+        std::vector<char> ps = GraphicsHelper::CompileShader("Shaders/VisibilityGBuffer.hlsl", "PSMain", "ps_6_8");
+        if (!vs.empty() && !ps.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature = mainRootSignature;
+            desc.VS = { reinterpret_cast<UINT8*>(vs.data()), vs.size() };
+            desc.PS = { reinterpret_cast<UINT8*>(ps.data()), ps.size() };
+            desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+            desc.DepthStencilState.DepthEnable = FALSE;
+            desc.DepthStencilState.StencilEnable = FALSE;
+            desc.SampleMask = UINT_MAX;
+            desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            desc.SampleDesc.Count = 1;
+            desc.NumRenderTargets = 3;
+            desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;      // albedo
+            desc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;  // normal
+            desc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;      // material (roughness|metallic)
+            desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+            CHECK_HR(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_VisibilityGBufferPSO)),
+                     "[Meshlet] CreateGraphicsPipelineState (VisibilityGBuffer resolve) failed");
         }
     }
 
@@ -342,7 +395,7 @@ void MeshletPass::Binning(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatur
 
 void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                              D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
-                             int visibleMeshletsSRVIdx)
+                             int visibleMeshletsSRVIdx, bool useVisibilityBuffer)
 {
     if (!model->IsMeshletReady() || !m_MeshShaderSupported)
         return;
@@ -363,9 +416,13 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
     cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
 
+    // Visibility-only path (MeshletRasterizeMS.hlsl, 1 RTV) when enabled, otherwise
+    // the direct-to-GBuffer fallback (MeshletRasterizeGBufferMS.hlsl, 4 RTVs).
+    auto* psoArray = useVisibilityBuffer ? m_MeshletRasterPSO : m_MeshletRasterGBufferPSO;
+
     for (uint32_t binIndex = 0; binIndex < NUM_RASTER_BINS; ++binIndex)
     {
-        auto* pso = m_MeshletRasterPSO[binIndex].Get();
+        auto* pso = psoArray[binIndex].Get();
         if (!pso) continue;
 
         RasterParams rp = {};
@@ -390,4 +447,35 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_DispatchMeshArgs,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void MeshletPass::ResolveVisibilityGBuffer(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                                            D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
+                                            int visibleMeshletsSRVIdx)
+{
+    if (!m_VisibilityGBufferPSO || !model->IsMeshletReady() || !m_MeshShaderSupported)
+        return;
+
+    GPU_MARKER(cmdList, L"Visibility GBuffer Resolve (Full-Screen)");
+
+    // Matches VisibilityGBufferParams in Shaders/VisibilityGBuffer.hlsl (register b1/ root param 12).
+    struct VisibilityGBufferParams
+    {
+        uint32_t VisBufSRVIdx;
+        uint32_t CandidatesSRVIdx;
+    } rp = {};
+    rp.VisBufSRVIdx     = (uint32_t)m_VisibilityBuffer.srvIndex;
+    rp.CandidatesSRVIdx = (uint32_t)visibleMeshletsSRVIdx;
+
+    cmdList->SetGraphicsRootSignature(mainRootSignature);
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
+    cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
+    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
+    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
+    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(rp) / 4, &rp, 0);
+
+    cmdList->SetPipelineState(m_VisibilityGBufferPSO.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle
 }
