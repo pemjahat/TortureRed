@@ -36,8 +36,11 @@ private:
     bool m_UsePathTracer          = false;
     bool m_ShowDemoWindow         = false;
     bool m_UseMeshlet              = true;   // Toggle meshlet vs vertex-buffer rendering
-    bool m_EnableOcclusionCulling  = true;   // Toggle two-phase HZB occlusion culling
+    bool m_EnableTwoPassCulling = true;     // Toggle two-phase culling
+    bool m_EnableOcclusionCulling = true;   // Toggle HZB occlusion culling
     bool m_FreezeCulling           = false;  // Freeze the culling view to visually verify instance/meshlet culling
+    bool m_FPSLimitEnabled         = true;   // Enable FPS limiter
+    float m_TargetFPS              = 60.0f;  // Target frames per second
     int  m_HZBDebugMip             = -1;     // -1=Off, else HZB mip visualized as grayscale
     bool m_OccludedRectDebug       = false;  // Draw NDC rects of HZB-occluded instances/meshlets
     bool m_DebugScreenText         = false;  // GPU on-screen debug text/lines overlay, master switch

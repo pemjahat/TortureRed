@@ -72,10 +72,13 @@ _Chain-of-passes reference for the non-path-tracer (`!usePathTracingFrame`) rend
 ```mermaid
 flowchart TB
     accTitle: Per-Frame Raster Rendering Pipeline
-    accDescr: High-level chain of rendering passes from G-Buffer through raster indirect GI, ReSTIR DI, lighting, TAA, transparency, and ImGui to final presentation
+    accDescr: Per-frame pipeline from GPU-driven meshlet G-Buffer (two-pass HZB occlusion culling, 4-pass binning, mesh-shader rasterize) through raster indirect GI, ReSTIR DI, lighting, TAA, transparency, and ImGui to final presentation
 
     subgraph gbuffer ["🎨 G-Buffer"]
-        depth_pre[📏 Depth pre-pass] --> gbuffer_pass[🖼️ G-Buffer pass]
+        subgraph meshlet ["🔺 GPU-Driven Meshlet (default)"]
+            two_pass_cull["🔍 Two-Pass Culling<br/>(CullInstances → CullMeshlets)"] --> meshlet_bin["📦 4-Pass GPU Binning"]
+            meshlet_bin --> meshlet_rast["🖼️ Mesh-Shader Rasterize"]
+        end
     end
 
     subgraph gi ["💡 Raster Indirect GI"]
@@ -117,7 +120,7 @@ flowchart TB
     classDef forward_c fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
     classDef decision_c fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
 
-    class depth_pre,gbuffer_pass gbuffer_c
+    class two_pass_cull,meshlet_bin,meshlet_rast gbuffer_c
     class sharc,restir_temp,restir_spatial,resolve_gi,sso,nrd gi_c
     class di_init,di_temp,di_spatial,di_split di_c
     class lighting,taa,transparency,imgui forward_c
@@ -126,7 +129,45 @@ flowchart TB
 
 ### Depth pre-pass
 
-> 📌 **Optional** — toggled via `m_EnableDepthPrePass`.
+> 📌 **Optional** — toggled via `m_EnableDepthPrePass`. Only used in the **non-meshlet** (traditional) geometry path. The meshlet pipeline writes depth as part of its single-pass rasterize; no separate pre-pass is needed.
+
+### Meshlet GPU-driven geometry path
+
+> 📌 **Enabled by default** — toggled via `m_UseMeshlet`. When meshlet data is available (`Model::IsMeshletReady()`), the traditional G-Buffer/depth-pre-pass are replaced entirely by the GPU-driven meshlet pipeline. All geometry writes to the same 4 G-Buffer targets (albedo, normal, material, depth) so downstream passes (ReSTIR DI/GI, lighting, TAA) are agnostic.
+
+#### Meshlet generation
+
+Performed once at model-load time in `Model.cpp` using [meshoptimizer](https://github.com/zeux/meshoptimizer)[^2]:
+
+- Each mesh is decomposed into meshlets (`meshopt_buildMeshlets`) — up to 64 vertices and 124 triangles each.
+- Per-meshlet cone/axis culling data (`meshopt_computeMeshletBounds`).
+- Per-meshlet position bounds (`LocalCenter` / `LocalExtents`) packed into `MeshletBounds`.
+- Vertex positions, triangle indices, and primitive vertices streamed into bindless `ByteAddressBuffer` descriptors for mesh-shader access (`GetVertexAttributes`, `GetPrimitiveIndex`).
+
+#### Two-pass occlusion culling (GPUCulling)
+
+> 📌 **Optional** — toggled via `m_EnableTwoPassCulling`. When off, a single frustum-only cull pass runs instead.
+
+A hierarchical two-stage compute pipeline (`CullInstancesCS` → `CullMeshletsCS`) with two occlusion-tested phases:
+
+| Phase | Instance set | HZB source | Meshlets tested | Rasterize |
+|-------|--------------|------------|-----------------|-----------|
+| Phase 1 | All instances | Previous frame's HZB | All meshlets of visible instances | Clear GBuffer |
+| Phase 2 | Phase-1 occluded instances only | Fresh HZB (from Phase 1 depth) | All meshlets of now-visible instances | Preserve GBuffer (compound atop Phase 1) |
+
+Each stage projects the AABB (FrustumCullData, shared with HZBCull in one projection) and tests against a mip-selected 4-tap footprint on the Hierarchical Z-Buffer. Surviving meshlets are written to `VisibleMeshlets[]` for the binning/rasterize stage.
+
+HZB generation uses AMD FidelityFX SPD[^3]: mip 0 is min-reduced from the depth buffer via 2×2 gather; mips 1..N are SPD-downsampled.
+
+#### Binning
+
+4-pass GPU sort (`PrepareArgsCS` → `ClassifyMeshletsCS` → `AllocateBinRangesCS` → `WriteBinsCS`) that distributes visible meshlets into `NUM_RASTER_BINS` (2) bins for indirect `DispatchMesh`.
+
+#### Mesh shader rasterize
+
+Per-bin `ExecuteIndirect` via `DispatchMesh`: one mesh shader threadgroup per meshlet (`MSMain`) writes the visibility buffer token (`VisToken`, see `docs/task001-visbuffer.md`) to `SV_Target3` alongside G-Buffer albedo/normal/material in the first three render targets, and writes depth to the shared depth-stencil view.
+
+### Traditional G-Buffer pass (non-meshlet)
 
 - Depth buffer cleared to 1.0
 - Opaque geometry rendered with depth-only PSO
@@ -134,9 +175,6 @@ flowchart TB
 - Reduces overdraw in the subsequent G-Buffer pass by priming the depth buffer
 
 ### G-Buffer pass
-
-- Albedo, normal, and material render targets cleared to black
-- Depth buffer cleared to 1.0 if pre-pass was skipped
 - **Pre-pass enabled:** render opaque geometry with G-Buffer PSO (depth-test equals, depth-write off)
 - **Pre-pass disabled:** render opaque and masked geometry with G-BufferWrite PSO (depth-test less, depth-write on)
 - **Only opaque (`AlphaMode::Opaque`) and masked (`AlphaMode::Mask`) geometry is rendered** — transparent/blended objects are explicitly excluded from the G-Buffer (see [transparency pass](#transparency-pass))
@@ -401,3 +439,5 @@ flowchart LR
 - **SHaRC:** Boksansky, J., et al. "Spatiotemporal reservoir resampling with lighting hash caching for real-time ray tracing." _High-Performance Graphics_, 2024. https://intro-to-restir.cwyman.org/
 - **ReSTIR:** Bitterli, B., et al. "Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting." _ACM Transactions on Graphics (SIGGRAPH 2020)_. https://research.nvidia.com/publication/2020-07_spatiotemporal-reservoir-resampling-real-time-ray-tracing-dynamic-direct
 - **D3D12:** Microsoft. "Direct3D 12 Programming Guide." https://learn.microsoft.com/en-us/windows/win32/direct3d12/directx-12-programming-guide
+[^2]: meshoptimizer. "Mesh optimization library." https://github.com/zeux/meshoptimizer
+[^3]: AMD. "FidelityFX Single Pass Downsampler." https://github.com/GPUOpen-Effects/FidelityFX-SPD

@@ -27,6 +27,9 @@ public:
     void SetCameraMode(bool active) { m_CameraModeActive = active; }
     bool IsCameraModeActive() const { return m_CameraModeActive; }
 
+    float GetMoveSpeed() const { return m_MoveSpeed; }
+    void SetMoveSpeed(float speed) { m_MoveSpeed = speed; }
+
 private:
     // Camera position and orientation
     DirectX::XMFLOAT3 m_Position;
