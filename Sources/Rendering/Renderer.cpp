@@ -656,7 +656,15 @@ void Renderer::CreateRootSignature()
     rootParameters[9].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
     rootParameters[10].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
     rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
-    rootParameters[12].InitAsConstants(sizeof(BinningParams) / 4, 1, 0); // b1: Bindless/Binning/Raster indices (max of all pass params)
+    // Root param 12 (b1) is SHARED (never bound simultaneously, but re-set per pass)
+    // by several unrelated root-constant structs: RasterParams (Meshlet.cpp),
+    // BindlessIndices (TAA/RestirGI/RestirDI/PathTracing/Denoise/DeferredLighting —
+    // 7 uints), and DebugTextRenderParams (DebugTextRenderer.cpp — 8 uints). Its
+    // declared Num32BitValues must cover the LARGEST of them, or every
+    // SetComputeRoot32BitConstants(12, ...)/SetGraphicsRoot32BitConstants(12, ...)
+    // call from a smaller-capacity slot overflows:
+    constexpr size_t kParam12MaxA = std::max(sizeof(DebugTextRenderParams), std::max(sizeof(RasterParams), sizeof(BindlessIndices)));
+    rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12MaxA / 4), 1, 0); // b1: max of all shared-slot params (see note above)
     rootParameters[13].InitAsConstants(sizeof(IrCacheBindlessIndices) / 4, 2, 0); // b2: IrCache bindless indices
     rootParameters[14].InitAsDescriptorTable(1, &srvRangeMeshletSpace3); // t0-t15 space3: Meshlet streams
 
@@ -1142,15 +1150,14 @@ void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& fr
     // Freeze culling: cull dispatches read the frozen snapshot (m_CullFrameCB)
     // while binning/rasterize keep the live m_FrameCB.
     D3D12_GPU_VIRTUAL_ADDRESS cullFrameAddress = freezeCulling ? m_CullFrameCB.gpuAddress : m_FrameCB.gpuAddress;
-    m_GPUCulling.CullTwoPass(m_CommandList.Get(), cullFrameAddress, model, occlusionEnabled, phase);
+    m_GPUCulling.CullTwoPass(m_CommandList.Get(), cullFrameAddress, model, occlusionEnabled, phase,
+                              m_RootSignature.Get());
 }
 
-void Renderer::DispatchMeshletBinning()
+void Renderer::DispatchMeshletBuildDispatchArgs()
 {
-    m_Meshlet.Binning(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
-                       m_GPUCulling.GetVisibleMeshletsSRVIndex(),
-                       m_GPUCulling.GetVisibleMeshletsCounterSRVIndex(),
-                       m_GPUCulling.GetVisibleMeshletsCounterUAVIndex());
+    m_Meshlet.BuildDispatchMeshArgs(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
+                                     m_GPUCulling.GetVisibleMeshletsCounterSRVIndex());
 }
 
 void Renderer::DispatchMeshletRasterize(Model* model, bool useVisibilityBuffer)

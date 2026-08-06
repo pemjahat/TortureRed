@@ -774,10 +774,10 @@ void Application::Render()
                 m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, m_EnableOcclusionCulling, 0, m_FreezeCulling);
             }
             {
-                MICROPROFILE_SCOPEI("Render", "Phase1_Binning", MP_YELLOW);
-                MICROPROFILE_SCOPEGPUI("Phase1_Binning", MP_YELLOW);
-                GPU_MARKER(cmdList, L"Phase 1 - Binning");
-                m_Renderer.DispatchMeshletBinning();
+                MICROPROFILE_SCOPEI("Render", "Phase1_BuildDispatchArgs", MP_YELLOW);
+                MICROPROFILE_SCOPEGPUI("Phase1_BuildDispatchArgs", MP_YELLOW);
+                GPU_MARKER(cmdList, L"Phase 1 - BuildDispatchMeshArgs");
+                m_Renderer.DispatchMeshletBuildDispatchArgs();
             }
             {
                 MICROPROFILE_SCOPEI("Render", "Phase1_Rasterize", MP_BLUE);
@@ -821,10 +821,10 @@ void Application::Render()
                     m_Renderer.DispatchMeshletTwoPassCull(&m_Model, m_FrameConstants, m_EnableOcclusionCulling, 1, m_FreezeCulling);
                 }
                 {
-                    MICROPROFILE_SCOPEI("Render", "Phase2_Binning", MP_YELLOW);
-                    MICROPROFILE_SCOPEGPUI("Phase2_Binning", MP_YELLOW);
-                    GPU_MARKER(cmdList, L"Phase 2 - Binning");
-                    m_Renderer.DispatchMeshletBinning();
+                    MICROPROFILE_SCOPEI("Render", "Phase2_BuildDispatchArgs", MP_YELLOW);
+                    MICROPROFILE_SCOPEGPUI("Phase2_BuildDispatchArgs", MP_YELLOW);
+                    GPU_MARKER(cmdList, L"Phase 2 - BuildDispatchMeshArgs");
+                    m_Renderer.DispatchMeshletBuildDispatchArgs();
                 }
                 {
                     MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);
@@ -917,6 +917,16 @@ void Application::Render()
         {
             GPU_MARKER(cmdList, L"Depth Readout");
             m_Renderer.DispatchDepthReadout(m_OutputWidth, m_OutputHeight);
+        }
+
+        // Cull stats overlay — per-phase culling counters on-screen table
+        if (m_UseMeshlet && m_DebugScreenText && m_CullStatsOverlay)
+        {
+            GPU_MARKER(cmdList, L"Cull Stats");
+            m_Renderer.DispatchEmitCullStats(
+                static_cast<uint32_t>(m_Model.GetInstanceCount()),
+                static_cast<uint32_t>(m_Model.GetTotalMeshletCount()),
+                m_OutputWidth, m_OutputHeight);
         }
 
         const bool rasterTaaActive = (m_AntiAliasingMode == AA_MODE_TAA) && m_Renderer.IsTaaEnabled() && !m_DebugShadowMap;
@@ -1103,15 +1113,19 @@ void Application::RenderImGui()
         ImGui::Checkbox("Occluded Depth Labels", &m_DebugDepthLabels);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Print the HZB depth duel (nearestDepth<hzbDepth m<mip>) above each\noccluded instance/meshlet, directly on the scene.\nRequires On-Screen Debug Text + Occlusion Culling (Phase 1+2).");
+        ImGui::Checkbox("Cull Stats Overlay", &m_CullStatsOverlay);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("On-screen table: total instance/meshlet counts, per-phase occluded\ninstance/meshlet counts, and derived visible totals.\nRequires On-Screen Debug Text + Occlusion Culling (Phase 1+2).");
     }
     else if (m_Renderer.GetMeshletDebugMode() != 0 || m_HZBDebugMip >= 0 || m_OccludedRectDebug
-             || m_DebugScreenText || m_DebugDepthLabels)
+             || m_DebugScreenText || m_DebugDepthLabels || m_CullStatsOverlay)
     {
         m_Renderer.SetMeshletDebugMode(0); // Reset debug when meshlet is disabled
         m_HZBDebugMip = -1;
         m_OccludedRectDebug = false;
         m_DebugScreenText = false;
         m_DebugDepthLabels = false;
+        m_CullStatsOverlay = false;
     }
 
     if (m_Renderer.IsRayTracingSupported())

@@ -20,7 +20,10 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
         std::cerr << "[GPUCulling] Failed to create VisibleMeshlets buffer" << std::endl;
         return;
     }
-    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
+    // Multi-element counters (2-element: [0]=Phase1, [1]=Phase2).
+    // The functional culling path only ever reads/writes [0] or [1] per invocation;
+    // the extra element is solely for debug-stats readback after both phases complete.
+    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t) * 2,
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleMeshletsCounter"))
     {
         std::cerr << "[GPUCulling] Failed to create VisibleMeshletsCounter" << std::endl;
@@ -31,13 +34,13 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
     if (!CreateStructuredBuffer(m_CandidateMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_CandidateMeshlets"))
         std::cerr << "[GPUCulling] Failed to create CandidateMeshlets buffer" << std::endl;
-    if (!CreateBuffer(m_CandidateMeshletsCounter, sizeof(uint32_t),
+    if (!CreateBuffer(m_CandidateMeshletsCounter, sizeof(uint32_t) * 2,
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_CandidateMeshletsCounter"))
         std::cerr << "[GPUCulling] Failed to create CandidateMeshletsCounter" << std::endl;
     if (!CreateStructuredBuffer(m_OccludedInstances, sizeof(uint32_t), static_cast<UINT>(MAX_VISIBLE_MESHLETS / 4),
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_OccludedInstances"))
         std::cerr << "[GPUCulling] Failed to create OccludedInstances buffer" << std::endl;
-    if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t),
+    if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t) * 2,
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_OccludedInstancesCounter"))
         std::cerr << "[GPUCulling] Failed to create OccludedInstancesCounter" << std::endl;
     if (!CreateStructuredBuffer(m_MeshletCullArgs, sizeof(uint32_t), 3,
@@ -62,6 +65,12 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                       true, true, "SB_OccludedRectsDebugCounter"))
         std::cerr << "[GPUCulling] Failed to create occluded-rects debug counter" << std::endl;
+
+    // Cull stats debug buffer — written by CopyCullStatsCS after each phase
+    if (!CreateBuffer(m_CullStatsBuffer, sizeof(uint32_t) * CULL_STATS_COUNT,
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      true, true, "SB_CullStats"))
+        std::cerr << "[GPUCulling] Failed to create CullStats buffer" << std::endl;
 
     // Mip-selection tint sideband
     if (!CreateStructuredBuffer(m_VisibleMeshletMips, sizeof(uint32_t), MAX_VISIBLE_MESHLETS,
@@ -270,6 +279,30 @@ void GPUCulling::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* main
                          "[GPUCulling] CreateComputePipelineState (depth readout) failed");
             }
         }
+        // Copy cull stats (1-thread CS: copies per-phase functional counters → debug stats buffer)
+        {
+            auto cs = GraphicsHelper::CompileShader("Shaders/CullStats.hlsl", "CopyCullStatsCS", "cs_6_6");
+            if (!cs.empty())
+            {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+                desc.pRootSignature = mainRootSignature;
+                desc.CS = { cs.data(), cs.size() };
+                CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_CopyCullStatsPSO)),
+                         "[GPUCulling] CreateComputePipelineState (CopyCullStats) failed");
+            }
+        }
+        // Cull stats overlay (1-thread CS: reads debug stats buffer, writes GPU debug text)
+        {
+            auto cs = GraphicsHelper::CompileShader("Shaders/CullStats.hlsl", "CullStatsCS", "cs_6_6");
+            if (!cs.empty())
+            {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+                desc.pRootSignature = mainRootSignature;
+                desc.CS = { cs.data(), cs.size() };
+                CHECK_HR(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_CullStatsPSO)),
+                         "[GPUCulling] CreateComputePipelineState (CullStats) failed");
+            }
+        }
     }
 
     // HZB PSOs
@@ -472,8 +505,41 @@ void GPUCulling::EmitDepthReadout(ID3D12GraphicsCommandList* cmdList, ID3D12Root
     cmdList->Dispatch(1, 1, 1);
 }
 
+void GPUCulling::EmitCullStats(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
+                                D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
+                                uint32_t dataUAVIdx, uint32_t glyphSRVIdx, float fontSize,
+                                uint32_t backbufferWidth, uint32_t backbufferHeight,
+                                uint32_t totalInstances, uint32_t totalMeshlets)
+{
+    if (!m_CullStatsPSO || !m_CullStatsBuffer.resource)
+        return;
+
+    GraphicsHelper::TransitionResource(cmdList, m_CullStatsBuffer,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    CullStatsParams params = {};
+    params.StatsBufferSRVIdx = static_cast<uint32_t>(m_CullStatsBuffer.srvIndex);
+    params.DataUAVIdx        = dataUAVIdx;
+    params.GlyphSRVIdx       = glyphSRVIdx;
+    params.FontSize          = fontSize;
+    params.TotalInstances    = totalInstances;
+    params.TotalMeshlets     = totalMeshlets;
+    params.BackbufferWidth   = backbufferWidth;
+    params.BackbufferHeight  = backbufferHeight;
+    params.StartX            = 10.0f;
+    params.StartY            = 10.0f;
+
+    cmdList->SetComputeRootSignature(mainRootSignature);
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
+    cmdList->SetPipelineState(m_CullStatsPSO.Get());
+    cmdList->SetComputeRoot32BitConstants(13, sizeof(CullStatsParams) / 4, &params, 0);
+    cmdList->Dispatch(1, 1, 1);
+}
+
 void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                               Model* model, bool occlusionEnabled, int phase)
+                               Model* model, bool occlusionEnabled, int phase,
+                               ID3D12RootSignature* mainRootSignature)
 {
     if (!m_CullInstancesPSO || !m_CullMeshletsPSO || !model->IsMeshletReady())
         return;
@@ -635,4 +701,49 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
         CD3DX12_RESOURCE_BARRIER::UAV(m_VisibleMeshletsCounter.resource.Get()),
     };
     cmdList->ResourceBarrier(2, finalBarriers);
+
+    // m_VisibleMeshletsCounter is read via SRV by TWO consumers after this point:
+    //   1. MeshletPass::BuildDispatchMeshArgs (always-on — builds the mesh-shader
+    //      dispatch args from the visible-meshlet count).
+    //   2. CopyCullStatsCS below (debug-only overlay).
+    // It was previously left tracked in UNORDERED_ACCESS state here (only a UAV
+    // barrier above, never a state transition), so both SRV reads were illegal
+    // (D3D12 debug layer: RESOURCE_STATE_MISMATCH — a resource must be in
+    // NON_PIXEL_SHADER_RESOURCE/PIXEL_SHADER_RESOURCE state to be read via SRV).
+    // Transition unconditionally — not gated on m_CopyCullStatsPSO — so
+    // BuildDispatchMeshArgs's read stays legal even if the debug PSOs failed
+    // to compile. CullTwoPass's own start-of-phase transition (back to
+    // UNORDERED_ACCESS, above) already accounts for this before the next
+    // culling dispatch writes it again.
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // Copy per-phase functional counters to the debug stats buffer.
+    // CopyCullStatsCS is a 1-thread compute shader that reads the current
+    // counter values and writes them to CullStatsBuffer at the appropriate slot.
+    // Uses the MAIN root signature (not m_CullRootSignature) so it can access
+    // root param 13 for CullStatsCopyParams.
+    if (m_CopyCullStatsPSO)
+    {
+        GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshletsCounter,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_OccludedInstancesCounter,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_CullStatsBuffer,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        CullStatsCopyParams copyParams = {};
+        copyParams.CandidateCounterSRVIdx = static_cast<uint32_t>(m_CandidateMeshletsCounter.srvIndex);
+        copyParams.VisibleCounterSRVIdx   = static_cast<uint32_t>(m_VisibleMeshletsCounter.srvIndex);
+        copyParams.OccludedCounterSRVIdx  = static_cast<uint32_t>(m_OccludedInstancesCounter.srvIndex);
+        copyParams.StatsBufferUAVIdx      = static_cast<uint32_t>(m_CullStatsBuffer.uavIndex);
+        // Two-phase: Phase 0 → slots [0..2], Phase 1 (SECOND) → slots [4..7]
+        // Frustum-only (occlusion disabled): single pass → slots [0..2]
+        copyParams.BaseSlot               = (occlusionEnabled && !isFirstPhase) ? 4u : 0u;
+
+        cmdList->SetComputeRootSignature(mainRootSignature);
+        cmdList->SetComputeRoot32BitConstants(13, sizeof(CullStatsCopyParams) / 4, &copyParams, 0);
+        cmdList->SetPipelineState(m_CopyCullStatsPSO.Get());
+        cmdList->Dispatch(1, 1, 1);
+    }
 }

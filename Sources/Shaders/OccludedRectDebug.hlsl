@@ -79,14 +79,14 @@ void OccludedRectsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     int2 spmin = clamp((int2)(smin * float2(DrawParams.Width, DrawParams.Height)), int2(0, 0), int2(DrawParams.Width - 1, DrawParams.Height - 1));
     int2 spmax = clamp((int2)(smax * float2(DrawParams.Width, DrawParams.Height)), int2(0, 0), int2(DrawParams.Width - 1, DrawParams.Height - 1));
 
-    for (int x = spmin.x; x <= spmax.x; ++x)
-    {
-        outTex[int2(x, spmin.y)] = float4(sampleColor, 1.0f);
-        outTex[int2(x, spmax.y)] = float4(sampleColor, 1.0f);
-    }
-    for (int y = spmin.y; y <= spmax.y; ++y)
-    {
-        outTex[int2(spmin.x, y)] = float4(sampleColor, 1.0f);
-        outTex[int2(spmax.x, y)] = float4(sampleColor, 1.0f);
-    }
+    // for (int x = spmin.x; x <= spmax.x; ++x)
+    // {
+    //     outTex[int2(x, spmin.y)] = float4(sampleColor, 1.0f);
+    //     outTex[int2(x, spmax.y)] = float4(sampleColor, 1.0f);
+    // }
+    // for (int y = spmin.y; y <= spmax.y; ++y)
+    // {
+    //     outTex[int2(spmin.x, y)] = float4(sampleColor, 1.0f);
+    //     outTex[int2(spmax.x, y)] = float4(sampleColor, 1.0f);
+    // }
 }

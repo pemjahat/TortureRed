@@ -134,10 +134,11 @@ struct LightConstants {
     uint padding[2];
 };
 
-// Meshlet rasterization PSO bin — determines which PSO permutation renders a meshlet.
-// Must match PipelineBin enum in Renderer.h and the shader's GetBin() function.
-#define RASTER_BIN_OPAQUE       0u  // Standard opaque: back-face cull, no alpha test
-#define RASTER_BIN_ALPHA_MASKED 1u  // Alpha-tested: no cull, discard in PS
+// alphaMode values (shared CPU/GPU — must match cgltf alpha mode enum)
+// 0 = Opaque, 1 = Mask (alpha-test), 2 = Blend (alpha-blended; rejected by meshlet pipeline)
+#define ALPHA_MODE_OPAQUE 0u
+#define ALPHA_MODE_MASK   1u
+#define ALPHA_MODE_BLEND  2u
 
 struct MaterialConstants {
     float4 baseColorFactor;
@@ -146,9 +147,9 @@ struct MaterialConstants {
     int baseColorTextureIndex;
     int normalTextureIndex;
     int metallicRoughnessTextureIndex;
-    int alphaMode;
+    int alphaMode;      // ALPHA_MODE_OPAQUE / ALPHA_MODE_MASK / ALPHA_MODE_BLEND
     float alphaCutoff;
-    uint RasterBin;  // RASTER_BIN_OPAQUE or RASTER_BIN_ALPHA_MASKED
+    uint _pad;
 };
 
 struct DrawNodeData {
@@ -264,8 +265,8 @@ struct MeshData {
     uint MeshletCount;
     uint MaterialIndex;
     uint GlobalMeshletStart;   // Global meshlet index where this entry's meshlets begin (CPU prefix-sum)
-    uint _pad1;
-    uint _pad2;
+    uint AlphaMode;            // ALPHA_MODE_OPAQUE / ALPHA_MODE_MASK / ALPHA_MODE_BLEND
+    uint _pad;
 };
 
 struct InstanceData {
@@ -297,30 +298,16 @@ struct MeshletCandidate {
 };
 
 // =============================================================================
-// Meshlet Binning / Rasterize Params (shared CPU/GPU, passed via root constants b1)
+// Meshlet Dispatch / Rasterize Params (shared CPU/GPU, passed via root constants b1)
 // =============================================================================
 
-// Passed to all 4 binning CS passes via root param 12 (b1).
-// Each pass uses only the fields it needs; unused fields are zero.
-struct BinningParams {
-    uint NumBins;                       // NUM_RASTER_BINS (2)
-    uint VisibleMeshletsIdx;            // SRV index of VisibleMeshlets[]
-    uint VisibleMeshletsCounterIdx;     // SRV index of VisibleMeshletsCounter
-    uint MeshletCountsIdx;              // SRV index of MeshletCounts[] (for AllocateBinRanges)
-    uint RWMeshletCountsIdx;            // UAV index of MeshletCounts[]
-    uint RWMeshletOffsetAndCountsIdx;   // UAV index of MeshletOffsetAndCounts[]
-    uint RWBinnedMeshletsIdx;           // UAV index of BinnedMeshlets[]
-    uint RWGlobalMeshletCounterIdx;     // UAV index of GlobalMeshletCounter
-    uint RWDispatchArgumentsIdx;        // UAV index of ClassifyDispatchArgs
-    uint RWDispatchMeshArgsIdx;         // UAV index of DispatchMeshArgs[] — uint3[NUM_BINS], used as INDIRECT_ARGUMENT
-};
-
 // Passed to the Mesh Shader rasterize pass via root param 12 (b1).
+// With no binning, the mesh shader directly indexes VisibleMeshlets[SV_GroupID].
 struct RasterParams {
-    uint BinIndex;              // Which bin this DispatchMesh call is for
-    uint VisibleMeshletsIdx;    // SRV index of VisibleMeshlets[]
-    uint BinnedMeshletsIdx;     // SRV index of BinnedMeshlets[]
-    uint MeshletBinDataIdx;     // SRV index of MeshletOffsetAndCounts[]
+    uint VisibleMeshletsIdx;         // SRV index of VisibleMeshlets[] (for rasterize MS)
+    uint DispatchMeshArgsIdx;        // UAV index of DispatchMeshArgs (for BuildDispatchMeshArgsCS)
+    uint VisibleMeshletsCounterIdx;  // SRV index of VisibleMeshletsCounter (for BuildDispatchMeshArgsCS)
+    uint _pad;
 };
 
 // =============================================================================
@@ -503,6 +490,52 @@ struct TwoPassCullConstants {
     // read back by the debug overlay via the vis token's candidateIndex.
     uint  DebugRecordMip;              // 1 = write the occlusion test's mip per surviving meshlet
     uint  VisibleMeshletMipsUAVIdx;    // UAV bindless index of VisibleMeshletMips[]
+};
+
+// =============================================================================
+// CullStats — per-phase culling counters copied from the functional counters
+// into a dedicated debug buffer after each phase completes. Consumed by
+// CullStatsCS for on-screen overlay.
+// =============================================================================
+
+// CullStatsBuffer layout (RWStructuredBuffer<uint>[16]):
+#define CULL_STATS_P1_CANDIDATE_MESHLETS   0  // CandidateMeshletsCounter after Phase 1
+#define CULL_STATS_P1_VISIBLE_MESHLETS     1  // VisibleMeshletsCounter after Phase 1
+#define CULL_STATS_P1_OCCLUDED_INSTANCES   2  // OccludedInstancesCounter (deferred) after Phase 1
+#define CULL_STATS_P1_TOTAL_INSTANCES      3  // Total instances fed to Phase 1 (= NumInstances)
+#define CULL_STATS_P2_CANDIDATE_MESHLETS   4  // CandidateMeshletsCounter after Phase 2
+#define CULL_STATS_P2_VISIBLE_MESHLETS     5  // VisibleMeshletsCounter after Phase 2
+#define CULL_STATS_P2_OCCLUDED_INSTANCES   6  // OccludedInstances in Phase 2
+#define CULL_STATS_P2_INPUT_INSTANCES      7  // Phase 2 input instance count (= P1 OccludedInstances)
+#define CULL_STATS_TOTAL_MESHLETS          8  // Total meshlets across all instances (CPU-provided)
+#define CULL_STATS_COUNT                   16
+
+// Passed to CopyCullStatsCS via root constants.
+// For P1: BaseSlot=0 copies Candidate[0],Visible[0],Occluded[0] → Stats[0..2]
+// For P2: BaseSlot=4 copies Candidate[0],Visible[0] → Stats[4..5], Occluded[0]→Stats[7]
+//         plus P2 OccludedInstancesP2SRVIdx → Stats[6]
+struct CullStatsCopyParams {
+    uint CandidateCounterSRVIdx;     // SRV heap index of CandidateMeshletsCounter (1-element per-phase)
+    uint VisibleCounterSRVIdx;       // SRV heap index of VisibleMeshletsCounter
+    uint OccludedCounterSRVIdx;      // SRV heap index of OccludedInstancesCounter (P1=deferred, P2=occluded-P2)
+    uint StatsBufferUAVIdx;          // UAV heap index of CullStatsBuffer
+    uint BaseSlot;                   // 0 for Phase 1, 4 for Phase 2
+    uint _pad[3];
+};
+
+// Passed to CullStatsCS via root constants — reads the debug stats buffer and
+// renders an on-screen table via the GPU debug-text system.
+struct CullStatsParams {
+    uint StatsBufferSRVIdx;          // SRV heap index of CullStatsBuffer
+    uint DataUAVIdx;                 // Debug text render-data UAV index
+    uint GlyphSRVIdx;                // Debug glyph atlas SRV index
+    float FontSize;                  // Native font line height in pixels
+    uint TotalInstances;             // CPU-provided: total instances in scene
+    uint TotalMeshlets;              // CPU-provided: total meshlets across all instances
+    uint BackbufferWidth;
+    uint BackbufferHeight;
+    float StartX;                    // Top-left pixel X
+    float StartY;                    // Top-left pixel Y
 };
 
 #endif // SHARED_TYPES_H

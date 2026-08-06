@@ -204,6 +204,18 @@ bool DebugTextRenderer::CreateFontAtlas(ID3D12Device* device, ID3D12CommandQueue
     }
     CloseHandle(evt);
 
+    // The barriers above were issued manually on the one-shot upload command list
+    // (not through GPUResource::Transition / GraphicsHelper::TransitionResource),
+    // so the cached .state fields are still stuck at their creation-time value
+    // (COMMON). Sync them to the real, final GPU state now — otherwise the next
+    // TransitionResource(m_FontAtlas, PIXEL_SHADER_RESOURCE) call in Render()
+    // thinks a transition FROM COMMON is needed and emits a barrier whose
+    // "before" state (COMMON) no longer matches the resource's actual tracked
+    // state (PIXEL_SHADER_RESOURCE), triggering a
+    // RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH validation error.
+    m_FontAtlas.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_GlyphData.state = D3D12_RESOURCE_STATE_GENERIC_READ;
+
     std::cout << "[DebugText] Font atlas created (" << width << "x" << height << ", " << (int)m_FontSize << "px)" << std::endl;
     return true;
 }

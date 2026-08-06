@@ -5,29 +5,19 @@
     Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization —
     DIRECT-TO-GBUFFER variant.
 
-    Used when the Visibility Buffer pipeline is disabled (m_UseVisibilityBuffer=false
-    in Application.cpp). Unlike MeshletRasterizeMS.hlsl (which writes only a compact
-    visibility token and defers shading to VisibilityGBuffer.hlsl), this shader does
-    the full material sampling / GBuffer write inline in the pixel shader — one shade
-    per rasterized fragment, same as the classic forward+deferred hybrid used before
-    the Visibility Buffer split. Useful for A/B comparison and as a fallback path.
+    Used when the Visibility Buffer pipeline is disabled. Unlike the Visibility
+    Buffer variant (MeshletRasterizeMS.hlsl), this shader does the full material
+    sampling / GBuffer write inline in the pixel shader — one shade per rasterized
+    fragment.
 
-    It still writes the visibility token to SV_Target3 so the meshlet debug overlay
-    (VisibilityDebugView.hlsl) keeps working regardless of which path is active.
-
-    MSMain: one thread group per visible meshlet (SV_GroupID → bin indirection → MeshletCandidate).
-            32 threads process up to MESHLET_MAX_VERTICES vertices and MESHLET_MAX_TRIANGLES triangles.
+    MSMain: one thread group per visible meshlet (SV_GroupID → MeshletCandidate directly,
+            no bin indirection). 32 threads.
     PSMain: writes GBuffers directly — albedo (R8G8B8A8_UNORM), normal (R16G16B16A16_FLOAT),
             roughness|metallic (R8G8B8A8_UNORM), plus visibility token (R32_UINT).
 
-    Compile permutations:
-        ALPHA_MASK=0  — Opaque bin (back-face cull, no alpha discard)
-        ALPHA_MASK=1  — AlphaMasked bin (no cull, alpha discard in PS)
+    No ALPHA_MASK permutation — single combined PSO handles both opaque and alpha-masked.
+    Alpha-blended instances are rejected in CullInstancesCS.
 */
-
-#ifndef ALPHA_MASK
-#define ALPHA_MASK 0
-#endif
 
 #define NUM_MESHLET_THREADS 32
 
@@ -53,7 +43,7 @@ SamplerState g_LinearSampler : register(s0);
 // Per-frame constants
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
-// Per-bin raster params (root constants b1)
+// Raster params (root constants b1)
 ConstantBuffer<RasterParams> gRasterParams : register(b1);
 
 // --- Per-primitive output ---
@@ -74,6 +64,7 @@ struct VertexAttribute
 };
 
 // --- Mesh Shader Entry Point ---
+// No bin indirection — groupID directly indexes VisibleMeshlets[].
 [outputtopology("triangle")]
 [numthreads(NUM_MESHLET_THREADS, 1, 1)]
 void MSMain(
@@ -83,16 +74,10 @@ void MSMain(
     out indices   uint3            triangles[MESHLET_MAX_TRIANGLES],
     out primitives PrimitiveAttribute primitives[MESHLET_MAX_TRIANGLES])
 {
-    // Resolve meshlet index via bin indirection:
-    //   BinnedMeshlets[groupID + binOffset] → index into VisibleMeshlets[]
-    StructuredBuffer<uint4>            binData        = ResourceDescriptorHeap[gRasterParams.MeshletBinDataIdx];
-    StructuredBuffer<uint>             binnedMeshlets = ResourceDescriptorHeap[gRasterParams.BinnedMeshletsIdx];
+    // Direct indexing: no bins — VisibleMeshlets[groupID] is the meshlet candidate
     StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsIdx];
+    MeshletCandidate cand = visibleMeshlets[groupID];
 
-    uint binOffset    = binData[gRasterParams.BinIndex].w;
-    uint meshletIndex = binnedMeshlets[binOffset + groupID];
-
-    MeshletCandidate cand = visibleMeshlets[meshletIndex];
     InstanceData inst     = GlobalInstanceData[cand.InstanceID];
     MeshData md           = GlobalMeshData[inst.MeshDataIndex];
     Meshlet m             = GlobalMeshlets[md.MeshletOffset + cand.MeshletIndex];
@@ -126,7 +111,7 @@ void MSMain(
 
         PrimitiveAttribute pri;
         pri.PrimitiveID    = i;
-        pri.CandidateIndex = meshletIndex;
+        pri.CandidateIndex = groupID;
         primitives[i] = pri;
     }
 }
@@ -136,8 +121,8 @@ void MSMain(
 //   SV_Target0: R8G8B8A8_UNORM       — albedo
 //   SV_Target1: R16G16B16A16_FLOAT   — packed normal (world-space, [0,1])
 //   SV_Target2: R8G8B8A8_UNORM       — roughness | metallic
-//   SV_Target3: R32_UINT             — visibility token (debug overlay only — no resolve pass reads it)
-// Material sampling mirrors Gbuffer.hlsl PSMain / VisibilityGBuffer.hlsl exactly.
+//   SV_Target3: R32_UINT             — visibility token
+// Unconditional alpha discard — correct for both Opaque and Masked.
 struct GBufferOutput
 {
     float4 albedo   : SV_Target0;
@@ -157,11 +142,11 @@ GBufferOutput PSMain(
     if (matConstants.baseColorTextureIndex >= 0)
         albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
 
-    // --- Alpha discard (only for alpha-masked bin) ---
-#if ALPHA_MASK
-    if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
+    // --- Alpha discard (unconditional, handles Opaque + Mask) ---
+    // For opaque (alphaMode==0), alphaCutoff is 0 so this is always a no-op.
+    // For masked (alphaMode==1), performs actual alpha-test.
+    if (albedo.a < matConstants.alphaCutoff)
         discard;
-#endif
 
     // --- Roughness / Metallic ---
     float roughness = matConstants.roughnessFactor;

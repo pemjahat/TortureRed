@@ -224,7 +224,7 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
 
         cmdList->SetPipelineState(debugActive
             ? renderer->GetFullScreenDebugHdrPSO()
-            : m_LightingPSO.Get());
+            : m_LightingHdrPSO.Get());
     }
     else
     {
@@ -245,7 +245,7 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
         cmdList->SetPipelineState(
             debugShadowMap ? renderer->GetDebugPSO() :
             debugActive    ? renderer->GetFullScreenDebugPSO() :
-                              m_LightingHdrPSO.Get());
+                              m_LightingPSO.Get());
     }
 
     cmdList->DrawInstanced(3, 1, 0, 0); // Fullscreen triangle

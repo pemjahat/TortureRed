@@ -156,8 +156,8 @@ public:
     // Hierarchical two-stage meshlet culling: CullInstancesCS → CullMeshletsCS (GPUCulling).
     void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
                                      bool occlusionEnabled, int phase, bool freezeCulling = false);
-    void DispatchMeshletBinning();                    // 4-pass GPU sort: Classify → Allocate → Write
-    void DispatchMeshletRasterize(class Model* model, bool useVisibilityBuffer); // Mesh Shader rasterize per bin
+    void DispatchMeshletBuildDispatchArgs();          // 1-thread CS: builds indirect DispatchMesh args from counter
+    void DispatchMeshletRasterize(class Model* model, bool useVisibilityBuffer); // Mesh Shader rasterize — single ExecuteIndirect
     void DispatchVisibilityGBufferResolve(class Model* model); // Full-screen: visibility token -> albedo/normal/material
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 
@@ -180,6 +180,13 @@ public:
     { m_GPUCulling.EmitDepthReadout(m_CommandList.Get(), m_RootSignature.Get(),
                                  GetDebugRenderDataUAVIndex(), GetDebugGlyphSRVIndex(), GetDebugFontSize(),
                                  backbufferWidth, backbufferHeight); }
+    void SetShowCullStats(bool show) { m_GPUCulling.SetShowCullStats(show); }
+    bool GetShowCullStats() const { return m_GPUCulling.GetShowCullStats(); }
+    void DispatchEmitCullStats(uint32_t totalInstances, uint32_t totalMeshlets,
+                                uint32_t backbufferWidth, uint32_t backbufferHeight)
+    { m_GPUCulling.EmitCullStats(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
+                                  GetDebugRenderDataUAVIndex(), GetDebugGlyphSRVIndex(), GetDebugFontSize(),
+                                  backbufferWidth, backbufferHeight, totalInstances, totalMeshlets); }
 
     // Visibility buffer for meshlet debug overlay — delegated to MeshletPass (vis buf) / GPUCulling (mips)
     GPUTexture& GetVisibilityBuffer() { return m_Meshlet.GetVisibilityBuffer(); }

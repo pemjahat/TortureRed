@@ -2,31 +2,29 @@
 #include "VisibilityBuffer.hlsli"
 
 /*
-    Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization.
+    Mesh Shader + Pixel Shader for GPU-driven meshlet rasterization — Visibility Buffer variant.
 
     Proper Visibility Buffer split (mirrors D3D12_Research's MeshletRasterize.hlsl):
     this pass ONLY rasterizes geometry and writes the compact per-pixel visibility
     token (candidate index + primitive ID) plus depth. No material sampling and no
     GBuffer output happens here — that work is deferred to the full-screen
     VisibilityGBuffer.hlsl resolve pass, which runs once per screen pixel instead of
-    once per rasterized fragment (avoids redundant shading of overlapping/occluded
-    triangles and keeps this pass's PS trivially cheap).
+    once per rasterized fragment.
 
-    MSMain: one thread group per visible meshlet (SV_GroupID → bin indirection → MeshletCandidate).
-            32 threads process up to MESHLET_MAX_VERTICES vertices and MESHLET_MAX_TRIANGLES triangles.
+    MSMain: one thread group per visible meshlet (SV_GroupID → MeshletCandidate directly,
+            no bin indirection). 32 threads process up to MESHLET_MAX_VERTICES vertices
+            and MESHLET_MAX_TRIANGLES triangles.
     PSMain: writes ONLY the visibility token (R32_UINT) to SV_Target0.
-            ALPHA_MASK permutation samples the base color texture to alpha-test
-            before the token is written (so invisible fragments never occlude
-            geometry behind them).
+            UNCONDITIONAL alpha discard: for alpha-masked materials, the base color
+            texture is sampled to alpha-test before the token is written (so invisible
+            fragments never occlude geometry behind them). For opaque materials,
+            the discard test is a no-op (alphaCutoff = 0, alpha >= 0 always passes).
+            Alpha-blended instances are already rejected in CullInstancesCS and never
+            reach this shader.
 
-    Compile permutations:
-        ALPHA_MASK=0  — Opaque bin (back-face cull, no alpha discard)
-        ALPHA_MASK=1  — AlphaMasked bin (no cull, alpha discard in PS)
+    No ALPHA_MASK permutation — single combined PSO handles both opaque and alpha-masked
+    meshlets (Adria-style no-binning design).
 */
-
-#ifndef ALPHA_MASK
-#define ALPHA_MASK 0
-#endif
 
 #define NUM_MESHLET_THREADS 32
 
@@ -42,17 +40,17 @@ StructuredBuffer<MeshletBounds>    GlobalMeshletBounds     : register(t6, space3
 StructuredBuffer<MeshData>         GlobalMeshData          : register(t7, space3);
 StructuredBuffer<InstanceData>     GlobalInstanceData      : register(t8, space3);
 
-// Material buffer (root SRV param 1, t0 space1) — only needed by the ALPHA_MASK permutation
+// Material buffer (root SRV param 1, t0 space1) — always needed for alpha discard
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
-// Bindless textures (space0) — only needed by the ALPHA_MASK permutation
+// Bindless textures (space0) — always needed for alpha discard
 Texture2D g_Textures[] : register(t0, space0);
 SamplerState g_LinearSampler : register(s0);
 
 // Per-frame constants
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
-// Per-bin raster params (root constants b1)
+// Raster params (root constants b1)
 ConstantBuffer<RasterParams> gRasterParams : register(b1);
 
 // --- Per-primitive output ---
@@ -63,19 +61,16 @@ struct PrimitiveAttribute
 };
 
 // --- Per-vertex output ---
-// Visibility-only: just clip position, plus UV/MaterialID for the alpha-masked bin's
-// alpha test. Surface attributes (world pos/normal) are reconstructed later by
-// VisibilityGBuffer.hlsl from the candidate + primitiveID token, not carried here.
+// Always includes UV + MaterialID for unconditional alpha discard (no ALPHA_MASK permutation).
 struct VertexAttribute
 {
     float4 Position : SV_Position;
-#if ALPHA_MASK
     float2 UV       : TEXCOORD;
     nointerpolation uint MaterialID : MATERIAL_ID;
-#endif
 };
 
 // --- Mesh Shader Entry Point ---
+// No bin indirection — groupID directly indexes VisibleMeshlets[].
 [outputtopology("triangle")]
 [numthreads(NUM_MESHLET_THREADS, 1, 1)]
 void MSMain(
@@ -85,16 +80,10 @@ void MSMain(
     out indices   uint3            triangles[MESHLET_MAX_TRIANGLES],
     out primitives PrimitiveAttribute primitives[MESHLET_MAX_TRIANGLES])
 {
-    // Resolve meshlet index via bin indirection:
-    //   BinnedMeshlets[groupID + binOffset] → index into VisibleMeshlets[]
-    StructuredBuffer<uint4>            binData        = ResourceDescriptorHeap[gRasterParams.MeshletBinDataIdx];
-    StructuredBuffer<uint>             binnedMeshlets = ResourceDescriptorHeap[gRasterParams.BinnedMeshletsIdx];
+    // Direct indexing: no bins — VisibleMeshlets[groupID] is the meshlet candidate
     StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsIdx];
+    MeshletCandidate cand = visibleMeshlets[groupID];
 
-    uint binOffset    = binData[gRasterParams.BinIndex].w;
-    uint meshletIndex = binnedMeshlets[binOffset + groupID];
-
-    MeshletCandidate cand = visibleMeshlets[meshletIndex];
     InstanceData inst     = GlobalInstanceData[cand.InstanceID];
     MeshData md           = GlobalMeshData[inst.MeshDataIndex];
     Meshlet m             = GlobalMeshlets[md.MeshletOffset + cand.MeshletIndex];
@@ -111,10 +100,8 @@ void MSMain(
 
         VertexAttribute v;
         v.Position   = clipPos;
-#if ALPHA_MASK
         v.UV         = UnpackUVRG16(GlobalUVs, md.UVOffset, globalVtxIdx);
         v.MaterialID = md.MaterialIndex;
-#endif
         verts[i] = v;
     }
 
@@ -126,7 +113,7 @@ void MSMain(
 
         PrimitiveAttribute pri;
         pri.PrimitiveID    = i;
-        pri.CandidateIndex = meshletIndex;
+        pri.CandidateIndex = groupID;
         primitives[i] = pri;
     }
 }
@@ -134,7 +121,10 @@ void MSMain(
 // --- Pixel Shader ---
 // Outputs a single render target:
 //   SV_Target0: R32_UINT — visibility token (candidate index + primitive ID)
-// No material/GBuffer work happens here — see VisibilityGBuffer.hlsl.
+// Unconditional alpha discard (no ALPHA_MASK permutation):
+//   - alphaMode == ALPHA_MODE_MASK (1): discard if alpha < cutoff
+//   - alphaMode == ALPHA_MODE_OPAQUE (0): alphaCutoff = 0, never discards
+//   - alphaMode == ALPHA_MODE_BLEND (2): rejected by culling, never reaches here
 struct VisOutput
 {
     uint visToken : SV_Target0;
@@ -144,16 +134,17 @@ VisOutput PSMain(
     VertexAttribute vertexData,
     PrimitiveAttribute primitiveData)
 {
-#if ALPHA_MASK
-    // Alpha discard must happen during rasterization: a discarded fragment must not
-    // occlude/win the depth test, so it must never reach the visibility buffer.
     MaterialConstants matConstants = MaterialBuffer[vertexData.MaterialID];
+
+    // Alpha discard — unconditional, correct for both Opaque and Alpha-Masked materials
+    // For opaque (alphaMode==0), alphaCutoff is 0 so this is always a no-op.
+    // For masked (alphaMode==1), performs actual alpha-test.
+    // For blend (alphaMode==2), rejected by culling — never reaches this shader.
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
         albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
-    if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
+    if (albedo.a < matConstants.alphaCutoff)
         discard;
-#endif
 
     VisOutput output;
     output.visToken = PackVisBuffer(primitiveData.CandidateIndex, primitiveData.PrimitiveID);

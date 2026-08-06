@@ -1,174 +1,37 @@
-#include "MeshletCommon.hlsli"
+// =============================================================================
+// MeshletBinning.hlsl — BuildDispatchMeshArgsCS
+//
+// Single-thread compute shader: reads the VisibleMeshletsCounter and writes
+// a single D3D12_DISPATCH_MESH_ARGUMENTS entry (3 uints) used by ExecuteIndirect.
+//
+// Alpha-blended instances are rejected in CullInstancesCS.
+// =============================================================================
 
-/*
-    Meshlet Binning — 4-pass GPU sort
-    Classifies visible meshlets by PSO bin (Opaque / AlphaMasked) and builds
-    a sorted indirection list so each bin can be drawn with a single DispatchMesh.
+#include "Shared/SharedTypes.h"
 
-    Pass 1 — PrepareArgsCS:
-        Zero MeshletCounts[], GlobalMeshletCounter.
-        Build ClassifyDispatchArgs from VisibleMeshletsCounter.
+// Root param 12 (b1): RasterParams — contains raw descriptor heap indices
+ConstantBuffer<RasterParams> Params : register(b1, space0);
 
-    Pass 2 — ClassifyMeshletsCS (indirect):
-        For each visible meshlet, look up material.RasterBin and increment that bin's counter.
+// VisibleMeshletsCounter (SRV) — single uint counter written by culling
+StructuredBuffer<uint> VisibleMeshletsCounter : register(t0, space4);
 
-    Pass 3 — AllocateBinRangesCS:
-        Prefix-sum on MeshletCounts → writes MeshletOffsetAndCounts[bin] = uint4(0, 1, 1, offset).
+// DispatchMeshArgs (UAV) — D3D12_DISPATCH_MESH_ARGUMENTS (3 uints)
+RWStructuredBuffer<uint> DispatchMeshArgs : register(u0, space4);
 
-    Pass 4 — WriteBinsCS (indirect):
-        For each visible meshlet, write its index into BinnedMeshlets[] at its bin's offset.
-
-    All params are passed via root constants (b1) as BinningParams.
-    Bindless access via ResourceDescriptorHeap[].
-*/
-
-ConstantBuffer<BinningParams> gParams : register(b1);
-
-// Indirect dispatch args struct (mirrors D3D12_DISPATCH_ARGUMENTS)
-struct DispatchArgs
-{
-    uint3 ThreadGroupCount;
-};
-
-// Helper: get the number of visible meshlets
-uint GetNumMeshlets()
-{
-    StructuredBuffer<uint> counter = ResourceDescriptorHeap[gParams.VisibleMeshletsCounterIdx];
-    return counter[0];
-}
-
-// Helper: get the PSO bin for a given visible meshlet index
-// For now, all meshlets go to Opaque bin (RASTER_BIN_OPAQUE = 0).
-// TODO: look up material.RasterBin via InstanceData → MeshData → MaterialBuffer.
-uint GetBin(uint meshletIndex)
-{
-    (void)meshletIndex;
-    return RASTER_BIN_OPAQUE;
-}
-
-// ---- Pass 1: PrepareArgsCS ----
 [numthreads(1, 1, 1)]
-void PrepareArgsCS()
+void BuildDispatchMeshArgsCS(uint3 tid : SV_DispatchThreadID)
 {
-    RWStructuredBuffer<uint>        meshletCounts = ResourceDescriptorHeap[gParams.RWMeshletCountsIdx];
-    RWStructuredBuffer<uint>        globalCounter = ResourceDescriptorHeap[gParams.RWGlobalMeshletCounterIdx];
-    RWStructuredBuffer<DispatchArgs> dispatchArgs = ResourceDescriptorHeap[gParams.RWDispatchArgumentsIdx];
+    uint srvIdx = Params.VisibleMeshletsCounterIdx;
+    uint uavIdx = Params.DispatchMeshArgsIdx;
 
-    // Zero per-bin counts
-    for (uint i = 0; i < gParams.NumBins; ++i)
-        meshletCounts[i] = 0;
-    globalCounter[0] = 0;
+    // Read the atomic counter written by CullInstancesCS
+    StructuredBuffer<uint> counter = ResourceDescriptorHeap[srvIdx];
+    uint meshletCount = counter[0];
 
-    // Build indirect dispatch args for Classify/Write passes
-    uint numMeshlets = GetNumMeshlets();
-    DispatchArgs args;
-    args.ThreadGroupCount = uint3((numMeshlets + 63) / 64, 1, 1);
-    dispatchArgs[0] = args;
-}
-
-// ---- Pass 2: ClassifyMeshletsCS ----
-[numthreads(64, 1, 1)]
-void ClassifyMeshletsCS(uint threadID : SV_DispatchThreadID)
-{
-    if (threadID >= GetNumMeshlets())
-        return;
-
-    RWStructuredBuffer<uint> meshletCounts = ResourceDescriptorHeap[gParams.RWMeshletCountsIdx];
-
-    uint bin = GetBin(threadID);
-
-    // Wave-ops optimized: accumulate counts for threads with the same bin
-    bool finished = false;
-    while (WaveActiveAnyTrue(!finished))
-    {
-        if (!finished)
-        {
-            const uint firstBin = WaveReadLaneFirst(bin);
-            if (firstBin == bin)
-            {
-                uint count = WaveActiveCountBits(true);
-                uint originalValue;
-                if (WaveIsFirstLane())
-                    InterlockedAdd(meshletCounts[firstBin], count, originalValue);
-                finished = true;
-            }
-        }
-    }
-}
-
-// ---- Pass 3: AllocateBinRangesCS ----
-[numthreads(64, 1, 1)]
-void AllocateBinRangesCS(uint threadID : SV_DispatchThreadID)
-{
-    if (threadID >= gParams.NumBins)
-        return;
-
-    StructuredBuffer<uint>    meshletCounts          = ResourceDescriptorHeap[gParams.MeshletCountsIdx];
-    RWStructuredBuffer<uint4> meshletOffsetAndCounts = ResourceDescriptorHeap[gParams.RWMeshletOffsetAndCountsIdx];
-    RWStructuredBuffer<uint>  globalCounter          = ResourceDescriptorHeap[gParams.RWGlobalMeshletCounterIdx];
-    RWStructuredBuffer<uint>  dispatchMeshArgs       = ResourceDescriptorHeap[gParams.RWDispatchMeshArgsIdx];
-
-    uint numMeshlets = meshletCounts[threadID];
-
-    // Prefix sum within wave
-    uint offset = WavePrefixSum(numMeshlets);
-    uint globalOffset = 0;
-    if (WaveIsFirstLane())
-    {
-        uint waveTotal = WaveActiveSum(numMeshlets);
-        InterlockedAdd(globalCounter[0], waveTotal, globalOffset);
-    }
-    offset += WaveReadLaneFirst(globalOffset);
-
-    // MeshletOffsetAndCounts: SRV-only data read by the mesh shader (binOffset lookup)
-    // uint4(count=0, 1, 1, offset) — count is filled by WriteBinsCS; offset is the bin start in BinnedMeshlets[]
-    meshletOffsetAndCounts[threadID] = uint4(0, 1, 1, offset);
-
-    // DispatchMeshArgs: separate buffer used exclusively as INDIRECT_ARGUMENT for ExecuteIndirect.
-    // Stores uint3(ThreadGroupCountX, 1, 1) per bin — count filled by WriteBinsCS.
-    // Written as 3 consecutive uints at threadID*3 to match D3D12_DISPATCH_MESH_ARGUMENTS layout.
-    dispatchMeshArgs[threadID * 3 + 0] = 0; // ThreadGroupCountX — filled by WriteBinsCS
-    dispatchMeshArgs[threadID * 3 + 1] = 1; // ThreadGroupCountY
-    dispatchMeshArgs[threadID * 3 + 2] = 1; // ThreadGroupCountZ
-}
-
-// ---- Pass 4: WriteBinsCS ----
-[numthreads(64, 1, 1)]
-void WriteBinsCS(uint threadID : SV_DispatchThreadID)
-{
-    if (threadID >= GetNumMeshlets())
-        return;
-
-    RWStructuredBuffer<uint4> meshletOffsetAndCounts = ResourceDescriptorHeap[gParams.RWMeshletOffsetAndCountsIdx];
-    RWStructuredBuffer<uint>  binnedMeshlets         = ResourceDescriptorHeap[gParams.RWBinnedMeshletsIdx];
-    RWStructuredBuffer<uint>  dispatchMeshArgs       = ResourceDescriptorHeap[gParams.RWDispatchMeshArgsIdx];
-
-    uint bin = GetBin(threadID);
-    uint offset = meshletOffsetAndCounts[bin].w;
-    uint meshletOffset = 0;
-
-    // Wave-ops optimized: batch-write indices for threads with the same bin
-    bool finished = false;
-    while (WaveActiveAnyTrue(!finished))
-    {
-        if (!finished)
-        {
-            const uint firstBin = WaveReadLaneFirst(bin);
-            if (firstBin == bin)
-            {
-                uint count = WaveActiveCountBits(true);
-                uint originalValue;
-                if (WaveIsFirstLane())
-                {
-                    // Increment both MeshletOffsetAndCounts.x (SRV data) and DispatchMeshArgs[bin*3+0] (indirect arg)
-                    InterlockedAdd(meshletOffsetAndCounts[firstBin].x, count, originalValue);
-                    InterlockedAdd(dispatchMeshArgs[firstBin * 3 + 0], count, originalValue);
-                }
-                meshletOffset = WaveReadLaneFirst(originalValue) + WavePrefixCountBits(true);
-                finished = true;
-            }
-        }
-    }
-
-    binnedMeshlets[offset + meshletOffset] = threadID;
+    // Build indirect DispatchMesh arguments: ThreadGroupCountX = meshletCount
+    // Each group processes 1 meshlet; ThreadGroupCountY = ThreadGroupCountZ = 1.
+    RWStructuredBuffer<uint> args = ResourceDescriptorHeap[uavIdx];
+    args[0] = meshletCount; // ThreadGroupCountX
+    args[1] = 1;            // ThreadGroupCountY
+    args[2] = 1;            // ThreadGroupCountZ
 }

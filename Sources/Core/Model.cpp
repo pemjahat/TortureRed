@@ -526,11 +526,6 @@ void Model::LoadMaterials()
 
         mc.alphaCutoff = material->alpha_cutoff;
 
-        // Assign PSO bin for meshlet rasterizer:
-        // Alpha-masked materials go to bin 1 (no cull, alpha discard in PS).
-        // Opaque and blend materials go to bin 0 (back-face cull).
-        mc.RasterBin = (mc.alphaMode == 1) ? RASTER_BIN_ALPHA_MASKED : RASTER_BIN_OPAQUE;
-
         if (material->has_pbr_metallic_roughness)
         {
             mc.baseColorFactor = DirectX::XMFLOAT4(
@@ -1450,6 +1445,7 @@ void Model::CreateMeshletResources(Renderer* renderer)
             md.MeshletCount        = static_cast<uint32_t>(prim.meshlets.size());
             md.MaterialIndex       = prim.materialIndex;
             md.GlobalMeshletStart  = static_cast<uint32_t>(m_TotalMeshletCount);
+            md.AlphaMode           = static_cast<uint>(prim.alphaMode); // 0=Opaque, 1=Mask, 2=Blend
 
             // Source vertex streams (positions, normals, UVs)
             md.PositionOffset = static_cast<uint32_t>(m_AllPositions.size());

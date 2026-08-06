@@ -21,9 +21,9 @@ ConstantBuffer<FrameConstants>        FrameCB   : register(b0);
 ConstantBuffer<TwoPassCullConstants>  CullConst : register(b1);
 
 // Instance-level resources
-StructuredBuffer<InstanceData>    InstanceDataBuf    : register(t0);
-StructuredBuffer<InstanceBounds>  InstanceBoundsBuf  : register(t1);
-StructuredBuffer<MeshData>        MeshDataBuf        : register(t2);
+StructuredBuffer<InstanceData>        InstanceDataBuf   : register(t0);
+StructuredBuffer<InstanceBounds>      InstanceBoundsBuf : register(t1);
+StructuredBuffer<MeshData>            MeshDataBuf       : register(t2);
 
 // CullInstancesCS outputs
 RWStructuredBuffer<MeshletCandidate> CandidateMeshlets      : register(u0);
@@ -274,6 +274,14 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     InstanceBounds bound = InstanceBoundsBuf[inst.BoundsIndex]; // LOCAL-space bounding sphere
     MeshData      md     = MeshDataBuf[inst.MeshDataIndex];
 
+    // Reject alpha-blended instances — never enter the meshlet pipeline.
+    // ALPHA_MODE_BLEND=2; shared CPU/GPU constant in Shared/SharedTypes.h.
+    if (md.AlphaMode == ALPHA_MODE_BLEND)
+        return;
+
+    // Per-phase counter index: 0=FIRST, 1=SECOND, FRUSTUM_ONLY→0.
+    uint counterPhase = (CullConst.Phase == TWO_PASS_PHASE_FRUSTUM_ONLY) ? 0u : CullConst.Phase;
+
     // Transform local bounds by the PER-FRAME LocalToWorld (updated each frame by
     // Model::UpdateNodeBuffer) — culling follows animated/moving instances.
     // Same pattern as D3D12_Research: FrustumCull(LocalBounds, LocalToWorld, viewProj).
@@ -305,12 +313,17 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (occluded)
     {
         // Phase 1: defer to Phase 2 for retest against fresh HZB.
-        // Phase 2: final pass — silently discard, no further deferral.
+        // Phase 2: count as truly occluded (for debug stats), silently discard.
         if (CullConst.Phase == TWO_PASS_PHASE_FIRST)
         {
             uint slot;
             InterlockedAdd(OccludedInstancesCounter[0], 1, slot);
             OccludedInstances[slot] = instanceIdx;
+        }
+        else // Phase=SECOND — permanently occluded, count for stats
+        {
+            uint dummy;
+            InterlockedAdd(OccludedInstancesCounter[counterPhase], 1, dummy);
         }
         return;
     }
@@ -319,7 +332,7 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint localIdx = 0; localIdx < md.MeshletCount; localIdx++)
     {
         uint slot;
-        InterlockedAdd(CandidateMeshletsCounter[0], 1, slot);
+        InterlockedAdd(CandidateMeshletsCounter[counterPhase], 1, slot);
         MeshletCandidate cand;
         cand.InstanceID   = instanceIdx;
         cand.MeshletIndex = localIdx;
@@ -335,7 +348,12 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint candidateIdx = dispatchThreadID.x;
-    uint count = CandidateMeshletsCounter[0]; // read from the UAV Counter
+    // Per-phase counter index: 0=FIRST, 1=SECOND, FRUSTUM_ONLY->0. Must match
+    // the index CullInstancesCS wrote (below) — reading a hardcoded [0] here
+    // silently drops every Phase 2 candidate, since CandidateMeshletsCounter
+    // is cleared every phase and Phase 2 only ever writes element [1].
+    uint counterPhase = (CullConst.Phase == TWO_PASS_PHASE_FRUSTUM_ONLY) ? 0u : CullConst.Phase;
+    uint count = CandidateMeshletsCounter[counterPhase]; // read from the UAV Counter
 
     if (candidateIdx >= count)
         return;
@@ -369,7 +387,7 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     uint slot;
-    InterlockedAdd(VisibleMeshletsCounter[0], 1, slot);
+    InterlockedAdd(VisibleMeshletsCounter[counterPhase], 1, slot);
     VisibleMeshlets[slot] = cand;
 
     // Mip-selection tint sideband (task007 mode 3): record the mip this meshlet's
@@ -383,13 +401,15 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 
 // =============================================================================
 // BuildMeshletCullIndirectArgsCS
-// Reads CandidateMeshletsCounter → builds indirect dispatch for CullMeshletsCS
+// Reads CandidateMeshletsCounter → builds indirect dispatch for CullMeshletsCS.
+// Per-phase: Phase 1 reads [0], Phase 2 reads [1]. FRUSTUM_ONLY defaults to [0].
 // =============================================================================
 
 [numthreads(1, 1, 1)]
 void BuildMeshletCullIndirectArgsCS()
 {
-    uint count = CandidateMeshletsCounter[0];
+    uint counterPhase = (CullConst.Phase == TWO_PASS_PHASE_FRUSTUM_ONLY) ? 0u : CullConst.Phase;
+    uint count = CandidateMeshletsCounter[counterPhase];
     MeshletCullArgs[0] = (count + 63) / 64; // ThreadGroupCountX
     MeshletCullArgs[1] = 1;
     MeshletCullArgs[2] = 1;
@@ -397,7 +417,10 @@ void BuildMeshletCullIndirectArgsCS()
 
 // =============================================================================
 // BuildInstanceCullIndirectArgsCS
-// Reads OccludedInstancesCounter → builds indirect dispatch for Phase 2 CullInstancesCS
+// Reads OccludedInstancesCounter[0] — always element 0 regardless of phase.
+// Phase 2 dispatches based on the P1 deferred count (stored in element [0]),
+// which is preserved across phases because OccludedInstancesCounter is only
+// cleared in Phase 1.
 // =============================================================================
 
 [numthreads(1, 1, 1)]
