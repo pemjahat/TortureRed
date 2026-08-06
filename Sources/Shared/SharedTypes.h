@@ -462,7 +462,6 @@ struct DepthReadoutParams {
 // Phase selectors (passed as root CBV fields, not shader defines)
 #define TWO_PASS_PHASE_FIRST   0u
 #define TWO_PASS_PHASE_SECOND  1u
-#define TWO_PASS_PHASE_FRUSTUM_ONLY 2u  // Feature-toggle: no occlusion testing (fallback)
 
 struct TwoPassCullConstants {
     uint  NumInstances;              // Total instances in InstanceData[]
@@ -502,13 +501,10 @@ struct TwoPassCullConstants {
 #define CULL_STATS_P1_CANDIDATE_MESHLETS   0  // CandidateMeshletsCounter after Phase 1
 #define CULL_STATS_P1_VISIBLE_MESHLETS     1  // VisibleMeshletsCounter after Phase 1
 #define CULL_STATS_P1_OCCLUDED_INSTANCES   2  // OccludedInstancesCounter (deferred) after Phase 1
-#define CULL_STATS_P1_TOTAL_INSTANCES      3  // Total instances fed to Phase 1 (= NumInstances)
-#define CULL_STATS_P2_CANDIDATE_MESHLETS   4  // CandidateMeshletsCounter after Phase 2
-#define CULL_STATS_P2_VISIBLE_MESHLETS     5  // VisibleMeshletsCounter after Phase 2
-#define CULL_STATS_P2_OCCLUDED_INSTANCES   6  // OccludedInstances in Phase 2
-#define CULL_STATS_P2_INPUT_INSTANCES      7  // Phase 2 input instance count (= P1 OccludedInstances)
-#define CULL_STATS_TOTAL_MESHLETS          8  // Total meshlets across all instances (CPU-provided)
-#define CULL_STATS_COUNT                   16
+#define CULL_STATS_P2_CANDIDATE_MESHLETS   3  // CandidateMeshletsCounter after Phase 2
+#define CULL_STATS_P2_VISIBLE_MESHLETS     4  // VisibleMeshletsCounter after Phase 2
+#define CULL_STATS_P2_OCCLUDED_INSTANCES   5  // OccludedInstances in Phase 2
+#define CULL_STATS_COUNT                   8
 
 // Passed to CopyCullStatsCS via root constants.
 // For P1: BaseSlot=0 copies Candidate[0],Visible[0],Occluded[0] → Stats[0..2]

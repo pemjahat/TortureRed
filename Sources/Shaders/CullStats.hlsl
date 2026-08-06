@@ -35,22 +35,11 @@ void CopyCullStatsCS(uint3 tid : SV_DispatchThreadID)
 
     uint base = CopyParams.BaseSlot;
 
-    // P1: read element [0] of each counter (Phase=0)
-    // P2: read element [1] of each counter (Phase=1 — only for Candidate/Visible/Occluded)
-    //      Since the per-phase counters are multi-element and the culling shader writes to
-    //      the appropriate element, we just read the current value.
-    // After Phase 2, counter[0] contains P1's OccludedInstances (P2 input count).
-    uint readIdx = (base == 0) ? 0u : 1u;
+    stats[base + 0] = candidateCounter[0];          // P1_CANDIDATE_MESHLETS or P2_CANDIDATE_MESHLETS
+    stats[base + 1] = visibleCounter[0];            // P1_VISIBLE_MESHLETS   or P2_VISIBLE_MESHLETS
+    stats[base + 2] = occludedCounter[0];            // P1_OCCLUDED_INSTANCES or P2_OCCLUDED_INSTANCES
 
-    stats[base + 0] = candidateCounter[readIdx];          // P1_CANDIDATE_MESHLETS or P2_CANDIDATE_MESHLETS
-    stats[base + 1] = visibleCounter[readIdx];            // P1_VISIBLE_MESHLETS   or P2_VISIBLE_MESHLETS
-    stats[base + 2] = occludedCounter[readIdx];            // P1_OCCLUDED_INSTANCES or P2_OCCLUDED_INSTANCES
-
-    if (base == 4) // Phase 2: also record the P2 input instance count (= P1 deferred count)
-    {
-        stats[CULL_STATS_P2_INPUT_INSTANCES] = occludedCounter[0];
-    }
-    else // base == 0 (Phase 1 always runs first each frame)
+    if (base == 0) // (Phase 1 always runs first each frame)
     {
         // Pre-zero the P2 slots so CullStatsCS never displays stale numbers left
         // over from an earlier frame — e.g. when two-pass culling is disabled
@@ -59,7 +48,6 @@ void CopyCullStatsCS(uint3 tid : SV_DispatchThreadID)
         stats[CULL_STATS_P2_CANDIDATE_MESHLETS] = 0;
         stats[CULL_STATS_P2_VISIBLE_MESHLETS]   = 0;
         stats[CULL_STATS_P2_OCCLUDED_INSTANCES] = 0;
-        stats[CULL_STATS_P2_INPUT_INSTANCES]    = 0;
     }
 }
 
@@ -92,22 +80,16 @@ void CullStatsCS(uint3 tid : SV_DispatchThreadID)
     uint p1OccludedInst = stats[CULL_STATS_P1_OCCLUDED_INSTANCES];
     uint p2Candidate   = stats[CULL_STATS_P2_CANDIDATE_MESHLETS];
     uint p2Visible     = stats[CULL_STATS_P2_VISIBLE_MESHLETS];
-    uint p2OccludedInst = stats[CULL_STATS_P2_OCCLUDED_INSTANCES];
-    uint p2InputInst   = stats[CULL_STATS_P2_INPUT_INSTANCES];
+    uint p2OccludedInst = stats[CULL_STATS_P2_OCCLUDED_INSTANCES];  // include p1 occluded instances
     uint totalMeshlets = Params.TotalMeshlets;
     uint totalInst     = Params.TotalInstances;
 
     // Derived stats
-    // OccludedMeshlets(P1) = candidates that failed meshlet-level occlusion in P1
-    uint p1OccludedMesh = (p1Candidate > p1Visible) ? (p1Candidate - p1Visible) : 0u;
-    // OccludedMeshlets(P2) = same for P2
-    uint p2OccludedMesh = (p2Candidate > p2Visible) ? (p2Candidate - p2Visible) : 0u;
-    // Total occluded instances = P2 occluded (truly rejected) 
-    //   + P1 deferred that never reached P2 due to... wait, all P1 deferred go to P2.
-    // Total Visible Instances = Total - P2 permanently occluded
-    uint visibleInst = (totalInst > p2OccludedInst) ? (totalInst - p2OccludedInst) : 0u;
+    uint p1OccludedMeshlet = (p1Candidate - p1Visible);
+    uint p2OccludedMeshlet = (p2Candidate - p2Visible);
     // Total Visible Meshlets = P1Visible + P2Visible
     uint visibleMesh = p1Visible + p2Visible;
+    // todo: occluded instance for p1 and p2 (can't be derived from single p1OccludedInst)
 
     // Setup debug text writer
     DebugRenderContext ctx;
@@ -148,29 +130,16 @@ void CullStatsCS(uint3 tid : SV_DispatchThreadID)
         pos.y += lineH;
     }
 
-    // --- Phase 1 Occluded ---
+    // --- Occluded ---
     {
         DebugTextWriter w = CreateDebugTextWriter(ctx, pos, labelColor, 1.0f);
-        w.Char('I');
+        w.Char('1');
         w.Char(' ');
-        w.Int((int)p1OccludedInst);
+        w.Int((int)p1OccludedMeshlet);
         w.Char('/');
-        w.Char('M');
+        w.Char('2');
         w.Char(' ');
-        w.Int((int)p1OccludedMesh);
-        pos.y += lineH;
-    }
-
-    // --- Phase 2 Occluded ---
-    {
-        DebugTextWriter w = CreateDebugTextWriter(ctx, pos, labelColor, 1.0f);
-        w.Char('I');
-        w.Char(' ');
-        w.Int((int)p2OccludedInst);
-        w.Char('/');
-        w.Char('M');
-        w.Char(' ');
-        w.Int((int)p2OccludedMesh);
+        w.Int((int)p2OccludedMeshlet);
         pos.y += lineH;
     }
 
@@ -186,10 +155,6 @@ void CullStatsCS(uint3 tid : SV_DispatchThreadID)
     // --- Visible (derived) ---
     {
         DebugTextWriter w = CreateDebugTextWriter(ctx, pos, labelColor, 1.0f);
-        w.Char('I');
-        w.Char(' ');
-        w.Int((int)visibleInst);
-        w.Char('/');
         w.Char('M');
         w.Char(' ');
         w.Int((int)visibleMesh);
