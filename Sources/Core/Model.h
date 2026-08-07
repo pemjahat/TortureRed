@@ -137,6 +137,12 @@ public:
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletTrianglesBufferAddress() const { return m_GlobalMeshletTriangles.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalMeshletBoundsBufferAddress() const { return m_GlobalMeshletBounds.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetInstanceBoundsBufferAddress() const { return m_InstanceBoundsBuffer.gpuAddress; }
+    // Bindless SRV heap indices for the same buffers, used by MeshletTwoPassCull.hlsl
+    // (fully bindless — ResourceDescriptorHeap[idx] — see docs/bug_flyingworld_meshlet_flicker.md).
+    int GetInstanceDataSRVIndex()        const { return m_InstanceDataBuffer.srvIndex; }
+    int GetInstanceBoundsSRVIndex()      const { return m_InstanceBoundsBuffer.srvIndex; }
+    int GetMeshDataSRVIndex()            const { return m_MeshDataBuffer.srvIndex; }
+    int GetGlobalMeshletBoundsSRVIndex() const { return m_GlobalMeshletBounds.srvIndex; }
     size_t GetTotalMeshletCount() const { return m_TotalMeshletCount; }
     size_t GetInstanceCount()     const { return m_InstanceDataArray.size(); }
     // Returns the SRV heap index of GlobalPositions — the first of 9 contiguous meshlet stream SRVs

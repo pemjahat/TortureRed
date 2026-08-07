@@ -33,10 +33,12 @@ public:
 
     // Builds indirect DispatchMesh arguments from the VisibleMeshletsCounter.
     // Must be called after culling and before Rasterize().
+    // phase: TWO_PASS_PHASE_FIRST/SECOND — selects which VisibleMeshletsCounter slot to
+    // read (that phase's OWN new-meshlet count, not a running total across phases).
     void BuildDispatchMeshArgs(ID3D12GraphicsCommandList* cmdList,
                                 ID3D12RootSignature* mainRootSignature,
                                 D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                                int visibleMeshletsCounterSRVIdx);
+                                int visibleMeshletsCounterSRVIdx, uint32_t phase);
 
     // Mesh Shader rasterize — single ExecuteIndirect DispatchMesh.
     // useVisibilityBuffer=true  -> MeshletRasterizeMS.hlsl, writes ONLY the visibility
@@ -44,9 +46,14 @@ public:
     // useVisibilityBuffer=false -> MeshletRasterizeGBufferMS.hlsl, writes GBuffer
     //                              (albedo/normal/material) + visibility token directly.
     //                              Caller binds 4 RTVs.
+    // phase: TWO_PASS_PHASE_FIRST/SECOND — Phase 2's mesh shader must offset its GroupID
+    // into VisibleMeshlets[] by Phase 1's final count (visibleMeshletsCounterSRVIdx),
+    // since both phases' candidates now coexist in the same buffer (see
+    // docs/bug_flyingworld_meshlet_flicker.md).
     void Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                     D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
-                    int visibleMeshletsSRVIdx, bool useVisibilityBuffer);
+                    int visibleMeshletsSRVIdx, int visibleMeshletsCounterSRVIdx,
+                    bool useVisibilityBuffer, uint32_t phase);
 
     // Full-screen Visibility Buffer resolve: reconstructs GBuffer (albedo/normal/material)
     // from the visibility token written by Rasterize(). Run once per frame, after both

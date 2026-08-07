@@ -1154,16 +1154,17 @@ void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& fr
                               m_RootSignature.Get());
 }
 
-void Renderer::DispatchMeshletBuildDispatchArgs()
+void Renderer::DispatchMeshletBuildDispatchArgs(uint32_t phase)
 {
     m_Meshlet.BuildDispatchMeshArgs(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
-                                     m_GPUCulling.GetVisibleMeshletsCounterSRVIndex());
+                                     m_GPUCulling.GetVisibleMeshletsCounterSRVIndex(), phase);
 }
 
-void Renderer::DispatchMeshletRasterize(Model* model, bool useVisibilityBuffer)
+void Renderer::DispatchMeshletRasterize(Model* model, bool useVisibilityBuffer, uint32_t phase)
 {
     m_Meshlet.Rasterize(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress, model,
-                         m_GPUCulling.GetVisibleMeshletsSRVIndex(), useVisibilityBuffer);
+                         m_GPUCulling.GetVisibleMeshletsSRVIndex(), m_GPUCulling.GetVisibleMeshletsCounterSRVIndex(),
+                         useVisibilityBuffer, phase);
 }
 
 void Renderer::DispatchVisibilityGBufferResolve(Model* model)

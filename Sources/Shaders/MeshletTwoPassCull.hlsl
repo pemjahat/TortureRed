@@ -10,44 +10,29 @@
 // Defines (set at compile time):
 //   OCCLUSION_CULL=1  — include HZB occlusion testing.
 //   SECOND_PHASE=1    — Phase 2 behavior: process OccludedInstances instead of all instances.
+//
+// Resource binding: fully bindless. Every buffer is looked up via
+// ResourceDescriptorHeap[CullConst.*Idx] at the point of use — there are no root
+// SRV/UAV descriptors at all (root signature is just b0 FrameCB + b1 TwoPassCullConstants
+// + a static sampler).
+//
+// This used to be a mix: most buffers were root SRV/UAV descriptors (register(t0-t4)/
+// register(u0-u8)), except OccludedInstances, which additionally had a bindless SRV path
+// (CullConst.OccludedInstancesSRVIdx) because it is UAV-written in Phase 1 but SRV-read in
+// Phase 2 — a role reversal a single fixed root descriptor slot can't represent (one root
+// parameter is bound as one type for the whole dispatch). Going fully bindless removes the
+// inconsistency and the extra root-signature complexity of carrying 14 root descriptors
+// that only differ in which register they occupy.
 
 #include "MeshletCommon.hlsli"
 
 SamplerState PointClampSampler : register(s0);
 
 // ---- Resources ----
-
+// See the file-header comment above — every buffer below is fetched via
+// ResourceDescriptorHeap[CullConst.*Idx] at its point of use, not declared here.
 ConstantBuffer<FrameConstants>        FrameCB   : register(b0);
 ConstantBuffer<TwoPassCullConstants>  CullConst : register(b1);
-
-// Instance-level resources
-StructuredBuffer<InstanceData>        InstanceDataBuf   : register(t0);
-StructuredBuffer<InstanceBounds>      InstanceBoundsBuf : register(t1);
-StructuredBuffer<MeshData>            MeshDataBuf       : register(t2);
-
-// CullInstancesCS outputs
-RWStructuredBuffer<MeshletCandidate> CandidateMeshlets      : register(u0);
-RWStructuredBuffer<uint>             CandidateMeshletsCounter : register(u1);
-RWStructuredBuffer<uint>             OccludedInstances        : register(u2);
-RWStructuredBuffer<uint>             OccludedInstancesCounter : register(u3);
-
-// CullMeshletsCS input: reads the SAME buffer CullInstancesCS wrote via the UAV
-// above (CandidateMeshlets, u0). Deliberately NOT re-declared as a separate SRV —
-// binding the same resource as both SRV and UAV in one root signature would
-// require it to be in two mutually-exclusive resource states at once.
-StructuredBuffer<MeshletBounds>    MeshletBoundsBuf    : register(t3);
-
-// CullMeshletsCS outputs
-RWStructuredBuffer<MeshletCandidate> VisibleMeshlets        : register(u4);
-RWStructuredBuffer<uint>             VisibleMeshletsCounter : register(u5);
-
-// Per-phase instance-visible counter: atomically incremented by CullInstancesCS
-// when an instance passes frustum+HZB (one count per instance, not per meshlet).
-RWStructuredBuffer<uint> VisibleInstancesCounter : register(u8);
-
-// Indirect dispatch args buffers
-RWStructuredBuffer<uint> MeshletCullArgs     : register(u6);  // uint3 dispatch args
-RWStructuredBuffer<uint> InstanceCullArgs    : register(u7);  // uint3 dispatch args
 
 // Recover (P00, P11, zNear) from FrameCB.projectionInverseUnjittered — the exact inverse
 // of Camera::GetProjMatrix()'s reverse-Z infinite-far layout (verified algebraically):
@@ -138,7 +123,7 @@ bool HZBCull(FrustumCullData fc,
     // conversion in this codebase (MotionVectors.hlsl, RestirDI/GI_Temporal.hlsl,
     // NrdPrepareGuides.hlsl) and Adria/D3D12_Research's HZBCull (float2(0.5,-0.5) swizzle in
     // GpuDrivenRendering.hlsli). minNDCy (bottom of screen) maps to the LARGER pixel Y, so
-    // min/max swap under the flip. See docs/bug_hzbcull_ndcflip.md.
+    // min/max swap under the flip.
     float2 rectMinPixel = float2(
         (minNDCx * 0.5f + 0.5f) * (float)hzbWidth,
         (-maxNDCy * 0.5f + 0.5f) * (float)hzbHeight);
@@ -258,12 +243,14 @@ void RecordOccludedRect(HZBCullDebug dbg, uint phase, uint kind)
 [numthreads(64, 1, 1)]
 void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
+    RWStructuredBuffer<uint> occludedInstancesCounter = ResourceDescriptorHeap[CullConst.OccludedInstancesCounterIdx];
+
     // --- Phase 2: redirect thread index through the deferred-instance list ---
     uint instanceIdx = dispatchThreadID.x;
     if (CullConst.Phase == TWO_PASS_PHASE_SECOND)
     {
         // Dispatch is sized by OccludedInstancesCounter; guard against empty dispatch.
-        if (instanceIdx >= OccludedInstancesCounter[0])
+        if (instanceIdx >= occludedInstancesCounter[0])
             return;
         StructuredBuffer<uint> occludedList = ResourceDescriptorHeap[CullConst.OccludedInstancesSRVIdx];
         instanceIdx = occludedList[instanceIdx];
@@ -274,9 +261,13 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
             return;
     }
 
-    InstanceData inst    = InstanceDataBuf[instanceIdx];
-    InstanceBounds bound = InstanceBoundsBuf[inst.BoundsIndex]; // LOCAL-space bounding sphere
-    MeshData      md     = MeshDataBuf[inst.MeshDataIndex];
+    StructuredBuffer<InstanceData>   instanceDataBuf   = ResourceDescriptorHeap[CullConst.InstanceDataSRVIdx];
+    StructuredBuffer<InstanceBounds> instanceBoundsBuf = ResourceDescriptorHeap[CullConst.InstanceBoundsSRVIdx];
+    StructuredBuffer<MeshData>       meshDataBuf       = ResourceDescriptorHeap[CullConst.MeshDataSRVIdx];
+
+    InstanceData inst    = instanceDataBuf[instanceIdx];
+    InstanceBounds bound = instanceBoundsBuf[inst.BoundsIndex]; // LOCAL-space bounding sphere
+    MeshData      md     = meshDataBuf[inst.MeshDataIndex];
 
     // Reject alpha-blended instances — never enter the meshlet pipeline.
     // ALPHA_MODE_BLEND=2; shared CPU/GPU constant in Shared/SharedTypes.h.
@@ -306,7 +297,6 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         occluded = HZBCull(fc, CullConst.HZBSRVIdx, CullConst.HZBMipCount,
                            CullConst.HZBWidth, CullConst.HZBHeight, dbg);
 
-        // if (!occluded)
         if (occluded)
             RecordOccludedRect(dbg, CullConst.Phase, 1); // kind 1 = instance
     }
@@ -316,28 +306,32 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         // Phase 1: defer to Phase 2 for retest against fresh HZB.
         if (CullConst.Phase == TWO_PASS_PHASE_FIRST)
         {
+            RWStructuredBuffer<uint> occludedInstances = ResourceDescriptorHeap[CullConst.OccludedInstancesUAVIdx];
             uint slot;
-            InterlockedAdd(OccludedInstancesCounter[0], 1, slot);
-            OccludedInstances[slot] = instanceIdx;
+            InterlockedAdd(occludedInstancesCounter[0], 1, slot);
+            occludedInstances[slot] = instanceIdx;
         }
         return;
     }
 
     // Instance passed frustum + HZB culling — count it once.
     {
+        RWStructuredBuffer<uint> visibleInstancesCounter = ResourceDescriptorHeap[CullConst.VisibleInstancesCounterUAVIdx];
         uint instanceSlot;
-        InterlockedAdd(VisibleInstancesCounter[0], 1, instanceSlot);
+        InterlockedAdd(visibleInstancesCounter[CullConst.Phase], 1, instanceSlot);
     }
 
     // Instance passed — enumerate all its meshlets into CandidateMeshlets.
+    RWStructuredBuffer<uint> candidateMeshletsCounter = ResourceDescriptorHeap[CullConst.CandidateMeshletsCounterIdx];
+    RWStructuredBuffer<MeshletCandidate> candidateMeshlets = ResourceDescriptorHeap[CullConst.CandidateMeshletsUAVIdx];
     for (uint localIdx = 0; localIdx < md.MeshletCount; localIdx++)
     {
         uint slot;
-        InterlockedAdd(CandidateMeshletsCounter[0], 1, slot);
+        InterlockedAdd(candidateMeshletsCounter[0], 1, slot);
         MeshletCandidate cand;
         cand.InstanceID   = instanceIdx;
         cand.MeshletIndex = localIdx;
-        CandidateMeshlets[slot] = cand;
+        candidateMeshlets[slot] = cand;
     }
 }
 
@@ -348,18 +342,24 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
+    RWStructuredBuffer<uint> candidateMeshletsCounter = ResourceDescriptorHeap[CullConst.CandidateMeshletsCounterIdx];
     uint candidateIdx = dispatchThreadID.x;
-    uint count = CandidateMeshletsCounter[0]; // read from the UAV Counter
+    uint count = candidateMeshletsCounter[0]; // read from the UAV Counter
 
     if (candidateIdx >= count)
         return;
 
-    MeshletCandidate cand  = CandidateMeshlets[candidateIdx]; // read via the same UAV CullInstancesCS wrote
-    InstanceData     inst  = InstanceDataBuf[cand.InstanceID];
-    MeshData         md    = MeshDataBuf[inst.MeshDataIndex];
+    RWStructuredBuffer<MeshletCandidate> candidateMeshlets = ResourceDescriptorHeap[CullConst.CandidateMeshletsUAVIdx];
+    MeshletCandidate cand = candidateMeshlets[candidateIdx]; // same buffer CullInstancesCS wrote
+
+    StructuredBuffer<InstanceData> instanceDataBuf = ResourceDescriptorHeap[CullConst.InstanceDataSRVIdx];
+    StructuredBuffer<MeshData>     meshDataBuf     = ResourceDescriptorHeap[CullConst.MeshDataSRVIdx];
+    InstanceData     inst  = instanceDataBuf[cand.InstanceID];
+    MeshData         md    = meshDataBuf[inst.MeshDataIndex];
 
     // Load meshlet bounds (bounding sphere)
-    MeshletBounds bounds = MeshletBoundsBuf[md.MeshletBoundsOffset + cand.MeshletIndex];
+    StructuredBuffer<MeshletBounds> meshletBoundsBuf = ResourceDescriptorHeap[CullConst.MeshletBoundsSRVIdx];
+    MeshletBounds bounds = meshletBoundsBuf[md.MeshletBoundsOffset + cand.MeshletIndex];
 
     // transformToWorld + frustum cull against the CURRENT camera (radius is scaled by the
     // transform's max axis scale inside TransformSphereToWorld, so rotated/scaled instances
@@ -382,11 +382,27 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
     }
 
-    uint slot;
-    InterlockedAdd(VisibleMeshletsCounter[0], 1, slot);
-    VisibleMeshlets[slot] = cand;
+    // VisibleMeshletsCounter[2]: slot [TWO_PASS_PHASE_FIRST] is Phase 1's own count,
+    // slot [TWO_PASS_PHASE_SECOND] is Phase 2's own count. Phase 2 appends AFTER Phase 1's
+    // range (base offset = Phase 1's FINAL count) instead of restarting at 0 — the counter
+    // is only ever cleared once per frame (GPUCulling::CullTwoPass, gated to Phase 1), so
+    // Phase 1's range in VisibleMeshlets stays intact and resolvable for the whole frame.
+    RWStructuredBuffer<uint> visibleMeshletsCounter = ResourceDescriptorHeap[CullConst.VisibleMeshletsCounterUAVIdx];
+    RWStructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[CullConst.VisibleMeshletsUAVIdx];
 
-    // Mip-selection tint sideband (task007 mode 3): record the mip this meshlet's
+    uint slot;
+    if (CullConst.Phase == TWO_PASS_PHASE_SECOND)
+    {
+        InterlockedAdd(visibleMeshletsCounter[TWO_PASS_PHASE_SECOND], 1, slot);
+        slot += visibleMeshletsCounter[TWO_PASS_PHASE_FIRST];
+    }
+    else
+    {
+        InterlockedAdd(visibleMeshletsCounter[TWO_PASS_PHASE_FIRST], 1, slot);
+    }
+    visibleMeshlets[slot] = cand;
+
+    // Mip-selection tint sideband : record the mip this meshlet's
     // occlusion test used; 0xFF = no test ran (frustum-only / near-plane fallback).
     if (CullConst.DebugRecordMip)
     {
@@ -398,31 +414,34 @@ void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 // =============================================================================
 // BuildMeshletCullIndirectArgsCS
 // Reads CandidateMeshletsCounter → builds indirect dispatch for CullMeshletsCS.
-// Per-phase: Phase 1 reads [0], Phase 2 reads [1]. FRUSTUM_ONLY defaults to [0].
 // =============================================================================
 
 [numthreads(1, 1, 1)]
 void BuildMeshletCullIndirectArgsCS()
 {
-    uint count = CandidateMeshletsCounter[0];
-    MeshletCullArgs[0] = (count + 63) / 64; // ThreadGroupCountX
-    MeshletCullArgs[1] = 1;
-    MeshletCullArgs[2] = 1;
+    RWStructuredBuffer<uint> candidateMeshletsCounter = ResourceDescriptorHeap[CullConst.CandidateMeshletsCounterIdx];
+    RWStructuredBuffer<uint> meshletCullArgs           = ResourceDescriptorHeap[CullConst.MeshletCullArgsUAVIdx];
+
+    uint count = candidateMeshletsCounter[0];
+    meshletCullArgs[0] = (count + 63) / 64; // ThreadGroupCountX
+    meshletCullArgs[1] = 1;
+    meshletCullArgs[2] = 1;
 }
 
 // =============================================================================
 // BuildInstanceCullIndirectArgsCS
-// Reads OccludedInstancesCounter[0] — always element 0 regardless of phase.
-// Phase 2 dispatches based on the P1 deferred count (stored in element [0]),
-// which is preserved across phases because OccludedInstancesCounter is only
-// cleared in Phase 1.
+// Reads OccludedInstancesCounter[0] — the P1-deferred count, preserved across phases
+// because OccludedInstancesCounter is only cleared in Phase 1.
 // =============================================================================
 
 [numthreads(1, 1, 1)]
 void BuildInstanceCullIndirectArgsCS()
 {
-    uint count = OccludedInstancesCounter[0];
-    InstanceCullArgs[0] = (count + 63) / 64; // ThreadGroupCountX
-    InstanceCullArgs[1] = 1;
-    InstanceCullArgs[2] = 1;
+    RWStructuredBuffer<uint> occludedInstancesCounter = ResourceDescriptorHeap[CullConst.OccludedInstancesCounterIdx];
+    RWStructuredBuffer<uint> instanceCullArgs          = ResourceDescriptorHeap[CullConst.InstanceCullArgsUAVIdx];
+
+    uint count = occludedInstancesCounter[0];
+    instanceCullArgs[0] = (count + 63) / 64; // ThreadGroupCountX
+    instanceCullArgs[1] = 1;
+    instanceCullArgs[2] = 1;
 }

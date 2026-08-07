@@ -24,9 +24,12 @@ void BuildDispatchMeshArgsCS(uint3 tid : SV_DispatchThreadID)
     uint srvIdx = Params.VisibleMeshletsCounterIdx;
     uint uavIdx = Params.DispatchMeshArgsIdx;
 
-    // Read the atomic counter written by CullInstancesCS
+    // VisibleMeshletsCounter now has 2 slots (see TWO_PASS_PHASE_FIRST/SECOND in
+    // SharedTypes.h) — readONLY this phase's own slot, not a running total, so this
+    // phase's DispatchMesh only covers its own new meshlets (Phase 2 must not re-rasterize
+    // Phase 1's already-drawn range). Params.Phase doubles as the slot index.
     StructuredBuffer<uint> counter = ResourceDescriptorHeap[srvIdx];
-    uint meshletCount = counter[0];
+    uint meshletCount = counter[Params.Phase];
 
     // Build indirect DispatchMesh arguments: ThreadGroupCountX = meshletCount
     // Each group processes 1 meshlet; ThreadGroupCountY = ThreadGroupCountZ = 1.

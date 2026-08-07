@@ -92,7 +92,7 @@ void Application::Initialize()
     // Set camera projection parameters (reverse-Z: nearZ controls NDC depth=1.0 plane)
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
     float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
-    float nearZ = 1.0f;  // Reverse-Z: near clip at z_view = -1.0
+    float nearZ = 0.1f;  // Reverse-Z: near clip at z_view = -1.0
     float farZ  = 0.0f;  // Reverse-Z sentinel: infinite far plane
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
     
@@ -625,6 +625,9 @@ void Application::Render()
         // clearTargets=true for Phase 1 / frustum-only (clear RTVs + depth),
         // clearTargets=false for Phase 2 — preserve depth/RTVs so Phase 2's
         // newly-revealed meshlets composite on top of Phase 1's output.
+        // clearTargets doubles as "is this Phase 1" — Phase 1 clears (and is TWO_PASS_PHASE_FIRST),
+        // Phase 2 preserves (and is TWO_PASS_PHASE_SECOND). The phase is threaded through to the
+        // mesh shader so it can offset its VisibleMeshlets[] read by Phase 1's final count —
         auto doMeshletRasterize = [&](bool clearTargets)
         {
             GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -671,7 +674,8 @@ void Application::Render()
                 }
             }
 
-            m_Renderer.DispatchMeshletRasterize(&m_Model, m_UseVisibilityBuffer);
+            uint32_t phase = clearTargets ? TWO_PASS_PHASE_FIRST : TWO_PASS_PHASE_SECOND;
+            m_Renderer.DispatchMeshletRasterize(&m_Model, m_UseVisibilityBuffer, phase);
         };
 
         // Helper: full-screen Visibility Buffer resolve — reconstructs GBuffer
@@ -777,7 +781,7 @@ void Application::Render()
                 MICROPROFILE_SCOPEI("Render", "Phase1_BuildDispatchArgs", MP_YELLOW);
                 MICROPROFILE_SCOPEGPUI("Phase1_BuildDispatchArgs", MP_YELLOW);
                 GPU_MARKER(cmdList, L"Phase 1 - BuildDispatchMeshArgs");
-                m_Renderer.DispatchMeshletBuildDispatchArgs();
+                m_Renderer.DispatchMeshletBuildDispatchArgs(TWO_PASS_PHASE_FIRST);
             }
             {
                 MICROPROFILE_SCOPEI("Render", "Phase1_Rasterize", MP_BLUE);
@@ -794,7 +798,7 @@ void Application::Render()
                     m_Renderer.DispatchBuildHZB();
             }
 
-            if (m_EnableTwoPassCulling)
+            if (m_EnableTwoPassCulling && m_EnableOcclusionCulling)
             {
                 // =====================================================
                 // TWO-PHASE OCCLUSION CULLING
@@ -811,6 +815,12 @@ void Application::Render()
                 // Phase 2 rasterizes its own survivors on top (preserving
                 // depth/color from Phase 1), then a final HZB rebuild
                 // captures the complete depth for next frame's Phase 1.
+                //
+                // Gated on m_EnableOcclusionCulling too (matches D3D12_Research's
+                // MeshletRasterizer::Render): with occlusion off, CullInstancesCS never
+                // defers anything to OccludedInstances (frustum-only has no occlusion
+                // verdict to defer from), so Phase 2 would just be a wasted dispatch —
+                // skip it explicitly rather than relying on an incidentally-empty list.
                 // =====================================================
 
                 // --- Phase 2: retest occluded instances vs fresh HZB ---
@@ -824,7 +834,7 @@ void Application::Render()
                     MICROPROFILE_SCOPEI("Render", "Phase2_BuildDispatchArgs", MP_YELLOW);
                     MICROPROFILE_SCOPEGPUI("Phase2_BuildDispatchArgs", MP_YELLOW);
                     GPU_MARKER(cmdList, L"Phase 2 - BuildDispatchMeshArgs");
-                    m_Renderer.DispatchMeshletBuildDispatchArgs();
+                    m_Renderer.DispatchMeshletBuildDispatchArgs(TWO_PASS_PHASE_SECOND);
                 }
                 {
                     MICROPROFILE_SCOPEI("Render", "Phase2_Rasterize", MP_BLUE);

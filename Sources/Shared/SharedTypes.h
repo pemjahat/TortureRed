@@ -302,12 +302,14 @@ struct MeshletCandidate {
 // =============================================================================
 
 // Passed to the Mesh Shader rasterize pass via root param 12 (b1).
-// With no binning, the mesh shader directly indexes VisibleMeshlets[SV_GroupID].
+// With no binning, the mesh shader indexes VisibleMeshlets[Phase's base offset + SV_GroupID].
+// Phase 2's base offset is VisibleMeshletsCounter[COUNTER_PHASE1_VISIBLE_MESHLETS] (Phase 1's
+// final count) — see the counter layout comment on TWO_PASS_PHASE_FIRST/SECOND below.
 struct RasterParams {
     uint VisibleMeshletsIdx;         // SRV index of VisibleMeshlets[] (for rasterize MS)
     uint DispatchMeshArgsIdx;        // UAV index of DispatchMeshArgs (for BuildDispatchMeshArgsCS)
-    uint VisibleMeshletsCounterIdx;  // SRV index of VisibleMeshletsCounter (for BuildDispatchMeshArgsCS)
-    uint _pad;
+    uint VisibleMeshletsCounterIdx;  // SRV index of VisibleMeshletsCounter[2] (for BuildDispatchMeshArgsCS and rasterize MS's Phase-2 base offset)
+    uint Phase;                      // TWO_PASS_PHASE_FIRST / TWO_PASS_PHASE_SECOND — also doubles as the VisibleMeshletsCounter slot index for this phase
 };
 
 // =============================================================================
@@ -459,7 +461,15 @@ struct DepthReadoutParams {
 // Two-Pass Occlusion Culling — constants shared by CullInstancesCS / CullMeshletsCS
 // =============================================================================
 
-// Phase selectors (passed as root CBV fields, not shader defines)
+// Phase selectors (passed as root CBV fields, not shader defines).
+// These double as the slot index into VisibleMeshletsCounter[2] (RWStructuredBuffer<uint>[2]):
+// slot 0 = Phase 1's own visible-meshlet count, slot 1 = Phase 2's own count. Only cleared
+// once per frame (gated to Phase 1 in GPUCulling::CullTwoPass) — Phase 2 must NOT reset slot 0,
+// since Phase 2 appends its own candidates into VisibleMeshlets STARTING at slot 0's value
+// (elementOffset += VisibleMeshletsCounter[TWO_PASS_PHASE_FIRST]) rather than aliasing over
+// Phase 1's already-rasterized range. See docs/bug_flyingworld_meshlet_flicker.md — this is
+// the fix for a frame-to-frame flicker caused by Phase 2 previously resetting a single shared
+// counter/slot, which corrupted the deferred Visibility Buffer resolve for Phase-1 pixels.
 #define TWO_PASS_PHASE_FIRST   0u
 #define TWO_PASS_PHASE_SECOND  1u
 
@@ -489,6 +499,20 @@ struct TwoPassCullConstants {
     // read back by the debug overlay via the vis token's candidateIndex.
     uint  DebugRecordMip;              // 1 = write the occlusion test's mip per surviving meshlet
     uint  VisibleMeshletMipsUAVIdx;    // UAV bindless index of VisibleMeshletMips[]
+
+    // Fully-bindless resource indices — MeshletTwoPassCull.hlsl has no root SRV/UAV
+    // descriptors at all (root signature is just b0+b1+a static sampler); every buffer
+    // is looked up via ResourceDescriptorHeap[idx] instead. This also sidesteps having
+    // to allocate a dedicated root SRV slot for OccludedInstances just because it is
+    // UAV-written in Phase 1 but SRV-read in Phase 2 (see OccludedInstancesSRVIdx above,
+    // which predates this and was the original motivating case for going bindless here).
+    uint  InstanceDataSRVIdx;          // SRV bindless index of Model's InstanceData[]
+    uint  InstanceBoundsSRVIdx;        // SRV bindless index of Model's InstanceBounds[]
+    uint  MeshDataSRVIdx;              // SRV bindless index of Model's MeshData[]
+    uint  MeshletBoundsSRVIdx;         // SRV bindless index of Model's GlobalMeshletBounds[]
+    uint  MeshletCullArgsUAVIdx;       // UAV bindless index of MeshletCullArgs (uint3 dispatch args)
+    uint  InstanceCullArgsUAVIdx;      // UAV bindless index of InstanceCullArgs (uint3 dispatch args)
+    uint  VisibleInstancesCounterUAVIdx; // UAV bindless index of VisibleInstancesCounter
 };
 
 // =============================================================================
@@ -511,10 +535,14 @@ struct TwoPassCullConstants {
 #define CULL_STATS_COUNT                   8
 
 // Passed to CopyCullStatsCS via root constants.
-// For P1 (BaseSlot=0): copies Candidate[0]→Stats[0], Visible[0]→Stats[1],
-//   Occluded[0]→Stats[2], InstanceVisible[0]→Stats[3].
-// For P2 (BaseSlot=4): copies Candidate[0]→Stats[4], Visible[0]→Stats[5],
-//   Occluded[0]→Stats[6], InstanceVisible[0]→Stats[7].
+// For P1 (BaseSlot=0): copies Candidate[0]->Stats[0], Visible[TWO_PASS_PHASE_FIRST]->Stats[1],
+//   Occluded[0]->Stats[2], InstanceVisible[0]->Stats[3].
+// For P2 (BaseSlot=4): copies Candidate[0]->Stats[4], Visible[TWO_PASS_PHASE_SECOND]->Stats[5],
+//   Occluded[0]->Stats[6], InstanceVisible[0]->Stats[7].
+// VisibleCounterSRVIdx now points at the 2-slot VisibleMeshletsCounter (see
+// TWO_PASS_PHASE_FIRST/SECOND above) — CopyCullStatsCS picks the phase-appropriate slot
+// from BaseSlot instead of always reading slot 0, since slot 0 (Phase 1's count) is no
+// longer reset/overwritten before Phase 2 runs.
 struct CullStatsCopyParams {
     uint CandidateCounterSRVIdx;          // SRV index of CandidateMeshletsCounter
     uint VisibleCounterSRVIdx;            // SRV index of VisibleMeshletsCounter

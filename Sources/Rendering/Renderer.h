@@ -156,8 +156,8 @@ public:
     // Hierarchical two-stage meshlet culling: CullInstancesCS → CullMeshletsCS (GPUCulling).
     void DispatchMeshletTwoPassCull(class Model* model, const FrameConstants& frame,
                                      bool occlusionEnabled, int phase, bool freezeCulling = false);
-    void DispatchMeshletBuildDispatchArgs();          // 1-thread CS: builds indirect DispatchMesh args from counter
-    void DispatchMeshletRasterize(class Model* model, bool useVisibilityBuffer); // Mesh Shader rasterize — single ExecuteIndirect
+    void DispatchMeshletBuildDispatchArgs(uint32_t phase); // 1-thread CS: builds indirect DispatchMesh args from this phase's counter slot
+    void DispatchMeshletRasterize(class Model* model, bool useVisibilityBuffer, uint32_t phase); // Mesh Shader rasterize — single ExecuteIndirect
     void DispatchVisibilityGBufferResolve(class Model* model); // Full-screen: visibility token -> albedo/normal/material
     bool IsMeshShaderSupported() const { return m_MeshShaderSupported; }
 

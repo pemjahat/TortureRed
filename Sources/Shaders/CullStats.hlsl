@@ -21,6 +21,12 @@
 //   BaseSlot=0 → P1: write Candidate@[0], Visible@[1], Occluded@[2], InstanceVisible@[3]
 //                     also zero P2 slots [4]–[7] so stale data from prior frames is cleared
 //   BaseSlot=4 → P2: write Candidate@[4], Visible@[5], Occluded@[6], InstanceVisible@[7]
+//
+// VisibleMeshletsCounter is now a 2-slot buffer (TWO_PASS_PHASE_FIRST/SECOND, see
+// SharedTypes.h) that is only cleared once per frame — Phase 1's count lives permanently
+// in slot 0, Phase 2's own new count lives in slot 1, simultaneously valid after Phase 2
+// runs (neither is reset by the other). Reads the phase-appropriate slot directly from
+// BaseSlot instead of always slot 0.
 // =============================================================================
 
 ConstantBuffer<CullStatsCopyParams> CopyParams : register(b2);
@@ -35,11 +41,14 @@ void CopyCullStatsCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint> stats                 = ResourceDescriptorHeap[CopyParams.StatsBufferUAVIdx];
 
     uint base = CopyParams.BaseSlot;
+    // BaseSlot 0 => Phase 1 => VisibleMeshletsCounter[TWO_PASS_PHASE_FIRST] (slot 0)
+    // BaseSlot 4 => Phase 2 => VisibleMeshletsCounter[TWO_PASS_PHASE_SECOND] (slot 1)
+    uint visibleSlot = (base == 0) ? TWO_PASS_PHASE_FIRST : TWO_PASS_PHASE_SECOND;
 
-    stats[base + 0] = candidateCounter[0];          // P1_CANDIDATE_MESHLETS / P2_CANDIDATE_MESHLETS
-    stats[base + 1] = visibleCounter[0];            // P1_VISIBLE_MESHLETS   / P2_VISIBLE_MESHLETS
-    stats[base + 2] = occludedCounter[0];           // P1_OCCLUDED_INSTANCES / P2_OCCLUDED_INSTANCES
-    stats[base + 3] = instanceVisibleCounter[0];    // P1_VISIBLE_INSTANCES  / P2_VISIBLE_INSTANCES
+    stats[base + 0] = candidateCounter[0];                  // P1_CANDIDATE_MESHLETS / P2_CANDIDATE_MESHLETS
+    stats[base + 1] = visibleCounter[visibleSlot];          // P1_VISIBLE_MESHLETS   / P2_VISIBLE_MESHLETS
+    stats[base + 2] = occludedCounter[0];                   // P1_OCCLUDED_INSTANCES / P2_OCCLUDED_INSTANCES
+    stats[base + 3] = instanceVisibleCounter[visibleSlot];  // P1_VISIBLE_INSTANCES  / P2_VISIBLE_INSTANCES
 
     if (base == 0) // (Phase 1 always runs first each frame)
     {
@@ -72,7 +81,7 @@ void CopyCullStatsCS(uint3 tid : SV_DispatchThreadID)
 //     Visible meshlet:    NNN  (P1_VISIBLE_MESHLETS)
 //
 //   Phase2
-//     Input instance:     NNN  (P1_OCCLUDED_INSTANCES — deferred from P1)
+//     Input instance:     NNN  (P1_OCCLUDED_INSTANCES)
 //     Input meshlet:      NNN  (P2_CANDIDATE_MESHLETS)
 //     Visible instance:   NNN  (P2_VISIBLE_INSTANCES)
 //     Visible meshlet:    NNN  (P2_VISIBLE_MESHLETS)

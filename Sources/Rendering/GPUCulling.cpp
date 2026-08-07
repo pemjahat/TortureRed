@@ -21,12 +21,17 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
         return;
     }
 
-    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
+    // 2 slots: [TWO_PASS_PHASE_FIRST]/[TWO_PASS_PHASE_SECOND] — see m_VisibleMeshletsCounter
+    // comment in GPUCulling.h.
+    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t) * 2,
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleMeshletsCounter"))
     {
         std::cerr << "[GPUCulling] Failed to create VisibleMeshletsCounter" << std::endl;
         return;
     }
+    if (!CreateBuffer(m_VisibleInstancesCounter, sizeof(uint32_t) * 2,
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleInstancesCounter"))
+        std::cerr << "[GPUCulling] Failed to create VisibleInstancesCounter" << std::endl;
 
     // ----- Two-pass occlusion culling buffers -----
     if (!CreateStructuredBuffer(m_CandidateMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
@@ -41,9 +46,6 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
     if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t),
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_OccludedInstancesCounter"))
         std::cerr << "[GPUCulling] Failed to create OccludedInstancesCounter" << std::endl;
-    if (!CreateBuffer(m_VisibleInstancesCounter, sizeof(uint32_t),
-                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleInstancesCounter"))
-        std::cerr << "[GPUCulling] Failed to create VisibleInstancesCounter" << std::endl;
     if (!CreateStructuredBuffer(m_MeshletCullArgs, sizeof(uint32_t), 3,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_MeshletCullArgs"))
         std::cerr << "[GPUCulling] Failed to create MeshletCullArgs" << std::endl;
@@ -149,31 +151,21 @@ void GPUCulling::CreateHZBResources(uint32_t internalWidth, uint32_t internalHei
 
 void GPUCulling::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* mainRootSignature)
 {
-    // --- Unified Meshlet Cull Root Signature (16 params) ---
+    // --- Unified Meshlet Cull Root Signature ---
+    // Fully bindless — no root SRV/UAV descriptors. Every buffer MeshletTwoPassCull.hlsl
+    // touches is looked up via ResourceDescriptorHeap[CullConst.*Idx] instead (see the
+    // file-header comment in MeshletTwoPassCull.hlsl and docs/bug_flyingworld_meshlet_flicker.md).
+    // Just the two CBVs + the static sampler HZBCull() needs.
     {
-        CD3DX12_ROOT_PARAMETER rootParams[16];
+        CD3DX12_ROOT_PARAMETER rootParams[2];
         rootParams[0].InitAsConstantBufferView(0);          // b0: FrameConstants
         rootParams[1].InitAsConstantBufferView(1);          // b1: TwoPassCullConstants
-        rootParams[2].InitAsShaderResourceView(0);          // t0: InstanceData[]
-        rootParams[3].InitAsShaderResourceView(1);          // t1: InstanceBounds[]
-        rootParams[4].InitAsShaderResourceView(2);          // t2: MeshData[]
-        rootParams[5].InitAsShaderResourceView(3);          // t3: MeshletBounds[]
-        rootParams[6].InitAsShaderResourceView(4);          // t4: unused
-        rootParams[7].InitAsUnorderedAccessView(0);         // u0: CandidateMeshlets
-        rootParams[8].InitAsUnorderedAccessView(1);         // u1: CandidateMeshletsCounter
-        rootParams[9].InitAsUnorderedAccessView(2);         // u2: OccludedInstances[]
-        rootParams[10].InitAsUnorderedAccessView(3);        // u3: OccludedInstancesCounter
-        rootParams[11].InitAsUnorderedAccessView(4);        // u4: VisibleMeshlets[]
-        rootParams[12].InitAsUnorderedAccessView(5);        // u5: VisibleMeshletsCounter
-        rootParams[13].InitAsUnorderedAccessView(6);        // u6: MeshletCullArgs
-        rootParams[14].InitAsUnorderedAccessView(7);        // u7: InstanceCullArgs
-        rootParams[15].InitAsUnorderedAccessView(8);        // u8: VisibleInstancesCounter
 
         CD3DX12_STATIC_SAMPLER_DESC pointClampSampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
             D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
         CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-        rsDesc.Init(16, rootParams, 1, &pointClampSampler,
+        rsDesc.Init(2, rootParams, 1, &pointClampSampler,
                     D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
 
         Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
@@ -575,6 +567,17 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
     cullConsts.DebugRecordMip             = m_DebugRecordMipEnabled ? 1u : 0u;
     cullConsts.VisibleMeshletMipsUAVIdx   = static_cast<uint>(m_VisibleMeshletMips.uavIndex);
 
+    // Fully-bindless resource indices (see MeshletTwoPassCull.hlsl's file-header comment
+    // and docs/bug_flyingworld_meshlet_flicker.md) — no root SRV/UAV descriptors are bound
+    // for these below; the shader looks them all up via ResourceDescriptorHeap[idx].
+    cullConsts.InstanceDataSRVIdx             = static_cast<uint>(model->GetInstanceDataSRVIndex());
+    cullConsts.InstanceBoundsSRVIdx           = static_cast<uint>(model->GetInstanceBoundsSRVIndex());
+    cullConsts.MeshDataSRVIdx                 = static_cast<uint>(model->GetMeshDataSRVIndex());
+    cullConsts.MeshletBoundsSRVIdx            = static_cast<uint>(model->GetGlobalMeshletBoundsSRVIndex());
+    cullConsts.MeshletCullArgsUAVIdx          = static_cast<uint>(m_MeshletCullArgs.uavIndex);
+    cullConsts.InstanceCullArgsUAVIdx         = static_cast<uint>(m_InstanceCullArgs.uavIndex);
+    cullConsts.VisibleInstancesCounterUAVIdx  = static_cast<uint>(m_VisibleInstancesCounter.uavIndex);
+
     uint cbIdx = isFirstPhase ? 0u : 1u;
     memcpy(m_TwoPassCullConstantsBuffer[cbIdx].cpuPtr, &cullConsts, sizeof(cullConsts));
 
@@ -583,11 +586,6 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
 
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
     cmdList->SetComputeRootConstantBufferView(1, m_TwoPassCullConstantsBuffer[cbIdx].gpuAddress);
-
-    cmdList->SetComputeRootShaderResourceView(2, model->GetInstanceDataBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(3, model->GetInstanceBoundsBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(4, model->GetMeshDataBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalMeshletBoundsBufferAddress());
 
     GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -615,11 +613,16 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
             GraphicsHelper::GetSRVGPUHandle((UINT)m_OccludedInstancesCounter.uavIndex),
             GraphicsHelper::GetCpuUAVHandle((UINT)m_OccludedInstancesCounter.cpuUavIndex),
             m_OccludedInstancesCounter.resource.Get(), zeroes, 0, nullptr);
+
+        // m_VisibleMeshletsCounter[2] must be cleared ONLY ONCE per frame (Phase 1's start).
+        // Phase 2 must see Phase 1's final slot [TWO_PASS_PHASE_FIRST] value intact — it uses
+        // that as the base offset when appending its own candidates into VisibleMeshlets, so
+        // it never overwrites/aliases Phase 1's already-rasterized range.
+        cmdList->ClearUnorderedAccessViewUint(
+            GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
+            GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
+            m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
     }
-    cmdList->ClearUnorderedAccessViewUint(
-        GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
-        GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
-        m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
     cmdList->ClearUnorderedAccessViewUint(
         GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleInstancesCounter.uavIndex),
         GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleInstancesCounter.cpuUavIndex),
@@ -634,17 +637,6 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
             GraphicsHelper::GetCpuUAVHandle((UINT)m_OccludedRectsCounter.cpuUavIndex),
             m_OccludedRectsCounter.resource.Get(), zeroes, 0, nullptr);
     }
-
-    cmdList->SetComputeRootUnorderedAccessView(7,  m_CandidateMeshlets.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(8,  m_CandidateMeshletsCounter.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(9,  m_OccludedInstances.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(10, m_OccludedInstancesCounter.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(11, m_VisibleMeshlets.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(12, m_VisibleMeshletsCounter.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(13, m_MeshletCullArgs.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(14, m_InstanceCullArgs.gpuAddress);
-    cmdList->SetComputeRootUnorderedAccessView(15, m_VisibleInstancesCounter.gpuAddress);
-
     if (isFirstPhase)
     {
         GPU_MARKER(cmdList, L"TwoPassCull Phase1 - CullInstances");

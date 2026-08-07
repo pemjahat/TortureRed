@@ -210,7 +210,7 @@ void MeshletPass::CreatePipelines(ID3D12Device* device, ID3D12Device2* device2,
 void MeshletPass::BuildDispatchMeshArgs(ID3D12GraphicsCommandList* cmdList,
                                          ID3D12RootSignature* mainRootSignature,
                                          D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                                         int visibleMeshletsCounterSRVIdx)
+                                         int visibleMeshletsCounterSRVIdx, uint32_t phase)
 {
     if (!m_BuildDispatchMeshArgsPSO)
         return;
@@ -229,6 +229,7 @@ void MeshletPass::BuildDispatchMeshArgs(ID3D12GraphicsCommandList* cmdList,
     params.VisibleMeshletsIdx        = 0; // unused by BuildDispatchMeshArgsCS
     params.DispatchMeshArgsIdx       = (uint)m_DispatchMeshArgs.uavIndex;
     params.VisibleMeshletsCounterIdx = (uint)visibleMeshletsCounterSRVIdx;
+    params.Phase                     = phase; // selects this phase's own VisibleMeshletsCounter slot
     cmdList->SetComputeRoot32BitConstants(12, sizeof(RasterParams) / 4, &params, 0);
 
     cmdList->SetPipelineState(m_BuildDispatchMeshArgsPSO.Get());
@@ -240,7 +241,8 @@ void MeshletPass::BuildDispatchMeshArgs(ID3D12GraphicsCommandList* cmdList,
 
 void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* mainRootSignature,
                              D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress, Model* model,
-                             int visibleMeshletsSRVIdx, bool useVisibilityBuffer)
+                             int visibleMeshletsSRVIdx, int visibleMeshletsCounterSRVIdx,
+                             bool useVisibilityBuffer, uint32_t phase)
 {
     if (!model->IsMeshletReady() || !m_MeshShaderSupported)
         return;
@@ -261,8 +263,12 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
 
     RasterParams rp = {};
-    rp.VisibleMeshletsIdx    = (uint)visibleMeshletsSRVIdx;
-    rp.DispatchMeshArgsIdx   = 0; // unused by rasterize
+    rp.VisibleMeshletsIdx        = (uint)visibleMeshletsSRVIdx;
+    rp.DispatchMeshArgsIdx       = 0; // unused by rasterize
+    // Phase 2's mesh shader needs Phase 1's final count as its base offset into
+    // VisibleMeshlets[] — see docs/bug_flyingworld_meshlet_flicker.md.
+    rp.VisibleMeshletsCounterIdx = (uint)visibleMeshletsCounterSRVIdx;
+    rp.Phase                     = phase;
     cmdList->SetGraphicsRoot32BitConstants(12, sizeof(RasterParams) / 4, &rp, 0);
 
     cmdList->SetPipelineState(pso);

@@ -80,9 +80,19 @@ void MSMain(
     out indices   uint3            triangles[MESHLET_MAX_TRIANGLES],
     out primitives PrimitiveAttribute primitives[MESHLET_MAX_TRIANGLES])
 {
-    // Direct indexing: no bins — VisibleMeshlets[groupID] is the meshlet candidate
+    // Direct indexing: no bins — VisibleMeshlets[candidateIndex] is the meshlet candidate.
+    // Phase 2's own meshlets start AFTER Phase 1's range (VisibleMeshletsCounter[TWO_PASS_PHASE_FIRST]
+    // is Phase 1's final count) since the counter is only cleared once per frame 
+    // Phase 1 dispatches groupID in [0, C1); Phase 2
+    // dispatches groupID in [0, C2) but must offset by C1 to land in its own slice [C1, C1+C2).
+    uint candidateIndex = groupID;
+    if (gRasterParams.Phase == TWO_PASS_PHASE_SECOND)
+    {
+        StructuredBuffer<uint> visibleMeshletsCounter = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsCounterIdx];
+        candidateIndex += visibleMeshletsCounter[TWO_PASS_PHASE_FIRST];
+    }
     StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsIdx];
-    MeshletCandidate cand = visibleMeshlets[groupID];
+    MeshletCandidate cand = visibleMeshlets[candidateIndex];
 
     InstanceData inst     = GlobalInstanceData[cand.InstanceID];
     MeshData md           = GlobalMeshData[inst.MeshDataIndex];
@@ -113,7 +123,7 @@ void MSMain(
 
         PrimitiveAttribute pri;
         pri.PrimitiveID    = i;
-        pri.CandidateIndex = groupID;
+        pri.CandidateIndex = candidateIndex; // absolute VisibleMeshlets[] index (phase-offset applied above)
         primitives[i] = pri;
     }
 }
@@ -143,7 +153,7 @@ VisOutput PSMain(
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
         albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
-    if (albedo.a < matConstants.alphaCutoff)
+    if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
         discard;
 
     VisOutput output;

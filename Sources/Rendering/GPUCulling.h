@@ -26,8 +26,9 @@ public:
     void RecreateHZB(uint32_t internalWidth, uint32_t internalHeight);
 
     // Compiles two-pass cull CS PSOs and HZB SPD PSOs. Returns the unified
-    // meshlet-cull root signature (16 params) via outRootSig — MeshletPass
-    // reuses it for its binning PSOs.
+    // meshlet-cull root signature (2CBV params — fully bindless, see
+    // MeshletTwoPassCull.hlsl and docs/bug_flyingworld_meshlet_flicker.md)
+    // via outRootSig — MeshletPass reuses it for its binning PSOs.
     void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* mainRootSignature);
 
     // ----- Two-pass occlusion culling -----
@@ -95,7 +96,10 @@ private:
 
     // ----- Two-pass occlusion culling resources -----
     GPUBuffer m_VisibleMeshlets;            // RWStructuredBuffer<MeshletCandidate> — output of CullMeshletsCS
-    GPUBuffer m_VisibleMeshletsCounter;     // RWStructuredBuffer<uint>[1]
+    // RWStructuredBuffer<uint>[2]: [TWO_PASS_PHASE_FIRST]=Phase1's own count, [TWO_PASS_PHASE_SECOND]=Phase2's
+    // own count. Cleared ONCE per frame (gated to Phase 1 in CullTwoPass) — Phase 2 appends its
+    // candidates into VisibleMeshlets starting at slot [FIRST]'s value instead of resetting it.
+    GPUBuffer m_VisibleMeshletsCounter;
     GPUBuffer m_CandidateMeshlets;          // RWStructuredBuffer<MeshletCandidate> — output of CullInstancesCS
     GPUBuffer m_CandidateMeshletsCounter;   // RWStructuredBuffer<uint>[1]
     GPUBuffer m_OccludedInstances;          // RWStructuredBuffer<uint> — deferred instance indices for Phase 2
@@ -104,10 +108,12 @@ private:
     GPUBuffer m_InstanceCullArgs;           // Indirect dispatch args for Phase 2 CullInstancesCS (uint3)
     GPUBuffer m_TwoPassCullConstantsBuffer[2]; // Upload-heap CBV, double-buffered: [0]=Phase1, [1]=Phase2
 
-    // Per-phase instance-visibility counter: [0]=Phase1, [1]=Phase2.
-    // Incremented by CullInstancesCS atomically when an instance passes frustum+HZB.
-    // Cleared per phase like CandidateMeshletsCounter. Read by CopyCullStatsCS.
-    GPUBuffer m_VisibleInstancesCounter;    // RWStructuredBuffer<uint>[2]
+    // Per-phase instance-visibility counter. Incremented by CullInstancesCS atomically
+    // when an instance passes frustum+HZB (one count per instance, not per meshlet).
+    // Only slot [0] is ever written by the shader; cleared and read back (via CopyCullStatsCS)
+    // immediately after each phase, so per-phase reset+reuse of slot [0] alone is correct —
+    // unlike m_VisibleMeshletsCounter, nothing needs this value to survive across phases.
+    GPUBuffer m_VisibleInstancesCounter;    // RWStructuredBuffer<uint>[2] (slot [1] currently unused)
 
     // ----- Cull stats debug -----
     GPUBuffer m_CullStatsBuffer;            // RWStructuredBuffer<uint>[CULL_STATS_COUNT] — written by CopyCullStatsCS
@@ -139,7 +145,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_CullStatsPSO;       // 1-thread CS — debug-text renderer, reads stats buffer
 
     // ----- Root signatures -----
-    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_CullRootSignature; // 15-param unified cull root sig
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_CullRootSignature; // 2-CBV fully-bindless cull root sig
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_HZBRootSignature;     // 1-CBV HZB root sig
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignatureCS; // Indirect Dispatch (CullMeshletsCS ExecuteIndirect)
 
