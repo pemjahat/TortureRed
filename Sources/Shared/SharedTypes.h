@@ -498,25 +498,31 @@ struct TwoPassCullConstants {
 // =============================================================================
 
 // CullStatsBuffer layout (RWStructuredBuffer<uint>[16]):
+// All P2 slots are aligned to CopyCullStatsCS's P2 BaseSlot=4 write offsets:
+// P2 writes candidate@[4], visible@[5], occluded@[6], instance-visible@[7].
 #define CULL_STATS_P1_CANDIDATE_MESHLETS   0  // CandidateMeshletsCounter after Phase 1
 #define CULL_STATS_P1_VISIBLE_MESHLETS     1  // VisibleMeshletsCounter after Phase 1
 #define CULL_STATS_P1_OCCLUDED_INSTANCES   2  // OccludedInstancesCounter (deferred) after Phase 1
-#define CULL_STATS_P2_CANDIDATE_MESHLETS   3  // CandidateMeshletsCounter after Phase 2
-#define CULL_STATS_P2_VISIBLE_MESHLETS     4  // VisibleMeshletsCounter after Phase 2
-#define CULL_STATS_P2_OCCLUDED_INSTANCES   5  // OccludedInstances in Phase 2
+#define CULL_STATS_P1_VISIBLE_INSTANCES    3  // VisibleInstancesCounter after Phase 1 — instances that passed frustum+HZB
+#define CULL_STATS_P2_CANDIDATE_MESHLETS   4  // CandidateMeshletsCounter after Phase 2
+#define CULL_STATS_P2_VISIBLE_MESHLETS     5  // VisibleMeshletsCounter after Phase 2
+#define CULL_STATS_P2_OCCLUDED_INSTANCES   6  // OccludedInstancesCounter (P1 value preserved into P2)
+#define CULL_STATS_P2_VISIBLE_INSTANCES    7  // VisibleInstancesCounter after Phase 2 — instances newly visible in P2
 #define CULL_STATS_COUNT                   8
 
 // Passed to CopyCullStatsCS via root constants.
-// For P1: BaseSlot=0 copies Candidate[0],Visible[0],Occluded[0] → Stats[0..2]
-// For P2: BaseSlot=4 copies Candidate[0],Visible[0] → Stats[4..5], Occluded[0]→Stats[7]
-//         plus P2 OccludedInstancesP2SRVIdx → Stats[6]
+// For P1 (BaseSlot=0): copies Candidate[0]→Stats[0], Visible[0]→Stats[1],
+//   Occluded[0]→Stats[2], InstanceVisible[0]→Stats[3].
+// For P2 (BaseSlot=4): copies Candidate[0]→Stats[4], Visible[0]→Stats[5],
+//   Occluded[0]→Stats[6], InstanceVisible[0]→Stats[7].
 struct CullStatsCopyParams {
-    uint CandidateCounterSRVIdx;     // SRV heap index of CandidateMeshletsCounter (1-element per-phase)
-    uint VisibleCounterSRVIdx;       // SRV heap index of VisibleMeshletsCounter
-    uint OccludedCounterSRVIdx;      // SRV heap index of OccludedInstancesCounter (P1=deferred, P2=occluded-P2)
-    uint StatsBufferUAVIdx;          // UAV heap index of CullStatsBuffer
-    uint BaseSlot;                   // 0 for Phase 1, 4 for Phase 2
-    uint _pad[3];
+    uint CandidateCounterSRVIdx;          // SRV index of CandidateMeshletsCounter
+    uint VisibleCounterSRVIdx;            // SRV index of VisibleMeshletsCounter
+    uint OccludedCounterSRVIdx;           // SRV index of OccludedInstancesCounter
+    uint StatsBufferUAVIdx;               // UAV index of CullStatsBuffer
+    uint BaseSlot;                        // 0 for Phase 1, 4 for Phase 2
+    uint InstanceVisibleCounterSRVIdx;    // SRV index of VisibleInstancesCounter (per-phase instance count)
+    uint _pad[2];
 };
 
 // Passed to CullStatsCS via root constants — reads the debug stats buffer and

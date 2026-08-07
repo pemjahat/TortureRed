@@ -26,7 +26,7 @@ public:
     void RecreateHZB(uint32_t internalWidth, uint32_t internalHeight);
 
     // Compiles two-pass cull CS PSOs and HZB SPD PSOs. Returns the unified
-    // meshlet-cull root signature (15 params) via outRootSig — MeshletPass
+    // meshlet-cull root signature (16 params) via outRootSig — MeshletPass
     // reuses it for its binning PSOs.
     void CreatePipelines(ID3D12Device* device, ID3D12RootSignature* mainRootSignature);
 
@@ -73,6 +73,9 @@ public:
     int GetVisibleMeshletsCounterUAVIndex() const { return m_VisibleMeshletsCounter.uavIndex; }
     int GetCandidateMeshletsCounterSRVIndex() const { return m_CandidateMeshletsCounter.srvIndex; }
     int GetOccludedInstancesCounterSRVIndex() const { return m_OccludedInstancesCounter.srvIndex; }
+    int GetOccludedInstancesCounterUAVIndex() const { return m_OccludedInstancesCounter.uavIndex; }
+    int GetVisibleInstancesCounterSRVIndex() const { return m_VisibleInstancesCounter.srvIndex; }
+    int GetVisibleInstancesCounterUAVIndex() const { return m_VisibleInstancesCounter.uavIndex; }
     // CullStatsBuffer UAV/SRV indices — written by CopyCullStatsCS, read by CullStatsCS.
     int GetCullStatsBufferSRVIndex() const { return m_CullStatsBuffer.srvIndex; }
     int GetCullStatsBufferUAVIndex() const { return m_CullStatsBuffer.uavIndex; }
@@ -100,6 +103,11 @@ private:
     GPUBuffer m_MeshletCullArgs;            // Indirect dispatch args for CullMeshletsCS (uint3)
     GPUBuffer m_InstanceCullArgs;           // Indirect dispatch args for Phase 2 CullInstancesCS (uint3)
     GPUBuffer m_TwoPassCullConstantsBuffer[2]; // Upload-heap CBV, double-buffered: [0]=Phase1, [1]=Phase2
+
+    // Per-phase instance-visibility counter: [0]=Phase1, [1]=Phase2.
+    // Incremented by CullInstancesCS atomically when an instance passes frustum+HZB.
+    // Cleared per phase like CandidateMeshletsCounter. Read by CopyCullStatsCS.
+    GPUBuffer m_VisibleInstancesCounter;    // RWStructuredBuffer<uint>[2]
 
     // ----- Cull stats debug -----
     GPUBuffer m_CullStatsBuffer;            // RWStructuredBuffer<uint>[CULL_STATS_COUNT] — written by CopyCullStatsCS

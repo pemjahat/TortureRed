@@ -43,19 +43,30 @@ void DebugGlyphVS(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID,
                   out float4 outPosition : SV_Position, out float2 outUV : TEXCOORD0, out float4 outColor : COLOR0)
 {
     ByteAddressBuffer data = ResourceDescriptorHeap[Params.DataSRVIdx];
-    DebugCharInstance inst = data.Load<DebugCharInstance>(DEBUG_TEXT_INSTANCES_OFFSET + instanceID * 32);
+    uint base = DEBUG_TEXT_INSTANCES_OFFSET + instanceID * 32;
+
+    // Explicit dword-by-dword load — MUST match the Store layout in
+    // DebugAddCharacter (DebugTextRender.hlsli).
+    float2 posInst   = float2(asfloat(data.Load(base + 0)),
+                              asfloat(data.Load(base + 4)));
+    uint   character = data.Load(base + 8);
+    float  scale     = asfloat(data.Load(base + 12));
+    float4 color     = float4(asfloat(data.Load(base + 16)),
+                              asfloat(data.Load(base + 20)),
+                              asfloat(data.Load(base + 24)),
+                              asfloat(data.Load(base + 28)));
 
     StructuredBuffer<DebugGlyph> glyphs = ResourceDescriptorHeap[Params.GlyphSRVIdx];
-    DebugGlyph glyph = glyphs[inst.Character];
+    DebugGlyph glyph = glyphs[character];
 
     // Triangle strip corners: (0,0) (1,0) (0,1) (1,1)
     float2 corner = float2(vertexID & 1, vertexID >> 1);
-    float2 pos    = inst.Position + corner * glyph.Dimensions * inst.Scale;
+    float2 pos    = posInst + corner * glyph.Dimensions * scale;
     float2 ndc    = pos / float2(Params.TargetWidth, Params.TargetHeight) * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f);
 
     outPosition = float4(ndc, 0.0f, 1.0f);
     outUV       = lerp(glyph.MinUV, glyph.MaxUV, corner);
-    outColor    = inst.Color;
+    outColor    = color;
 }
 
 float4 DebugGlyphPS(float4 position : SV_Position, float2 uv : TEXCOORD0, float4 color : COLOR0) : SV_Target

@@ -20,10 +20,8 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
         std::cerr << "[GPUCulling] Failed to create VisibleMeshlets buffer" << std::endl;
         return;
     }
-    // Multi-element counters (2-element: [0]=Phase1, [1]=Phase2).
-    // The functional culling path only ever reads/writes [0] or [1] per invocation;
-    // the extra element is solely for debug-stats readback after both phases complete.
-    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t) * 2,
+
+    if (!CreateBuffer(m_VisibleMeshletsCounter, sizeof(uint32_t),
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleMeshletsCounter"))
     {
         std::cerr << "[GPUCulling] Failed to create VisibleMeshletsCounter" << std::endl;
@@ -34,15 +32,18 @@ void GPUCulling::CreateResources(uint32_t internalWidth, uint32_t internalHeight
     if (!CreateStructuredBuffer(m_CandidateMeshlets, sizeof(MeshletCandidate), MAX_VISIBLE_MESHLETS,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_CandidateMeshlets"))
         std::cerr << "[GPUCulling] Failed to create CandidateMeshlets buffer" << std::endl;
-    if (!CreateBuffer(m_CandidateMeshletsCounter, sizeof(uint32_t) * 2,
+    if (!CreateBuffer(m_CandidateMeshletsCounter, sizeof(uint32_t),
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_CandidateMeshletsCounter"))
         std::cerr << "[GPUCulling] Failed to create CandidateMeshletsCounter" << std::endl;
     if (!CreateStructuredBuffer(m_OccludedInstances, sizeof(uint32_t), static_cast<UINT>(MAX_VISIBLE_MESHLETS / 4),
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_OccludedInstances"))
         std::cerr << "[GPUCulling] Failed to create OccludedInstances buffer" << std::endl;
-    if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t) * 2,
+    if (!CreateBuffer(m_OccludedInstancesCounter, sizeof(uint32_t),
                       D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_OccludedInstancesCounter"))
         std::cerr << "[GPUCulling] Failed to create OccludedInstancesCounter" << std::endl;
+    if (!CreateBuffer(m_VisibleInstancesCounter, sizeof(uint32_t),
+                      D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, true, "SB_VisibleInstancesCounter"))
+        std::cerr << "[GPUCulling] Failed to create VisibleInstancesCounter" << std::endl;
     if (!CreateStructuredBuffer(m_MeshletCullArgs, sizeof(uint32_t), 3,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_MeshletCullArgs"))
         std::cerr << "[GPUCulling] Failed to create MeshletCullArgs" << std::endl;
@@ -148,9 +149,9 @@ void GPUCulling::CreateHZBResources(uint32_t internalWidth, uint32_t internalHei
 
 void GPUCulling::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* mainRootSignature)
 {
-    // --- Unified Meshlet Cull Root Signature (15 params) ---
+    // --- Unified Meshlet Cull Root Signature (16 params) ---
     {
-        CD3DX12_ROOT_PARAMETER rootParams[15];
+        CD3DX12_ROOT_PARAMETER rootParams[16];
         rootParams[0].InitAsConstantBufferView(0);          // b0: FrameConstants
         rootParams[1].InitAsConstantBufferView(1);          // b1: TwoPassCullConstants
         rootParams[2].InitAsShaderResourceView(0);          // t0: InstanceData[]
@@ -166,12 +167,13 @@ void GPUCulling::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* main
         rootParams[12].InitAsUnorderedAccessView(5);        // u5: VisibleMeshletsCounter
         rootParams[13].InitAsUnorderedAccessView(6);        // u6: MeshletCullArgs
         rootParams[14].InitAsUnorderedAccessView(7);        // u7: InstanceCullArgs
+        rootParams[15].InitAsUnorderedAccessView(8);        // u8: VisibleInstancesCounter
 
         CD3DX12_STATIC_SAMPLER_DESC pointClampSampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
             D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
         CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-        rsDesc.Init(15, rootParams, 1, &pointClampSampler,
+        rsDesc.Init(16, rootParams, 1, &pointClampSampler,
                     D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
 
         Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
@@ -591,6 +593,7 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
     GraphicsHelper::TransitionResource(cmdList, m_CandidateMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_OccludedInstances, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_OccludedInstancesCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GraphicsHelper::TransitionResource(cmdList, m_VisibleInstancesCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshlets, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_VisibleMeshletsCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GraphicsHelper::TransitionResource(cmdList, m_MeshletCullArgs, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -617,6 +620,10 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
         GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleMeshletsCounter.uavIndex),
         GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleMeshletsCounter.cpuUavIndex),
         m_VisibleMeshletsCounter.resource.Get(), zeroes, 0, nullptr);
+    cmdList->ClearUnorderedAccessViewUint(
+        GraphicsHelper::GetSRVGPUHandle((UINT)m_VisibleInstancesCounter.uavIndex),
+        GraphicsHelper::GetCpuUAVHandle((UINT)m_VisibleInstancesCounter.cpuUavIndex),
+        m_VisibleInstancesCounter.resource.Get(), zeroes, 0, nullptr);
 
     if (isFirstPhase && m_DebugRecordOccluded)
     {
@@ -636,6 +643,7 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
     cmdList->SetComputeRootUnorderedAccessView(12, m_VisibleMeshletsCounter.gpuAddress);
     cmdList->SetComputeRootUnorderedAccessView(13, m_MeshletCullArgs.gpuAddress);
     cmdList->SetComputeRootUnorderedAccessView(14, m_InstanceCullArgs.gpuAddress);
+    cmdList->SetComputeRootUnorderedAccessView(15, m_VisibleInstancesCounter.gpuAddress);
 
     if (isFirstPhase)
     {
@@ -729,17 +737,19 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, m_OccludedInstancesCounter,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_VisibleInstancesCounter,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, m_CullStatsBuffer,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         CullStatsCopyParams copyParams = {};
-        copyParams.CandidateCounterSRVIdx = static_cast<uint32_t>(m_CandidateMeshletsCounter.srvIndex);
-        copyParams.VisibleCounterSRVIdx   = static_cast<uint32_t>(m_VisibleMeshletsCounter.srvIndex);
-        copyParams.OccludedCounterSRVIdx  = static_cast<uint32_t>(m_OccludedInstancesCounter.srvIndex);
-        copyParams.StatsBufferUAVIdx      = static_cast<uint32_t>(m_CullStatsBuffer.uavIndex);
-        // Two-phase: Phase 0 → slots [0..2], Phase 1 (SECOND) → slots [4..7]
-        // Frustum-only (occlusion disabled): single pass → slots [0..2]
-        copyParams.BaseSlot               = (occlusionEnabled && !isFirstPhase) ? 4u : 0u;
+        copyParams.CandidateCounterSRVIdx           = static_cast<uint32_t>(m_CandidateMeshletsCounter.srvIndex);
+        copyParams.VisibleCounterSRVIdx             = static_cast<uint32_t>(m_VisibleMeshletsCounter.srvIndex);
+        copyParams.OccludedCounterSRVIdx            = static_cast<uint32_t>(m_OccludedInstancesCounter.srvIndex);
+        copyParams.InstanceVisibleCounterSRVIdx     = static_cast<uint32_t>(m_VisibleInstancesCounter.srvIndex);
+        copyParams.StatsBufferUAVIdx                = static_cast<uint32_t>(m_CullStatsBuffer.uavIndex);
+        // Two-phase: Phase 0 → slots [0..3], Phase 1 (SECOND) → slots [4..7]
+        copyParams.BaseSlot                         = (!isFirstPhase) ? 4u : 0u;
 
         cmdList->SetComputeRootSignature(mainRootSignature);
         cmdList->SetComputeRoot32BitConstants(13, sizeof(CullStatsCopyParams) / 4, &copyParams, 0);

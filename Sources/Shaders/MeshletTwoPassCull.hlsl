@@ -41,6 +41,10 @@ StructuredBuffer<MeshletBounds>    MeshletBoundsBuf    : register(t3);
 RWStructuredBuffer<MeshletCandidate> VisibleMeshlets        : register(u4);
 RWStructuredBuffer<uint>             VisibleMeshletsCounter : register(u5);
 
+// Per-phase instance-visible counter: atomically incremented by CullInstancesCS
+// when an instance passes frustum+HZB (one count per instance, not per meshlet).
+RWStructuredBuffer<uint> VisibleInstancesCounter : register(u8);
+
 // Indirect dispatch args buffers
 RWStructuredBuffer<uint> MeshletCullArgs     : register(u6);  // uint3 dispatch args
 RWStructuredBuffer<uint> InstanceCullArgs    : register(u7);  // uint3 dispatch args
@@ -319,6 +323,12 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
+    // Instance passed frustum + HZB culling — count it once.
+    {
+        uint instanceSlot;
+        InterlockedAdd(VisibleInstancesCounter[0], 1, instanceSlot);
+    }
+
     // Instance passed — enumerate all its meshlets into CandidateMeshlets.
     for (uint localIdx = 0; localIdx < md.MeshletCount; localIdx++)
     {
@@ -339,10 +349,6 @@ void CullInstancesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 void CullMeshletsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     uint candidateIdx = dispatchThreadID.x;
-    // Per-phase counter index: 0=FIRST, 1=SECOND, FRUSTUM_ONLY->0. Must match
-    // the index CullInstancesCS wrote (below) — reading a hardcoded [0] here
-    // silently drops every Phase 2 candidate, since CandidateMeshletsCounter
-    // is cleared every phase and Phase 2 only ever writes element [1].
     uint count = CandidateMeshletsCounter[0]; // read from the UAV Counter
 
     if (candidateIdx >= count)

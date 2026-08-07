@@ -47,15 +47,20 @@ void DebugAddCharacter(DebugRenderContext ctx, uint ch, float2 position, float4 
     if (slot >= DEBUG_TEXT_MAX_CHARS)
         return;
 
-    StructuredBuffer<DebugGlyph> glyphs = ResourceDescriptorHeap[ctx.GlyphSRVIdx];
-    DebugGlyph g = glyphs[ch];
-
-    DebugCharInstance inst;
-    inst.Position  = position + g.Offset * scale;
-    inst.Character = ch;
-    inst.Scale     = scale;
-    inst.Color     = color;
-    data.Store(DEBUG_TEXT_INSTANCES_OFFSET + slot * 32, inst);
+    // Explicit dword-by-dword store to avoid struct decomposition mismatches
+    // between Store (producer) and Load<DebugCharInstance> (vertex shader).
+    // ByteAddressBuffer::Store of a struct with float4 may decompose members at
+    // different offsets than Load<T> reassembles them, particularly when the
+    // compiler inserts alignment padding for float4 (16-byte alignment).
+    uint base = DEBUG_TEXT_INSTANCES_OFFSET + slot * 32;
+    data.Store (base + 0,  asuint(position.x));
+    data.Store (base + 4,  asuint(position.y));
+    data.Store (base + 8,  ch);
+    data.Store (base + 12, asuint(scale));
+    data.Store (base + 16, asuint(color.r));
+    data.Store (base + 20, asuint(color.g));
+    data.Store (base + 24, asuint(color.b));
+    data.Store (base + 28, asuint(color.a));
 }
 
 void DebugAddLine(DebugRenderContext ctx, float3 a, float3 b, float4 color, bool screenSpace)
