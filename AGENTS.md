@@ -6,17 +6,20 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 ## 1. First action: repository discovery
 
-Before editing, map the project. Use fast search commands similar to these, adjusted for the host shell and available tools:
+Before editing, map the project. **This same process and location list applies to any codebase this project consults — this repository itself, or another workspace/repository referenced as a sample or reference implementation (see [Section 2](#2-referencing-other-repositories)).** Never maintain a separate discovery checklist for other repositories; always come back to this list.
+
+Use fast search commands similar to these, adjusted for the host shell and available tools:
 
 ```bash
 pwd
 git status --short
-find . -maxdepth 3 -type f \( -iname "*path*trace*" -o -iname "*ray*trace*" -o -iname "*shader*" -o -iname "*.hlsl" -o -iname "*.hlsli" -o -iname "CMakeLists.txt" \) | sort
+find . -maxdepth 3 -type f \( -iname "*path*trace*" -o -iname "*ray*trace*" -o -iname "*shader*" -o -iname "*.hlsl" -o -iname "*.hlsli" -o -iname "*.slang" -o -iname "*.glsl" -o -iname "CMakeLists.txt" \) | sort
 rg -n "PathTrace|PathTracer|Pathtracer|TraceRay|DispatchRays|DispatchRay|RayGen|closesthit|miss|bouncesMax|samplesPerPixel" .
 rg -n "BindingSet|Descriptor|DescriptorSet|RootSignature|register\(|space[0-9]|UAV|SRV|StructuredBuffer|RWStructuredBuffer|ByteAddressBuffer" .
-rg -n "ShaderTable|Pipeline|Permutation|Define|Macro|CompileShader|DXC|ImGui|CMake|add_shader|shader compile" .
+rg -n "ShaderTable|Pipeline|Permutation|Define|Macro|CompileShader|DXC|Slang|ImGui|CMake|add_shader|shader compile" .
 rg -n "SHARC|Sharc|HashGrid|NRC|NRD|RTXGI" .
 rg -n "RestirDI|RestirGI|Temporal|Spatial|Resolve" .
+rg -n "Deferred|Upscaling|TAA|Meshoptimizer|Meshlet|Occlusion Culling" .
 ```
 
 Find these project-specific locations:
@@ -34,6 +37,8 @@ Find these project-specific locations:
 - path tracer ray generation shader
 - path tracing bounce loop
 - material sampling and direct lighting evaluation
+- scene or model loading
+- model vertices/triangles processing
 - denoiser input generation, if present
 - GPU resource creation and clear/barrier helpers
 
@@ -41,11 +46,12 @@ Find these project-specific locations:
 
 When a task requires research or investigation for the feature currently being prompted, check whether it references another workspace or repository (e.g., a sibling directory with a reference engine or sample). Study the referenced implementation **before** designing or changing code in this repository.
 
-Follow the workflow in [other_repository_guide.md](agentic/other_repository_guide.md).
+Run the exact same [Section 1](#1-first-action-repository-discovery) discovery process — the same search commands, the same project-specific locations list — against the referenced repository instead of inventing a new one. Section 1 is the single canonical discovery checklist regardless of which repository is being mapped.
 
 Key rules:
 
 - **Locate first** — find the referenced repository/workspace on disk before editing anything
+- **Discover the same way** — apply Section 1's search commands and location list to the referenced repository; do not use a separate checklist
 - **Cite precisely** — record the file paths, function names, and line ranges used as the reference
 - **Document before coding** — write down what is wrong or what will change in `docs/` before making code changes
 
