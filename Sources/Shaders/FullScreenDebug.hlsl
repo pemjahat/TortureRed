@@ -65,7 +65,7 @@ float4 PSMain(PSInput input) : SV_Target {
 
         if (FrameCB.taaEnabled)
             return float4(skyColor, 1.0f);
-        float3 exposed = skyColor * FrameCB.exposure;
+        float3 exposed = (skyColor/FP16Scale) * exp2(FrameCB.exposure);
         return float4(exposed / (exposed + 1.0f), 1.0f);
     }
 
@@ -78,11 +78,11 @@ float4 PSMain(PSInput input) : SV_Target {
     // exposure and tonemapping. Otherwise, apply them here for direct display.
     if (FrameCB.taaEnabled)
     {
-        return debugColor;
+        return float4(min(debugColor.rgb, FP16Max), debugColor.a);
     }
 
     // Basic Tone Mapping
-    float3 exposedColor = debugColor.rgb * FrameCB.exposure;
+    float3 exposedColor = debugColor.rgb * exp2(FrameCB.exposure);
     float3 ldrColor = exposedColor / (exposedColor + 1.0f);
 
     return float4(ldrColor, 1.0f);

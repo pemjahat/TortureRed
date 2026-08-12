@@ -76,5 +76,5 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         AccumulationBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
     }
 
-    OutputBuffer[launchIndex] = float4(accumulatedColor, 1.0f);
+    OutputBuffer[launchIndex] = float4(min(accumulatedColor, FP16Max), 1.0f);
 }

@@ -190,6 +190,16 @@ void main(uint3 DTid : SV_DispatchThreadID)
                         g_Scene, g_Lights, g_Frame.numLights, g_Frame, false, rng);
                 }
             }
+            else
+            {
+                // Ray escaped to open sky — sample sky radiance directly (matches
+                // PathTracer.hlsl / SHaRC_Update.hlsl miss handling).
+                hitPos = ray.Origin + ray.Direction * 1000.0f;
+                hitNormal = -ray.Direction;
+                firstBounceHitT = 1000.0f;
+                hasFirstBounceCandidate = true;
+                continuationRadiance = SampleSky(rayDir, g_Frame.skyCubemapIndex);
+            }
         }
     }
 
@@ -214,7 +224,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
         float radianceLuma = max(1e-4f, Luminance(continuationRadiance));
 
         float proposalGain = (pdf > 0.0f) ? (targetShape / pdf) : 0.0f;
-        proposalGain = min(proposalGain, RESTIR_TEMPORAL_INIT_GAIN_CLAMP);
+        //proposalGain = min(proposalGain, RESTIR_TEMPORAL_INIT_GAIN_CLAMP);
 
         float risWeight = proposalGain * radianceLuma;
         if (updateReservoir(r, hitPos, hitNormal, continuationRadiance, firstBounceHitT, risWeight, next_float(rng))) {
@@ -271,7 +281,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
                             min(ReservoirAge(prevR) + 1u, RESTIR_TEMPORAL_MAX_HISTORY_AGE), true);
 
                         float temporalReuseWeight = shiftedTargetPDF * adjustedPrev.W * adjustedPrev.M;
-                        temporalReuseWeight = min(temporalReuseWeight, RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP);
+                        //temporalReuseWeight = min(temporalReuseWeight, RESTIR_TEMPORAL_REUSE_WEIGHT_CLAMP);
 
                         if (mergeReservoirsWithWeight(r, adjustedPrev, temporalReuseWeight, next_float(rng))) {
                             selectedPDF = historyTargetPDF;

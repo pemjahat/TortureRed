@@ -312,7 +312,8 @@ float3 GetDirectLighting(float3 P, float3 N, float3 V, float3 albedo, float meta
             float3 d, s;
             EvaluateBSDF(N, V, L_light, albedo, metallic, roughness, d, s);
             if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) s = 0;
-            return (d + s) * light.color.rgb * light.intensity * ndotl;
+            float3 L = (d + s) * light.color.rgb * light.intensity * ndotl;
+            return min(L, FP16Max);
         }
     }
     return 0;
@@ -358,7 +359,8 @@ float3 EvaluateLocalLight(float3 P, float3 N, float3 V, float3 albedo, float met
     EvaluateBSDF(N, V, L_light, albedo, metallic, roughness, diff, spec);
     if (!frame.enableIndirectSpecular || (isDiffuse && frame.enableAvoidCaustics)) spec = 0;
     
-    return (diff + spec) * light.color.rgb * light.intensity * ndotl * attenuation * spotEffect;
+    float3 L = (diff + spec) * light.color.rgb * light.intensity * ndotl * attenuation * spotEffect;
+    return min(L, FP16Max);
 }
 
 // Multi-light direct lighting function
@@ -403,7 +405,7 @@ float3 GetDirectLightingMultiLights(float3 P, float3 N, float3 V, float3 albedo,
         }
     }
     
-    return totalLighting;
+    return min(totalLighting, FP16Max);
 }
 
 bool CheckVisibility(float3 P, float3 N, float3 samplePos, inout RNG rng) {
@@ -628,9 +630,10 @@ float3 GetDirectLightingStochastic(
     }
     
     // Evaluate the sampled light (result is already divided by PDF)
-    return EvaluateSingleLightWithMIS(
+    float3 L = EvaluateSingleLightWithMIS(
         P, N, V, albedo, metallic, roughness,
         lightSample, scene, frame, rng, isDiffuse);
+    return min(L, FP16Max);
 }
 
 // ============================================================================
@@ -750,7 +753,7 @@ float3 GetLocalLightDirectLightingRIS(
 
     // Unbiased RIS contribution weight: W = weightSum / (M * p̂(x*))
     float W = weightSum / (float(numCandidates) * winnerTarget);
-    return L_winner * W;
+    return min(L_winner * W, FP16Max);
 }
 
 float3 GetDirectLightingRIS(
@@ -772,7 +775,7 @@ float3 GetDirectLightingRIS(
         P, N, V, albedo, metallic, roughness,
         scene, lights, numLights, frame, rng, isDiffuse, numCandidates);
 
-    return totalLighting;
+    return min(totalLighting, FP16Max);
 }
 
 float3 GetDirectLightingLocalLightsBruteForce(
@@ -794,7 +797,7 @@ float3 GetDirectLightingLocalLightsBruteForce(
         }
     }
 
-    return totalLighting;
+    return min(totalLighting, FP16Max);
 }
 
 // Direct lighting dispatch based on frame.lightSamplingMode.
@@ -817,7 +820,7 @@ float3 GetDirectLightingHybrid(
         scene, lights, numLights, frame, rng, isDiffuse);
 
     if (GetLocalLightCount(numLights) == 0) {
-        return totalLighting;
+        return min(totalLighting, FP16Max);
     }
 
     if (frame.lightSamplingMode != 2) {
@@ -828,7 +831,7 @@ float3 GetDirectLightingHybrid(
             scene, lights, numLights, frame, rng, isDiffuse);
     }
 
-    return totalLighting;
+    return min(totalLighting, FP16Max);
 }
 
 #endif // COMMON_TRACING_HLSL

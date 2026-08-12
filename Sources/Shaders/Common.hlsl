@@ -3,6 +3,10 @@
 
 #include "Shared/SharedTypes.h"
 
+// FP16Scale/FP16Max are defined in Shared/SharedTypes.h (shared CPU/GPU section).
+// FP16Scale = 2^-10 pre-scales values so they fit in fp16 representable range.
+// FP16Max   = 65504.0f is the maximum representable fp16 value.
+
 #define SHARC_HASH_ENTRIES_NUM (4 * 1024 * 1024)
 
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {

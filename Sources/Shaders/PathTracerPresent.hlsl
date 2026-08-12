@@ -18,7 +18,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (g_Frame.restirReservoirDebugMode == RESTIR_RESERVOIR_DEBUG_OFF)
     {
-        float3 exposedColor = max(color.rgb, 0.0f) * g_Frame.exposure;
+        float3 exposedColor = (max(color.rgb, 0.0f)/FP16Scale) * exp2(g_Frame.exposure);
         color = float4(exposedColor / (exposedColor + 1.0f), color.a);
     }
 

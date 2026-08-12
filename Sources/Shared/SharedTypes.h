@@ -19,6 +19,14 @@
 #define AA_MODE_ACCUMULATION  1u  // Progressive accumulation (path tracer converges over time)
 #define AA_MODE_TAA           2u  // Temporal Anti-Aliasing with sub-pixel jitter
 
+// fp16 HDR range management — pre-scale high-dynamic-range values so they fit
+// within fp16 representable range without overflow. GPU-side clamp to FP16Max
+// before any fp16 write; CPU-side multiply sun/sky radiance/irradiance by FP16Scale.
+// At exposure time, the inverse scale (2^10) is baked into exp2(exposure + 10).
+// See docs/task011-fp16hdrscale.md for details.
+static const float FP16Scale    = 0.0009765625f;       // 2^-10
+static const float FP16Max      = 65504.0f;            // fp16 max
+
 #define RESTIR_RESERVOIR_DEBUG_OFF        0u
 #define RESTIR_RESERVOIR_DEBUG_POSITION   1u
 #define RESTIR_RESERVOIR_DEBUG_NORMAL     2u

@@ -46,6 +46,13 @@ public:
     // Prompt a re-bake on the next Execute() call (e.g. after sun direction changes).
     void MarkDirty() { m_Dirty = true; }
 
+    // Compute sun irradiance (RGB) from the Hosek-Wilkie solar radiance function.
+    // Uses the spectral model (11 wavelengths, 320-720nm) with CIE 1931 2° observer
+    // conversion to sRGB, integrated over the physical solar disc solid angle.
+    // Called once per sun-direction / turbidity / albedo change.
+    void ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, float groundAlbedo);
+    DirectX::XMFLOAT3 GetSunIrradiance() const { return m_SunIrradiance; }
+
     // Per-frame before/after transition helpers for Renderer.cpp.
     // Sky cubemap stays in SRV after bake; unrelated passes must not write to it.
     void TransitionCubemapToSRV(ID3D12GraphicsCommandList* cmdList);
@@ -78,4 +85,9 @@ private:
     float m_LastSunElevation = -999.0f;
     bool  m_Dirty            = true;
     bool  m_ResourcesCreated = false;
+
+    // Sun irradiance (RGB) computed from the spectral Hosek-Wilkie solar radiance function.
+    // Computed once per sun-direction / turbidity / albedo change, replaces the directional
+    // light's manual color × intensity.
+    DirectX::XMFLOAT3 m_SunIrradiance = { 0.0f, 0.0f, 0.0f };
 };

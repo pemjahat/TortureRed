@@ -45,8 +45,8 @@ float4 PSMain(PSInput input) : SV_Target {
             FrameCB.viewInverse, FrameCB.cameraPosition.xyz);
         float3 skyColor = SampleSky(cameraRayDir, FrameCB.skyCubemapIndex);
         if (FrameCB.taaEnabled)
-            return float4(skyColor, 1.0f);
-        float3 exposed = skyColor * FrameCB.exposure;
+            return float4(min(skyColor, FP16Max), 1.0f);
+        float3 exposed = (skyColor/FP16Scale) * exp2(FrameCB.exposure);
         return float4(exposed / (exposed + 1.0f), 1.0f);
     }
 
@@ -147,11 +147,11 @@ float4 PSMain(PSInput input) : SV_Target {
     // exposure and tonemapping. Otherwise, apply them here for direct display.
     if (FrameCB.taaEnabled)
     {
-        return float4(max(finalColor, 0.0f), 1.0f);
+        return float4(min(max(finalColor, 0.0f), FP16Max), 1.0f);
     }
 
     // Basic Tone Mapping
-    float3 exposedColor = finalColor * FrameCB.exposure;
+    float3 exposedColor = (finalColor/FP16Scale) * exp2(FrameCB.exposure);
     float3 ldrColor = exposedColor / (exposedColor + 1.0f);
     
     return float4(ldrColor, 1.0f);

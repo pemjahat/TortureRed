@@ -160,10 +160,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     final_color = max(0.0, final_color);
 
     // Write history for next frame (rgb + coverage)
-    history_tex[px] = float4(final_color, total_coverage);
+    history_tex[px] = float4(min(final_color, FP16Max), total_coverage);
 
     // Write final output (apply exposure + simple tonemap for display)
-    float3 exposed = final_color * g_Frame.exposure;
+    float3 exposed = (final_color / FP16Scale) * exp2(g_Frame.exposure);
     float3 display = exposed / (exposed + 1.0); // Reinhard tonemap
     output_tex[px] = float4(saturate(display), 1.0);
 }

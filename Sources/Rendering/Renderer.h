@@ -64,6 +64,7 @@ public:
     void ExecuteSky(const FrameConstants& frame, const LightConstants& sunLight);
     uint32_t GetSkyCubemapSRVIndex()  const { return m_Sky.GetSkyCubemapSRVIndex(); }
     uint32_t GetSkySH9BufferSRVIndex() const { return m_Sky.GetSkySH9BufferSRVIndex(); }
+    DirectX::XMFLOAT3 GetSunIrradiance() const { return m_Sky.GetSunIrradiance(); }
 
     // TAA / Temporal Super-Resolution
     void CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH);

@@ -119,11 +119,11 @@ float4 PSMain(PSInput input) : SV_Target0 {
     // exposure and tonemapping. Otherwise, apply them here for direct display.
     if (FrameCB.taaEnabled)
     {
-        return float4(max(finalColor, 0.0f), albedo.a);
+        return float4(min(max(finalColor, 0.0f), FP16Max), albedo.a);
     }
 
     // Basic Tone Mapping
-    float3 exposedColor = finalColor * FrameCB.exposure;
+    float3 exposedColor = (finalColor/FP16Scale) * exp2(FrameCB.exposure);
     float3 ldrColor = exposedColor / (exposedColor + 1.0f);
     
     return float4(ldrColor, albedo.a);

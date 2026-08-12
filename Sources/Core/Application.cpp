@@ -560,6 +560,17 @@ void Application::Render()
         GPU_MARKER(cmdList, L"Sky Bake + SH9 Project");
         if (!m_Scene.GetLights().empty())
             m_Renderer.ExecuteSky(m_FrameConstants, m_Scene.GetLights()[0]);
+
+        // Replace directional-light colour/intensity with the Hosek-Wilkie
+        // sun irradiance computed by Sky::ComputeSunIrradiance().
+        if (!m_Scene.GetLights().empty() && m_Scene.GetLights()[0].direction.w < 0.5f)
+        {
+            LightConstants& sun = m_Scene.GetLights()[0];
+            DirectX::XMFLOAT3 solarIrradiance = m_Renderer.GetSunIrradiance();
+            sun.color     = { solarIrradiance.x, solarIrradiance.y, solarIrradiance.z, 1.0f };
+            sun.intensity = 1.0f;
+            m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
+        }
     }
 
     // Compute frustum for culling
@@ -1479,18 +1490,16 @@ void Application::RenderImGui()
         LightConstants& selectedLight = lights[m_SelectedLightIndex];
         bool changed = false;
 
-        if (ImGui::DragFloat("Intensity", &selectedLight.intensity, 0.1f, 0.0f, 1000.0f))
-        {
-            changed = true;
-        }
-
-        if (ImGui::ColorEdit3("Color", &selectedLight.color.x))
-        {
-            changed = true;
-        }
-
         if (selectedLight.direction.w < 0.5f) // Directional
         {
+            // Directional-light colour/intensity are now driven by the Hosek-Wilkie
+            // solar irradiance (Sky::ComputeSunIrradiance).  The values shown here
+            // are read-only and updated each frame.
+            DirectX::XMFLOAT3 si = m_Renderer.GetSunIrradiance();
+            float irradianceRGB[3] = { si.x, si.y, si.z };
+            ImGui::Text("Sun Irradiance (auto)");
+            ImGui::InputFloat3("##irradiance", irradianceRGB, "%.3f", ImGuiInputTextFlags_ReadOnly);
+
             if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
             {
                 // Normalize direction
@@ -1570,7 +1579,7 @@ void Application::RenderImGui()
         ImGui::Text("No lights in scene.");
     }
     
-    if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, 0.0f, 10.0f))
+    if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, -24.0f, 24.0f))
     {
         // exposure doesn't require reset as it's just post-process
     }

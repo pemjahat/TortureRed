@@ -21,6 +21,60 @@ namespace
     constexpr double kDefaultTurbidity    = 3.0;
     constexpr double kDefaultGroundAlbedo = 0.3;
 
+    // Physical sun half-angle (radians): 0.27° angular radius.
+    // Solid angle Ω = 2π(1 - cos(α)) ≈ π · α² for small α.
+    constexpr double kPhysicalSunAngularRadius = 0.00471;   // 0.27°
+    constexpr double kSunSolidAngle            = 6.97e-5;   // π · α² ≈ 6.97×10⁻⁵ sr
+
+    constexpr double kSunIrradianceBaseScale  = 683.0;  // luminous efficacy, lm/W
+    constexpr double kSunIrradianceSceneScale = 100.0;  // scene-relative tuning factor
+    constexpr double kSkyRadianceScale = kSunIrradianceBaseScale * kSunIrradianceSceneScale;
+
+    // -----------------------------------------------------------------------
+    // CIE 1931 2° Standard Observer (x̄, ȳ, z̄) at the 11 Hosek spectral
+    // wavelength centres: 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720 nm.
+    // Δλ = 40 nm. Wavelengths below 360 nm contribute negligibly.
+    // -----------------------------------------------------------------------
+    struct CIEObserver
+    {
+        double x, y, z;
+    };
+
+    constexpr CIEObserver kCIE_1931_2deg[11] =
+    {
+        //   λ=320nm (UV, invisible)
+        { 0.0000, 0.0000, 0.0000 },
+        //   λ=360nm
+        { 0.0001, 0.0000, 0.0006 },
+        //   λ=400nm
+        { 0.0191, 0.0020, 0.0860 },
+        //   λ=440nm
+        { 0.3483, 0.0230, 1.7471 },
+        //   λ=480nm
+        { 0.0956, 0.1390, 0.8130 },
+        //   λ=520nm
+        { 0.0633, 0.7100, 0.0782 },
+        //   λ=560nm
+        { 0.5945, 0.9950, 0.0039 },
+        //   λ=600nm
+        { 1.0622, 0.6310, 0.0008 },
+        //   λ=640nm
+        { 0.4479, 0.1750, 0.0000 },
+        //   λ=680nm
+        { 0.0468, 0.0170, 0.0000 },
+        //   λ=720nm
+        { 0.0114, 0.0041, 0.0000 },
+    };
+
+    // XYZ (D65 white point) → sRGB linear matrix.
+    // Standard Bradford-adapted sRGB from CIE XYZ.
+    inline void XYZToSRGBLinear(double X, double Y, double Z, double& R, double& G, double& B)
+    {
+        R =  3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z;
+        G = -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z;
+        B =  0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z;
+    }
+
     // -----------------------------------------------------------------------
     // Cubemap face → world-space ray direction.
     // Follows D3D12 convention: +X, -X, +Y, -Y, +Z, -Z.
@@ -83,6 +137,111 @@ namespace
         return (double)std::asin(std::max(-1.0f, std::min(1.0f, toSunY)));
     }
 } // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// ComputeSunIrradiance — CPU-side Hosek-Wilkie solar irradiance
+//
+// Evaluates the spectral solar radiance function arhosekskymodel_solar_radiance()
+// at the sun-centre direction (gamma=0, theta = π/2 − elevation), integrates over
+// the physical solar disc solid angle, converts the 11-wavelength spectral result
+// to sRGB via CIE 1931 2° observer + D65 XYZ→sRGB matrix, and stores the result
+// in m_SunIrradiance.
+//
+// Reference: MJP's DXRPathTracer, SampleFramework12/v1.02/Graphics/Skybox.cpp
+//            SkyCache::Init() lines 81-136.
+// ---------------------------------------------------------------------------
+
+void Sky::ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, float groundAlbedo)
+{
+    // --- Elevation & sun-centre angles ---
+    double elevation = SunElevationFromDirection(sunLight);
+    double thetaS    = (XM_PI / 2.0) - elevation;  // zenith angle of sun centre
+    double gamma     = 0.0;                            // looking directly at sun centre
+
+    // --- Allocate spectral sky states for all 11 wavelengths ---
+    // NumSpectralSamples = 11 (320, 360, ..., 720 nm)
+    static constexpr int kNumSpectralSamples = 11;
+    ArHosekSkyModelState* skyStates[kNumSpectralSamples] = {};
+    for (int i = 0; i < kNumSpectralSamples; ++i)
+    {
+        skyStates[i] = arhosekskymodelstate_alloc_init(elevation, (double)turbidity, (double)groundAlbedo); // first param expect elevation, not zenith angle
+        if (!skyStates[i])
+        {
+            // Free already-allocated states on failure
+            for (int j = 0; j < i; ++j)
+            {
+                arhosekskymodelstate_free(skyStates[j]);
+                skyStates[j] = nullptr;
+            }
+            std::cerr << "[Sky] Failed to allocate solar spectral states" << std::endl;
+            return;
+        }
+    }
+
+    // --- Evaluate solar radiance at sun centre for each wavelength ---
+    double solarRadiance[kNumSpectralSamples] = {};
+    for (int i = 0; i < kNumSpectralSamples; ++i)
+    {
+        double wavelength = 320.0 + 40.0 * i;  // 320, 360, ..., 720 nm
+        solarRadiance[i] = arhosekskymodel_solar_radiance(skyStates[i], thetaS, gamma, wavelength);
+        solarRadiance[i] = std::max(0.0, solarRadiance[i]);
+    }
+
+    // --- Convert spectral radiance → CIE XYZ via 2° observer ---
+    // X = Σ L(λ) · x̄(λ) · Δλ, similarly for Y, Z.  Δλ = 40 nm.
+    constexpr double kDeltaLambda = 40.0;  // nm
+    double X = 0.0, Y = 0.0, Z = 0.0;
+    for (int i = 0; i < kNumSpectralSamples; ++i)
+    {
+        X += solarRadiance[i] * kCIE_1931_2deg[i].x * kDeltaLambda;
+        Y += solarRadiance[i] * kCIE_1931_2deg[i].y * kDeltaLambda;
+        Z += solarRadiance[i] * kCIE_1931_2deg[i].z * kDeltaLambda;
+    }
+
+    // --- XYZ → sRGB linear ---
+    double R, G, B;
+    XYZToSRGBLinear(X, Y, Z, R, G, B);
+
+    // Clamp to non-negative (sRGB gamut clipping handles negatives poorly)
+    R = std::max(0.0, R);
+    G = std::max(0.0, G);
+    B = std::max(0.0, B);
+
+    // --- Convert radiance (W·m⁻²·sr⁻¹) → irradiance (W·m⁻²) ---
+    // Multiply by sun solid angle (sr). Surface perpendicular to the sun.
+    R *= kSunSolidAngle;
+    G *= kSunSolidAngle;
+    B *= kSunSolidAngle;
+
+    // --- Scale to match rendering unit expectations ---
+    // The Hosek output is in physical W/m².  The renderer uses arbitrary linear
+    // units.  We apply luminous efficacy (683 lm/W for photopic vision).
+    // Tune kSunIrradianceSceneScale to taste — larger = brighter sun.
+    R *= kSkyRadianceScale;
+    G *= kSkyRadianceScale;
+    B *= kSkyRadianceScale;
+
+    // --- Pre-scale for fp16 HDR range ---
+    // Multiply by FP16Scale so downstream GPU fp16 writes stay in range.
+    // Inverted at exposure time via exp2(exposure + 10).
+    R *= FP16Scale;
+    G *= FP16Scale;
+    B *= FP16Scale;
+
+    // --- Free spectral states ---
+    for (int i = 0; i < kNumSpectralSamples; ++i)
+    {
+        arhosekskymodelstate_free(skyStates[i]);
+        skyStates[i] = nullptr;
+    }
+
+    m_SunIrradiance = DirectX::XMFLOAT3((float)R, (float)G, (float)B);
+
+    std::cout << "[Sky] Sun irradiance computed: R=" << m_SunIrradiance.x
+              << " G=" << m_SunIrradiance.y << " B=" << m_SunIrradiance.z
+              << " (turbidity=" << turbidity << ", albedo=" << groundAlbedo
+              << ", elevation=" << elevation << " rad)" << std::endl;
+}
 
 // ---------------------------------------------------------------------------
 // CreateResources
@@ -257,6 +416,11 @@ bool Sky::BakeCubemap(ID3D12GraphicsCommandList* cmdList,
                 float fg = (float)std::max(0.0, radG);
                 float fb = (float)std::max(0.0, radB);
 
+                // Pre-scale for fp16 HDR range — see SharedTypes.h FP16Scale.
+                fr *= (kSkyRadianceScale * FP16Scale);
+                fg *= (kSkyRadianceScale * FP16Scale);
+                fb *= (kSkyRadianceScale * FP16Scale);
+
                 // Pack RGBA16F — write 4 uint16_t half-float channels manually.
                 uint8_t* dst = texelData.data()
                              + face * kFaceSize
@@ -368,6 +532,9 @@ void Sky::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootS
     m_LastGroundAlbedo = groundAlbedo;
     m_LastSunElevation = (float)elevation;
     m_Dirty            = false;
+
+    // --- Compute sun irradiance from spectral solar radiance ---
+    ComputeSunIrradiance(sunLight, turbidity, groundAlbedo);
 
     // --- SH9 Projection ---
     TransitionCubemapToSRV(cmdList);

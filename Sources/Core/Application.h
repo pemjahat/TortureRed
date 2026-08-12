@@ -47,7 +47,7 @@ private:
     bool m_DebugScreenText         = false;  // GPU on-screen debug text/lines overlay, master switch
     bool m_DebugDepthLabels        = false;  // Depth-duel labels for occluded records
     bool m_CullStatsOverlay        = false;  // Meshlet culling stats on-screen table
-    float m_Exposure = 1.0f;
+    float m_Exposure = -14.0f;
     SDL_Window* m_Window;
 
     // Core systems
