@@ -109,8 +109,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
         if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
         {
-            // Sky hit — propagate zero radiance back through stored vertices
-            SharcUpdateMiss(sharcParams, sharcState, float3(0.0f, 0.0f, 0.0f));
+            // Sky hit — sample sky radiance and propagate back through stored vertices
+            float3 skyRadiance = SampleSky(rayDir, g_Frame.skyCubemapIndex);
+            SharcUpdateMiss(sharcParams, sharcState, skyRadiance);
             break;
         }
 

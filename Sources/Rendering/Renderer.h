@@ -18,6 +18,7 @@
 #include "GBuffer.h"
 #include "DeferredLighting.h"
 #include "Transparency.h"
+#include "Sky.h"
 
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
@@ -56,6 +57,13 @@ public:
     void CreateRestirDIResources();
     void CreateRestirDIPipelines();
     void DispatchRestirDI(class Model* model, const FrameConstants& frame);
+
+    // Sky rendering (Hosek-Wilkie sky model)
+    void CreateSkyResources();
+    void CreateSkyPipelines();
+    void ExecuteSky(const FrameConstants& frame, const LightConstants& sunLight);
+    uint32_t GetSkyCubemapSRVIndex()  const { return m_Sky.GetSkyCubemapSRVIndex(); }
+    uint32_t GetSkySH9BufferSRVIndex() const { return m_Sky.GetSkySH9BufferSRVIndex(); }
 
     // TAA / Temporal Super-Resolution
     void CreateTaaResources(uint32_t outputW, uint32_t outputH, uint32_t internalW, uint32_t internalH);
@@ -312,6 +320,8 @@ private:
     MeshletPass m_Meshlet;
     GPUCulling  m_GPUCulling;
     DebugTextRenderer m_DebugTextRenderer; // GPU on-screen debug text/lines (task008)
+
+    Sky m_Sky; // Hosek-Wilkie sky model
 
     // Prevent copying
     Renderer(const Renderer&) = delete;

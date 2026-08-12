@@ -68,4 +68,59 @@ void EvaluateBSDF(float3 N, float3 V, float3 L, float3 baseColor, float metallic
     diffuseBRDF = kD * baseColor / 3.14159265f;
 }
 
+// ============================================================================
+// SH9 Irradiance Evaluation — Tier 2: rasterizer ambient term
+// ============================================================================
+// The sky system stores irradiance SH coefficients (A_l * L_lm) in a 9-element
+// StructuredBuffer. At evaluation time we reconstruct irradiance via:
+//   E(N) = Σ_i skySH9[i] * Y_lm(N)
+// (plain SH basis — the A_l cosine convolution is already baked into the
+// stored coefficients by Sky_ProjectSH9.hlsl).
+//
+// Reference: Ramamoorthi & Hanrahan 2001, "An Efficient Representation for
+//            Irradiance Environment Maps."
+// ============================================================================
+
+// Plain real SH basis Y_lm (order-3, 9 coefficients), WITHOUT cosine
+// convolution A_l factors. The A_l scaling is pre-applied to the stored
+// coefficients during the projection pass.
+void EvalSH9Basis(float3 N, out float sh[9])
+{
+    // Band 0: Y00 = 1/(2*sqrt(pi))
+    sh[0] = 0.28209479177387814f;
+
+    // Band 1: Y1m = sqrt(3/(4*pi)) * {y, z, x}
+    float c1 = 0.4886025119029199f;
+    sh[1] = c1 * N.y;
+    sh[2] = c1 * N.z;
+    sh[3] = c1 * N.x;
+
+    // Band 2
+    sh[4] = 1.0925484305920792f * N.x * N.y;                    // Y2,-2
+    sh[5] = 1.0925484305920792f * N.y * N.z;                    // Y2,-1
+    sh[6] = 0.31539156525252005f * (3.0f * N.z * N.z - 1.0f);   // Y2,0
+    sh[7] = 1.0925484305920792f * N.x * N.z;                    // Y2,+1
+    sh[8] = 0.5462742152960396f  * (N.x * N.x - N.y * N.y);     // Y2,+2
+}
+
+// Evaluates SH9 irradiance at normal N from a structured buffer of 9 float4
+// coefficients. The coefficients are pre-convolved with the cosine kernel.
+// Returns RGB irradiance (HDR). Multiply by albedo/PI for Lambertian ambient.
+float3 EvalSH9Irradiance(float3 N, StructuredBuffer<float4> skySH9)
+{
+    float basis[9];
+    EvalSH9Basis(N, basis);
+    float3 irradiance = 0.0f;
+    for (int i = 0; i < 9; ++i)
+        irradiance += skySH9[i].rgb * basis[i];
+    return max(irradiance, 0.0f);
+}
+
+// Overload that takes a bindless index into ResourceDescriptorHeap.
+float3 EvalSH9IrradianceIndex(float3 N, uint skySH9BufferIndex)
+{
+    StructuredBuffer<float4> skySH9 = ResourceDescriptorHeap[skySH9BufferIndex];
+    return EvalSH9Irradiance(N, skySH9);
+}
+
 #endif // PBR_HLSL

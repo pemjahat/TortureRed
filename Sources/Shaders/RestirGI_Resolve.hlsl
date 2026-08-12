@@ -34,7 +34,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     bool hasPrimaryHit = TracePrimarySurface(launchIndex, launchDims, g_Frame, rng, primarySurface, primaryRayT);
 
     if (!hasPrimaryHit) {
-        accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+        float3 cameraRayDir = GetPrimaryCameraRayDir(launchIndex, launchDims, g_Frame);
+        accumulatedColor = SampleSky(cameraRayDir, g_Frame.skyCubemapIndex);
     } else {
         float3 N = primarySurface.normal;
         float3 worldPos = primarySurface.worldPos;

@@ -120,7 +120,7 @@ bool CreateStructuredBuffer(GPUBuffer& buffer, UINT64 elementSize, UINT64 elemen
     return true;
 }
 
-bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize, const char* debugName)
+bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState, const FLOAT* clearColor, UINT mipLevels, UINT arraySize, const char* debugName, bool isCubemap)
 {
     auto& ctx = GraphicsHelper::GetContext();
     D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -180,7 +180,14 @@ bool CreateTexture(GPUTexture& texture, UINT width, UINT height, DXGI_FORMAT for
         else
             srvDesc.Format = format;
         
-        if (arraySize > 1)
+        if (isCubemap)
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MipLevels = mipLevels;
+            srvDesc.TextureCube.MostDetailedMip = 0;
+            srvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
+        }
+        else if (arraySize > 1)
         {
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             srvDesc.Texture2DArray.MipLevels = mipLevels;

@@ -122,6 +122,7 @@ void Renderer::CreateRasterIndirectGIPipelines()
     }
 
     // Seed file timestamps for hot-reload after all PSOs are initially created.
+    CreateSkyPipelines();
     CreateRestirDIPipelines();
     SetupShaderTimestamps();
 
@@ -1099,6 +1100,9 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
         InitializeNrd();
     }
 
+    // ---- Sky cubemap + SH9 buffer (128x128 cubemap, fixed regardless of resolution) ----
+    CreateSkyResources();
+
     std::cout << "Internal-resolution resources recreated: " << w << "x" << h << std::endl;
 }
 
@@ -1142,6 +1146,30 @@ void Renderer::CreateMeshletPipelines()
 {
     m_GPUCulling.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
     m_Meshlet.CreatePipelines(m_Device.Get(), m_Device2.Get(), m_RootSignature.Get(), m_MeshShaderSupported);
+}
+
+// =============================================================================
+// Sky — Hosek-Wilkie sky model
+// =============================================================================
+
+void Renderer::CreateSkyResources()
+{
+    m_Sky.CreateResources(m_Device.Get(), m_InternalWidth, m_InternalHeight);
+}
+
+void Renderer::CreateSkyPipelines()
+{
+    m_Sky.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
+}
+
+void Renderer::ExecuteSky(const FrameConstants& frame, const LightConstants& sunLight)
+{
+    constexpr float kDefaultTurbidity    = 3.0f;
+    constexpr float kDefaultGroundAlbedo = 0.3f;
+
+    m_Sky.Execute(m_CommandList.Get(), m_RootSignature.Get(),
+                  m_FrameCB.gpuAddress, sunLight,
+                  kDefaultTurbidity, kDefaultGroundAlbedo);
 }
 
 void Renderer::DispatchMeshletTwoPassCull(Model* model, const FrameConstants& frame,

@@ -36,10 +36,19 @@ float4 PSMain(PSInput input) : SV_Target {
     float4 material = g_Textures[FrameCB.materialIndex].Sample(g_LinearSampler, input.texCoord);
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
 
-    // Early exit for sky pixels (reverse-Z: depth <= 0.0 = clear/far plane)
-    // if (depth <= 0.0f) {
-    //     return float4(0.0f, 0.0f, 0.0f, 1.0f);
-    // }
+    // Early exit for sky pixels (reverse-Z: depth <= 0.0 = clear/far plane).
+    // Sample the baked sky cubemap for background color; no shading needed.
+    if (depth <= 0.0f)
+    {
+        float3 cameraRayDir = GetCameraRayDirection(
+            input.texCoord, FrameCB.projectionInverse,
+            FrameCB.viewInverse, FrameCB.cameraPosition.xyz);
+        float3 skyColor = SampleSky(cameraRayDir, FrameCB.skyCubemapIndex);
+        if (FrameCB.taaEnabled)
+            return float4(skyColor, 1.0f);
+        float3 exposed = skyColor * FrameCB.exposure;
+        return float4(exposed / (exposed + 1.0f), 1.0f);
+    }
 
     // Reconstruction of world position from depth
     float4 ndc = float4(input.texCoord.x * 2.0f - 1.0f, (1.0f - input.texCoord.y) * 2.0f - 1.0f, depth, 1.0f);
@@ -104,8 +113,11 @@ float4 PSMain(PSInput input) : SV_Target {
             FrameCB, rng, false, localLightRisCandidates);
     }
 
-    float3 ambient = 0.03f * albedo.rgb;
-    float3 finalColor = ambient + totalDirectLighting;
+    // Ambient term: SH9 sky irradiance (Tier 2). Cancel ambient as this doesn't have occlusion right now
+    //float3 irradiance = EvalSH9IrradianceIndex(N, FrameCB.skySH9BufferIndex);
+    //float3 ambient = irradiance * albedo.rgb / 3.14159265f;
+    //float3 finalColor = ambient + totalDirectLighting;
+    float3 finalColor = totalDirectLighting;
     
     // Apply indirect lighting from FinalDiffuse/FinalSpecular.
     // These textures contain NRD-normalized radiance (with or without denoising).

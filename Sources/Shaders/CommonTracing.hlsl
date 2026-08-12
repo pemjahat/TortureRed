@@ -148,6 +148,28 @@ float3 GetCameraRayDirection(float2 uv, float4x4 projectionInverse, float4x4 vie
     return normalize(worldFar - cameraPos);
 }
 
+// ============================================================================
+// Sky sampling — Tier 1: cubemap accessor for ray-traced GI ray-miss paths
+// ============================================================================
+
+// Samples the baked Hosek-Wilkie sky cubemap at a given world-space direction.
+// skyCubemapIndex: bindless SRV index from FrameConstants.skyCubemapIndex.
+// Returns sky radiance (HDR).
+float3 SampleSky(float3 rayDir, uint skyCubemapIndex)
+{
+    TextureCube<float4> skyCubemap = ResourceDescriptorHeap[skyCubemapIndex];
+    return skyCubemap.SampleLevel(g_LinearSampler, normalize(rayDir), 0.0f).rgb;
+}
+
+// Reconstructs the camera ray direction from a pixel launch index.
+// Used by Resolve shaders that need sky color for primary-ray-miss pixels
+// but don't hold a valid ray direction.
+float3 GetPrimaryCameraRayDir(uint2 launchIndex, uint2 launchDims, FrameConstants frame)
+{
+    float2 uv = ((float2)launchIndex + 0.5f) / (float2)launchDims;
+    return GetCameraRayDirection(uv, frame.projectionInverse, frame.viewInverse, frame.cameraPosition.xyz);
+}
+
 // Resolves mesh and material data at a committed ray-query hit into a Surface.
 // Call after confirming CommittedStatus() == COMMITTED_TRIANGLE_HIT.
 // minRoughness: minimum roughness clamp (0.01 for primary/near hits, 0.15 for deep indirect bounces).

@@ -37,7 +37,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 accumulatedColor = 0;
 
     if (!surface.valid) {
-        accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+        float3 cameraRayDir = GetPrimaryCameraRayDir(launchIndex, launchDims, g_Frame);
+        accumulatedColor = SampleSky(cameraRayDir, g_Frame.skyCubemapIndex);
     } else {
         // --- Direct Lighting: dispatch based on lightSamplingMode ---
         // 0=Uniform (1 shadow ray), 1=ImportancePDF (1 shadow ray), 2=BruteForce (all lights)

@@ -468,6 +468,12 @@ void Application::Update(float deltaTime)
     m_FrameConstants.taaHistoryIndex = 0; // Will be set by renderer
     m_FrameConstants.taaFrameCounter = m_TaaFrameCounter;
 
+    // Sky system : bindless indices for cubemap + SH9 buffer.
+    m_FrameConstants.skyCubemapIndex  = m_Renderer.GetSkyCubemapSRVIndex();
+    m_FrameConstants.skySH9BufferIndex = m_Renderer.GetSkySH9BufferSRVIndex();
+    m_FrameConstants.skyTurbidity     = 3.0f;
+    m_FrameConstants.skyGroundAlbedo  = 0.3f;
+
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
     {
@@ -545,6 +551,16 @@ void Application::Render()
     // Set camera viewProj to root param 0
     m_Renderer.UpdateFrameCB(m_FrameConstants);
     cmdList->SetGraphicsRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
+
+    // Sky system : bake the Hosek-Wilkie cubemap + project SH9.
+    // Must run before any path tracer / GI / lighting pass that reads the sky.
+    {
+        MICROPROFILE_SCOPEI("Render", "Sky", MP_CYAN);
+        MICROPROFILE_SCOPEGPUI("Sky", MP_CYAN);
+        GPU_MARKER(cmdList, L"Sky Bake + SH9 Project");
+        if (!m_Scene.GetLights().empty())
+            m_Renderer.ExecuteSky(m_FrameConstants, m_Scene.GetLights()[0]);
+    }
 
     // Compute frustum for culling
     DirectX::XMMATRIX proj = m_Camera.GetProjMatrix();

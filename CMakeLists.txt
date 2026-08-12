@@ -222,6 +222,7 @@ include_directories(${CMAKE_SOURCE_DIR}/ThirdParty/jsmn/jsmn-1.1.0)
 include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
+include_directories(${CMAKE_SOURCE_DIR}/Externals/HosekSky)
 include_directories(${fidelityfx_spd_SOURCE_DIR}/ffx-spd)
 include_directories(${microprofile_SOURCE_DIR})
 include_directories(${meshoptimizer_SOURCE_DIR}/src)
@@ -242,6 +243,11 @@ file(GLOB_RECURSE SHADER_SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE Sources/pch.h)
+
+# ArHosekSkyModel.cpp excludes PCH — it includes its own standard headers directly.
+set_source_files_properties("${CMAKE_SOURCE_DIR}/Externals/HosekSky/ArHosekSkyModel.cpp"
+    PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/Externals/HosekSky/ArHosekSkyModel.cpp")
 
 # Set RTXDI include path for shaders
 target_compile_definitions(${PROJECT_NAME} PRIVATE

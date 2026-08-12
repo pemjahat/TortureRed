@@ -113,7 +113,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     throughput /= p;
                 }
             } else {
-                float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+                float3 skyRadiance = SampleSky(rayDir, g_Frame.skyCubemapIndex);
                 if (bounce == 1) {
                     indirectHitPos = ray.Origin + ray.Direction * 1000.0f;
                     indirectHitNormal = -ray.Direction;

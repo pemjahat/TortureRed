@@ -47,10 +47,27 @@ ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 float4 PSMain(PSInput input) : SV_Target {
     float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
 
-    // Sky pixels — output background (transparent black). Reverse-Z: clear = 0.0 (far plane).
-    //if (depth <= 0.0f) {
-        //return float4(0.0f, 0.0f, 0.0f, 1.0f);
-    //}
+    // Sky pixels — sample the baked sky cubemap for background color.
+    // Reverse-Z: clear = 0.0 (far plane).
+    if (depth <= 0.0f)
+    {
+        // Reconstruct camera ray direction (same as GetCameraRayDirection in CommonTracing.hlsl,
+        // duplicated here to avoid pulling in the full ray-tracing include).
+        float2 uv = input.texCoord;
+        float2 ndcXY = float2(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f);
+        float4 viewFar = mul(float4(ndcXY, 1.0f, 1.0f), FrameCB.projectionInverse);
+        viewFar /= max(abs(viewFar.w), 1e-6f);
+        float3 worldFar = mul(viewFar, FrameCB.viewInverse).xyz;
+        float3 cameraRayDir = normalize(worldFar - FrameCB.cameraPosition.xyz);
+
+        TextureCube<float4> skyCubemap = ResourceDescriptorHeap[FrameCB.skyCubemapIndex];
+        float3 skyColor = skyCubemap.SampleLevel(g_LinearSampler, cameraRayDir, 0.0f).rgb;
+
+        if (FrameCB.taaEnabled)
+            return float4(skyColor, 1.0f);
+        float3 exposed = skyColor * FrameCB.exposure;
+        return float4(exposed / (exposed + 1.0f), 1.0f);
+    }
 
     // Single unified debug input — all debug modes pre-combine into this texture
     Texture2D<float4> debugTex = ResourceDescriptorHeap[g_Indices.InputIdx0];

@@ -95,6 +95,12 @@ struct FrameConstants {
     uint restirDIDebugMode;           // RESTIR_DI_DEBUG_* enum
     uint _diPad0;
     uint _diPad1;
+
+    // Sky system (Hosek-Wilkie)
+    uint skyCubemapIndex;       // Bindless SRV index of the baked sky TextureCube
+    uint skySH9BufferIndex;     // Bindless SRV index of the SkySH9Buffer (9x float4)
+    float skyTurbidity;         // Hosek-Wilkie turbidity [1, 10] — fixed default in code
+    float skyGroundAlbedo;      // Hosek-Wilkie ground albedo [0, 1] — fixed default in code
 };
 
 struct BindlessIndices {

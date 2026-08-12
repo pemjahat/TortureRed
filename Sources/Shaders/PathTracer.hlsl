@@ -35,7 +35,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     bool hasPrimaryHit = TracePrimarySurface(launchIndex, launchDims, g_Frame, rng, primarySurface, primaryRayT);
 
     if (!hasPrimaryHit) {
-        accumulatedColor = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+        float3 cameraRayDir = GetPrimaryCameraRayDir(launchIndex, launchDims, g_Frame);
+        accumulatedColor = SampleSky(cameraRayDir, g_Frame.skyCubemapIndex);
     } else {
         float3 primaryHitPos = primarySurface.worldPos;
         float3 primaryNormal = primarySurface.normal;
@@ -103,7 +104,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     throughput /= p;
                 }
             } else {
-                float3 skyRadiance = float3(0.5f, 0.7f, 1.0f) * 0.2f;
+                float3 skyRadiance = SampleSky(rayDir, g_Frame.skyCubemapIndex);
                 indirectRadianceAccum += skyRadiance * throughput;
                 break;
             }
