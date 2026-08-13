@@ -93,11 +93,11 @@ bool AreMaterialsSimilar(Surface lhs, Surface rhs, float albedoThreshold, float 
 float ComputeJacobian(float3 primaryPos, float3 neighborPrimaryPos, float3 sampleHitPos, float3 sampleHitNormal) {
     float3 diffP = sampleHitPos - primaryPos;
     float distSqP = max(0.0001f, dot(diffP, diffP));
-    float cosP = max(0.0001f, abs(dot(sampleHitNormal, diffP / sqrt(distSqP))));
+    float cosP = max(0.0001f, saturate(dot(sampleHitNormal, diffP / sqrt(distSqP))));
     
     float3 diffQ = sampleHitPos - neighborPrimaryPos;
     float distSqQ = max(0.0001f, dot(diffQ, diffQ));
-    float cosQ = max(0.0001f, abs(dot(sampleHitNormal, diffQ / sqrt(distSqQ))));
+    float cosQ = max(0.0001f, saturate(dot(sampleHitNormal, diffQ / sqrt(distSqQ))));
     
     // Solid angle at P / Solid angle at Q
     return (cosP * distSqQ) / (max(0.00001f, cosQ * distSqP));    
