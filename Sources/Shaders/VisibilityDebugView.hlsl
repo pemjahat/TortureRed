@@ -3,18 +3,9 @@
 #include "Random.hlsli"
 
 // --- Debug overlay parameters (CPU→GPU via root constants b2) ---
-struct DebugParams
-{
-    uint Mode;             // 0 = Off, 1 = Instance, 2 = Meshlet, 3 = Primitive, 4 = HZB mip tint
-    uint VisBufSRVIdx;     // Descriptor-heap SRV index for visibility buffer (R32_UINT texture)
-    uint CandidatesSRVIdx; // Descriptor-heap SRV index for VisibleMeshlets StructuredBuffer
-    uint OutputUAVIdx;     // Descriptor-heap UAV index for output color (R16G16B16A16_FLOAT texture)
-    uint Width;
-    uint Height;
-    uint MipsSRVIdx;       // Descriptor-heap SRV index for VisibleMeshletMips (mode 4)
-    uint HZBMipCount;      // HZB mip count (mode 4 color ramp normalization)
-};
-ConstantBuffer<DebugParams> DebugCB : register(b2);
+// MeshletDebugParams is shared with the CPU side (SharedTypes.h) and carries the
+// meshlet stream bindless indices.
+ConstantBuffer<MeshletDebugParams> DebugCB : register(b2);
 
 // Heat ramp for the mip tint : fine mips (0) = blue → green → coarse mips = red
 float3 MipTintColor(uint mip, uint mipCount)
@@ -25,17 +16,8 @@ float3 MipTintColor(uint mip, uint mipCount)
                   saturate(1.5f - t * 2.0f));
 }
 
-// Global stream buffers for barycentric reconstruction (bound via root param 14 descriptor table, t0-t15 space3)
-// Registers must match the CPU-side stream layout (Model.h GetMeshletStreamSRVBase): slot 6 is
-// GlobalMeshletBounds (unused here), so MeshData/InstanceData sit at t7/t8 like in MeshletRasterizeMS.hlsl.
-StructuredBuffer<float3>          GlobalPositions         : register(t0, space3);
-StructuredBuffer<uint>            GlobalNormals           : register(t1, space3);
-StructuredBuffer<uint>            GlobalUVs               : register(t2, space3);
-StructuredBuffer<Meshlet>         GlobalMeshlets          : register(t3, space3);
-StructuredBuffer<uint>            GlobalMeshletVertices   : register(t4, space3);
-StructuredBuffer<MeshletTriangle> GlobalMeshletTriangles  : register(t5, space3);
-StructuredBuffer<MeshData>        GlobalMeshData          : register(t7, space3);
-StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t8, space3);
+// Meshlet stream buffers are looked up individually via ResourceDescriptorHeap
+// from DebugCB's flat bindless index fields.
 
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
@@ -61,17 +43,27 @@ void DebugRenderCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (UnpackVisBuffer(visData, candidateIndex, primitiveID))
     {
         MeshletCandidate candidate = visibleMeshlets[candidateIndex];
-        //InstanceData instance = GlobalInstanceData[candidate.InstanceID];
+        //InstanceData instance = globalInstanceData[candidate.InstanceID];
         uint meshletIndex = candidate.MeshletIndex;
+
+        // Meshlet stream buffers — bindless heap lookups
+        StructuredBuffer<InstanceData>    globalInstanceData     = ResourceDescriptorHeap[DebugCB.InstanceDataSRVIdx];
+        StructuredBuffer<MeshData>        globalMeshData         = ResourceDescriptorHeap[DebugCB.MeshDataSRVIdx];
+        StructuredBuffer<Meshlet>         globalMeshlets         = ResourceDescriptorHeap[DebugCB.GlobalMeshletsSRVIdx];
+        StructuredBuffer<uint>            globalMeshletVertices  = ResourceDescriptorHeap[DebugCB.GlobalMeshletVerticesSRVIdx];
+        StructuredBuffer<MeshletTriangle> globalMeshletTriangles = ResourceDescriptorHeap[DebugCB.GlobalMeshletTrianglesSRVIdx];
+        StructuredBuffer<float3>          globalPositions        = ResourceDescriptorHeap[DebugCB.GlobalPositionsSRVIdx];
+        StructuredBuffer<uint>            globalNormals          = ResourceDescriptorHeap[DebugCB.GlobalNormalsSRVIdx];
+        StructuredBuffer<uint>            globalUVs              = ResourceDescriptorHeap[DebugCB.GlobalUVsSRVIdx];
 
         // Reconstruct vertex attributes for wireframe
          float2 viewportInv = float2(1.0f / float(DebugCB.Width), 1.0f / float(DebugCB.Height));
          VisBufferVertexAttribute vertex = GetVertexAttributes(
              screenUV, FrameCB.viewProj, viewportInv,
              visibleMeshlets,
-             GlobalInstanceData, GlobalMeshData,
-             GlobalMeshlets, GlobalMeshletVertices, GlobalMeshletTriangles,
-             GlobalPositions, GlobalNormals, GlobalUVs,
+             globalInstanceData, globalMeshData,
+             globalMeshlets, globalMeshletVertices, globalMeshletTriangles,
+             globalPositions, globalNormals, globalUVs,
              candidateIndex, primitiveID);
 
         if (DebugCB.Mode == 1)

@@ -29,16 +29,8 @@
 #define NUM_MESHLET_THREADS 32
 
 // --- Bindless resource declarations ---
-// Meshlet stream buffers (contiguous in heap, bound via root param 14 descriptor table t0-t8 space3)
-StructuredBuffer<float3>           GlobalPositions         : register(t0, space3);
-StructuredBuffer<uint>             GlobalNormals           : register(t1, space3); // unused here (moved to VisibilityGBuffer.hlsl)
-StructuredBuffer<uint>             GlobalUVs               : register(t2, space3);
-StructuredBuffer<Meshlet>          GlobalMeshlets          : register(t3, space3);
-StructuredBuffer<uint>             GlobalMeshletVertices   : register(t4, space3);
-StructuredBuffer<MeshletTriangle>  GlobalMeshletTriangles  : register(t5, space3);
-StructuredBuffer<MeshletBounds>    GlobalMeshletBounds     : register(t6, space3); // unused here
-StructuredBuffer<MeshData>         GlobalMeshData          : register(t7, space3);
-StructuredBuffer<InstanceData>     GlobalInstanceData      : register(t8, space3);
+// Meshlet stream buffers are looked up individually via ResourceDescriptorHeap
+// from gRasterParams' flat bindless index fields.
 
 // Material buffer (root SRV param 1, t0 space1) — always needed for alpha discard
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
@@ -94,23 +86,32 @@ void MSMain(
     StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[gRasterParams.VisibleMeshletsIdx];
     MeshletCandidate cand = visibleMeshlets[candidateIndex];
 
-    InstanceData inst     = GlobalInstanceData[cand.InstanceID];
-    MeshData md           = GlobalMeshData[inst.MeshDataIndex];
-    Meshlet m             = GlobalMeshlets[md.MeshletOffset + cand.MeshletIndex];
+    // Meshlet stream buffers — bindless heap lookups
+    StructuredBuffer<InstanceData>    globalInstanceData     = ResourceDescriptorHeap[gRasterParams.InstanceDataSRVIdx];
+    StructuredBuffer<MeshData>        globalMeshData         = ResourceDescriptorHeap[gRasterParams.MeshDataSRVIdx];
+    StructuredBuffer<Meshlet>         globalMeshlets         = ResourceDescriptorHeap[gRasterParams.GlobalMeshletsSRVIdx];
+    StructuredBuffer<uint>            globalMeshletVertices  = ResourceDescriptorHeap[gRasterParams.GlobalMeshletVerticesSRVIdx];
+    StructuredBuffer<MeshletTriangle> globalMeshletTriangles = ResourceDescriptorHeap[gRasterParams.GlobalMeshletTrianglesSRVIdx];
+    StructuredBuffer<float3>          globalPositions        = ResourceDescriptorHeap[gRasterParams.GlobalPositionsSRVIdx];
+    StructuredBuffer<uint>            globalUVs              = ResourceDescriptorHeap[gRasterParams.GlobalUVsSRVIdx];
+
+    InstanceData inst     = globalInstanceData[cand.InstanceID];
+    MeshData md           = globalMeshData[inst.MeshDataIndex];
+    Meshlet m             = globalMeshlets[md.MeshletOffset + cand.MeshletIndex];
 
     SetMeshOutputCounts(m.VertexCount, m.TriangleCount);
 
     // Output vertices (strided loop over up to MESHLET_MAX_VERTICES)
     for (uint i = groupThreadID; i < m.VertexCount; i += NUM_MESHLET_THREADS)
     {
-        uint globalVtxIdx = GlobalMeshletVertices[md.MeshletVertexOffset + m.VertexOffset + i];
-        float3 localPos   = GlobalPositions[md.PositionOffset + globalVtxIdx];
+        uint globalVtxIdx = globalMeshletVertices[md.MeshletVertexOffset + m.VertexOffset + i];
+        float3 localPos   = globalPositions[md.PositionOffset + globalVtxIdx];
         float4 worldPos   = mul(float4(localPos, 1.0), inst.LocalToWorld);
         float4 clipPos    = mul(worldPos, FrameCB.viewProj);
 
         VertexAttribute v;
         v.Position   = clipPos;
-        v.UV         = UnpackUVRG16(GlobalUVs, md.UVOffset, globalVtxIdx);
+        v.UV         = UnpackUVRG16(globalUVs, md.UVOffset, globalVtxIdx);
         v.MaterialID = md.MaterialIndex;
         verts[i] = v;
     }
@@ -118,7 +119,7 @@ void MSMain(
     // Output primitives (strided loop over up to MESHLET_MAX_TRIANGLES)
     for (uint i = groupThreadID; i < m.TriangleCount; i += NUM_MESHLET_THREADS)
     {
-        MeshletTriangle tri = GlobalMeshletTriangles[md.MeshletTriangleOffset + m.TriangleOffset + i];
+        MeshletTriangle tri = globalMeshletTriangles[md.MeshletTriangleOffset + m.TriangleOffset + i];
         triangles[i] = uint3(tri.V0, tri.V1, tri.V2);
 
         PrimitiveAttribute pri;

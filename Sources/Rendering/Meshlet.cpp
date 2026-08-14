@@ -260,7 +260,6 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
     cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
 
     RasterParams rp = {};
     rp.VisibleMeshletsIdx        = (uint)visibleMeshletsSRVIdx;
@@ -269,6 +268,15 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     // VisibleMeshlets[] — see docs/bug_flyingworld_meshlet_flicker.md.
     rp.VisibleMeshletsCounterIdx = (uint)visibleMeshletsCounterSRVIdx;
     rp.Phase                     = phase;
+    rp.GlobalPositionsSRVIdx        = (uint)model->GetGlobalPositionsSRVIndex();
+    rp.GlobalNormalsSRVIdx          = (uint)model->GetGlobalNormalsSRVIndex();
+    rp.GlobalUVsSRVIdx              = (uint)model->GetGlobalUVsSRVIndex();
+    rp.GlobalMeshletsSRVIdx         = (uint)model->GetGlobalMeshletsSRVIndex();
+    rp.GlobalMeshletVerticesSRVIdx  = (uint)model->GetGlobalMeshletVerticesSRVIndex();
+    rp.GlobalMeshletTrianglesSRVIdx = (uint)model->GetGlobalMeshletTrianglesSRVIndex();
+    rp.GlobalMeshletBoundsSRVIdx    = (uint)model->GetGlobalMeshletBoundsSRVIndex();
+    rp.MeshDataSRVIdx               = (uint)model->GetMeshDataSRVIndex();
+    rp.InstanceDataSRVIdx           = (uint)model->GetInstanceDataSRVIndex();
     cmdList->SetGraphicsRoot32BitConstants(12, sizeof(RasterParams) / 4, &rp, 0);
 
     cmdList->SetPipelineState(pso);
@@ -292,20 +300,39 @@ void MeshletPass::ResolveVisibilityGBuffer(ID3D12GraphicsCommandList* cmdList, I
     GPU_MARKER(cmdList, L"Visibility GBuffer Resolve (Full-Screen)");
 
     // Matches VisibilityGBufferParams in Shaders/VisibilityGBuffer.hlsl (register b1/ root param 12).
+    // FLAT scalar fields only — HLSL legacy cbuffer layout 16-byte-aligns nested struct members,
+    // which misaligns this plain C++ struct.
     struct VisibilityGBufferParams
     {
         uint32_t VisBufSRVIdx;
         uint32_t CandidatesSRVIdx;
+        uint32_t GlobalPositionsSRVIdx;
+        uint32_t GlobalNormalsSRVIdx;
+        uint32_t GlobalUVsSRVIdx;
+        uint32_t GlobalMeshletsSRVIdx;
+        uint32_t GlobalMeshletVerticesSRVIdx;
+        uint32_t GlobalMeshletTrianglesSRVIdx;
+        uint32_t GlobalMeshletBoundsSRVIdx;
+        uint32_t MeshDataSRVIdx;
+        uint32_t InstanceDataSRVIdx;
     } rp = {};
     rp.VisBufSRVIdx     = (uint32_t)m_VisibilityBuffer.srvIndex;
     rp.CandidatesSRVIdx = (uint32_t)visibleMeshletsSRVIdx;
+    rp.GlobalPositionsSRVIdx        = (uint32_t)model->GetGlobalPositionsSRVIndex();
+    rp.GlobalNormalsSRVIdx          = (uint32_t)model->GetGlobalNormalsSRVIndex();
+    rp.GlobalUVsSRVIdx              = (uint32_t)model->GetGlobalUVsSRVIndex();
+    rp.GlobalMeshletsSRVIdx         = (uint32_t)model->GetGlobalMeshletsSRVIndex();
+    rp.GlobalMeshletVerticesSRVIdx  = (uint32_t)model->GetGlobalMeshletVerticesSRVIndex();
+    rp.GlobalMeshletTrianglesSRVIdx = (uint32_t)model->GetGlobalMeshletTrianglesSRVIndex();
+    rp.GlobalMeshletBoundsSRVIdx    = (uint32_t)model->GetGlobalMeshletBoundsSRVIndex();
+    rp.MeshDataSRVIdx               = (uint32_t)model->GetMeshDataSRVIndex();
+    rp.InstanceDataSRVIdx           = (uint32_t)model->GetInstanceDataSRVIndex();
 
     cmdList->SetGraphicsRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
     cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-    cmdList->SetGraphicsRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)model->GetMeshletStreamSRVBase()));
     cmdList->SetGraphicsRoot32BitConstants(12, sizeof(rp) / 4, &rp, 0);
 
     cmdList->SetPipelineState(m_VisibilityGBufferPSO.Get());

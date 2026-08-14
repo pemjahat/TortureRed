@@ -635,16 +635,7 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
-    CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3;
-    srvRangeSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 3); // t0 space3: ReSTIR GI SRVs
-
-    CD3DX12_DESCRIPTOR_RANGE srvRangeSpace3_2;
-    srvRangeSpace3_2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 3); // t1 space3: IrCache Debug
-
-    CD3DX12_DESCRIPTOR_RANGE srvRangeMeshletSpace3;
-    srvRangeMeshletSpace3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 3); // t0-t15 space3: Meshlet stream buffers
-
-    CD3DX12_ROOT_PARAMETER rootParameters[15];
+    CD3DX12_ROOT_PARAMETER rootParameters[14];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
@@ -666,8 +657,11 @@ void Renderer::CreateRootSignature()
     // call from a smaller-capacity slot overflows:
     constexpr size_t kParam12MaxA = std::max(sizeof(DebugTextRenderParams), std::max(sizeof(RasterParams), sizeof(BindlessIndices)));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12MaxA / 4), 1, 0); // b1: max of all shared-slot params (see note above)
-    rootParameters[13].InitAsConstants(sizeof(IrCacheBindlessIndices) / 4, 2, 0); // b2: IrCache bindless indices
-    rootParameters[14].InitAsDescriptorTable(1, &srvRangeMeshletSpace3); // t0-t15 space3: Meshlet streams
+    // Root param 13 (b2) is shared the same way: IrCacheBindlessIndices, MeshletDebugParams
+    // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
+    // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams.
+    constexpr size_t kParam13Max = std::max(sizeof(IrCacheBindlessIndices), sizeof(MeshletDebugParams));
+    rootParameters[13].InitAsConstants(static_cast<UINT>(kParam13Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);

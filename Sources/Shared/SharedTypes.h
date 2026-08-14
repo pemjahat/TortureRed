@@ -315,6 +315,10 @@ struct MeshletCandidate {
 // Meshlet Dispatch / Rasterize Params (shared CPU/GPU, passed via root constants b1)
 // =============================================================================
 
+// IMPORTANT: cbuffer-bound (root-constants) structs must stay FLAT — scalar fields only,
+// no nested structs, no arrays. HLSL legacy cbuffer layout 16-byte-aligns nested struct
+// members (and array elements), which silently misaligns a plain C++ struct.
+
 // Passed to the Mesh Shader rasterize pass via root param 12 (b1).
 // With no binning, the mesh shader indexes VisibleMeshlets[Phase's base offset + SV_GroupID].
 // Phase 2's base offset is VisibleMeshletsCounter[COUNTER_PHASE1_VISIBLE_MESHLETS] (Phase 1's
@@ -324,6 +328,42 @@ struct RasterParams {
     uint DispatchMeshArgsIdx;        // UAV index of DispatchMeshArgs (for BuildDispatchMeshArgsCS)
     uint VisibleMeshletsCounterIdx;  // SRV index of VisibleMeshletsCounter[2] (for BuildDispatchMeshArgsCS and rasterize MS's Phase-2 base offset)
     uint Phase;                      // TWO_PASS_PHASE_FIRST / TWO_PASS_PHASE_SECOND — also doubles as the VisibleMeshletsCounter slot index for this phase
+    // Bindless SRV heap indices of the 9 global meshlet stream buffers.
+    // Each stream is looked up individually via ResourceDescriptorHeap[idx], so the streams
+    // no longer need adjacent heap slots (old t0-t15 space3 descriptor table removed).
+    uint GlobalPositionsSRVIdx;        // StructuredBuffer<float3>
+    uint GlobalNormalsSRVIdx;          // StructuredBuffer<uint> (RGB10A2_SNORM)
+    uint GlobalUVsSRVIdx;              // StructuredBuffer<uint> (RG16_FLOAT)
+    uint GlobalMeshletsSRVIdx;         // StructuredBuffer<Meshlet>
+    uint GlobalMeshletVerticesSRVIdx;  // StructuredBuffer<uint> (vertex indirection)
+    uint GlobalMeshletTrianglesSRVIdx; // StructuredBuffer<MeshletTriangle>
+    uint GlobalMeshletBoundsSRVIdx;    // StructuredBuffer<MeshletBounds>
+    uint MeshDataSRVIdx;               // StructuredBuffer<MeshData>
+    uint InstanceDataSRVIdx;           // StructuredBuffer<InstanceData>
+};
+
+// Meshlet visibility-buffer debug overlay parameters — root constants at main-root-signature
+// param 13 (b2), shared slot with IrCacheBindlessIndices / HZBDebugParams etc. (debug-only
+// PSOs, never bound simultaneously). Consumed by VisibilityDebugView.hlsl.
+struct MeshletDebugParams {
+    uint Mode;             // 0 = Off, 1 = Instance, 2 = Meshlet, 3 = Primitive, 4 = HZB mip tint
+    uint VisBufSRVIdx;     // Descriptor-heap SRV index for visibility buffer (R32_UINT texture)
+    uint CandidatesSRVIdx; // Descriptor-heap SRV index for VisibleMeshlets StructuredBuffer
+    uint OutputUAVIdx;     // Descriptor-heap UAV index for output color (R16G16B16A16_FLOAT texture)
+    uint Width;
+    uint Height;
+    uint MipsSRVIdx;       // Descriptor-heap SRV index for VisibleMeshletMips (mode 4)
+    uint HZBMipCount;      // HZB mip count (mode 4 color ramp normalization)
+    // Bindless SRV heap indices of the 9 global meshlet stream buffers (task012 Phase 1c).
+    uint GlobalPositionsSRVIdx;        // StructuredBuffer<float3>
+    uint GlobalNormalsSRVIdx;          // StructuredBuffer<uint> (RGB10A2_SNORM)
+    uint GlobalUVsSRVIdx;              // StructuredBuffer<uint> (RG16_FLOAT)
+    uint GlobalMeshletsSRVIdx;         // StructuredBuffer<Meshlet>
+    uint GlobalMeshletVerticesSRVIdx;  // StructuredBuffer<uint> (vertex indirection)
+    uint GlobalMeshletTrianglesSRVIdx; // StructuredBuffer<MeshletTriangle>
+    uint GlobalMeshletBoundsSRVIdx;    // StructuredBuffer<MeshletBounds>
+    uint MeshDataSRVIdx;               // StructuredBuffer<MeshData>
+    uint InstanceDataSRVIdx;           // StructuredBuffer<InstanceData>
 };
 
 // =============================================================================

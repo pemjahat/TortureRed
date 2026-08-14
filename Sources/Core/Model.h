@@ -143,13 +143,17 @@ public:
     int GetInstanceBoundsSRVIndex()      const { return m_InstanceBoundsBuffer.srvIndex; }
     int GetMeshDataSRVIndex()            const { return m_MeshDataBuffer.srvIndex; }
     int GetGlobalMeshletBoundsSRVIndex() const { return m_GlobalMeshletBounds.srvIndex; }
+    // Bindless SRV heap indices for the remaining meshlet stream buffers.
+    // Each stream is looked up individually via ResourceDescriptorHeap[idx], so the
+    // streams no longer need contiguous heap slots (no more t0-t15 space3 descriptor table).
+    int GetGlobalPositionsSRVIndex()        const { return m_GlobalPositions.srvIndex; }
+    int GetGlobalNormalsSRVIndex()          const { return m_GlobalNormals.srvIndex; }
+    int GetGlobalUVsSRVIndex()              const { return m_GlobalUVs.srvIndex; }
+    int GetGlobalMeshletsSRVIndex()         const { return m_GlobalMeshlets.srvIndex; }
+    int GetGlobalMeshletVerticesSRVIndex()  const { return m_GlobalMeshletVertices.srvIndex; }
+    int GetGlobalMeshletTrianglesSRVIndex() const { return m_GlobalMeshletTriangles.srvIndex; }
     size_t GetTotalMeshletCount() const { return m_TotalMeshletCount; }
     size_t GetInstanceCount()     const { return m_InstanceDataArray.size(); }
-    // Returns the SRV heap index of GlobalPositions — the first of 9 contiguous meshlet stream SRVs
-    // (GlobalPositions[0], GlobalNormals[1], GlobalUVs[2], GlobalMeshlets[3], GlobalMeshletVertices[4],
-    //  GlobalMeshletTriangles[5], GlobalMeshletBounds[6], MeshData[7], InstanceData[8]).
-    // Root param 14 descriptor table (t0-t15 space3) must be set to this base.
-    int GetMeshletStreamSRVBase() const { return m_GlobalPositions.srvIndex; }
 
     // Get all primitives for AS building
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
@@ -161,6 +165,12 @@ public:
 
     D3D12_GPU_VIRTUAL_ADDRESS GetMaterialBufferAddress() const { return m_MaterialBuffer.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetDrawNodeBufferAddress() const { return m_DrawNodeBuffer.gpuAddress; }
+
+    // Bindless SRV heap indices for the same buffers.
+    int GetGlobalVertexBufferSRVIndex() const { return m_GlobalVertexBuffer.srvIndex; }
+    int GetGlobalIndexBufferSRVIndex()  const { return m_GlobalIndexBuffer.srvIndex; }
+    int GetMaterialBufferSRVIndex()     const { return m_MaterialBuffer.srvIndex; }
+    int GetDrawNodeBufferSRVIndex()     const { return m_DrawNodeBuffer.srvIndex; }
 
     // Update node buffer with current node transforms
     void UpdateNodeBuffer();

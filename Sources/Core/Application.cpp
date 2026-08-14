@@ -753,21 +753,10 @@ void Application::Render()
                 cmdList->SetPipelineState(m_Renderer.GetMeshletDebugViewPSO());
                 cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
                 cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
-                // Meshlet stream buffers (t0-t15 space3) for GetVertexAttributes' barycentric
-                // reconstruction. Compute and graphics root state are separate in D3D12 — the
-                // graphics-stage binding from MeshletPass::Rasterize does NOT carry over, and
-                // reading space3 through a stale compute table faults the GPU (TDR).
-                cmdList->SetComputeRootDescriptorTable(14, GraphicsHelper::GetSRVGPUHandle((UINT)m_Model.GetMeshletStreamSRVBase()));
-                struct {
-                    uint32_t Mode;
-                    uint32_t VisBufSRVIdx;
-                    uint32_t CandidatesSRVIdx;
-                    uint32_t OutputUAVIdx;
-                    uint32_t Width;
-                    uint32_t Height;
-                    uint32_t MipsSRVIdx;
-                    uint32_t HZBMipCount;
-                } debugParams;
+                // MeshletDebugParams carries the bindless SRV indices for the meshlet stream
+                // buffers — no root descriptor table needed, so compute
+                // and graphics root state can no longer disagree about space3.
+                MeshletDebugParams debugParams = {};
                 debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
                 debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
                 debugParams.CandidatesSRVIdx = (uint32_t)m_Renderer.GetVisibleMeshletsSRVIndex();
@@ -776,6 +765,15 @@ void Application::Render()
                 debugParams.Height           = m_InternalHeight;
                 debugParams.MipsSRVIdx       = (uint32_t)m_Renderer.GetVisibleMeshletMipsSRVIndex();
                 debugParams.HZBMipCount      = m_Renderer.GetHZBMips();
+                debugParams.GlobalPositionsSRVIdx        = (uint32_t)m_Model.GetGlobalPositionsSRVIndex();
+                debugParams.GlobalNormalsSRVIdx          = (uint32_t)m_Model.GetGlobalNormalsSRVIndex();
+                debugParams.GlobalUVsSRVIdx              = (uint32_t)m_Model.GetGlobalUVsSRVIndex();
+                debugParams.GlobalMeshletsSRVIdx         = (uint32_t)m_Model.GetGlobalMeshletsSRVIndex();
+                debugParams.GlobalMeshletVerticesSRVIdx  = (uint32_t)m_Model.GetGlobalMeshletVerticesSRVIndex();
+                debugParams.GlobalMeshletTrianglesSRVIdx = (uint32_t)m_Model.GetGlobalMeshletTrianglesSRVIndex();
+                debugParams.GlobalMeshletBoundsSRVIdx    = (uint32_t)m_Model.GetGlobalMeshletBoundsSRVIndex();
+                debugParams.MeshDataSRVIdx               = (uint32_t)m_Model.GetMeshDataSRVIndex();
+                debugParams.InstanceDataSRVIdx           = (uint32_t)m_Model.GetInstanceDataSRVIndex();
                 cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
                 cmdList->Dispatch(
                     (m_InternalWidth  + 7) / 8,

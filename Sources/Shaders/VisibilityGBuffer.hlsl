@@ -16,10 +16,22 @@
 #include "VisibilityBuffer.hlsli"
 
 // --- Per-pass bindless indices (root constants b1, root param 12) ---
+// FLAT scalar fields only — HLSL legacy cbuffer layout 16-byte-aligns nested struct
+// members, which misaligns the C++ side.
 struct VisibilityGBufferParams
 {
     uint VisBufSRVIdx;     // Descriptor-heap SRV index of the visibility buffer (R32_UINT)
     uint CandidatesSRVIdx; // Descriptor-heap SRV index of the VisibleMeshlets StructuredBuffer
+    // Bindless SRV heap indices of the 9 global meshlet stream buffers.
+    uint GlobalPositionsSRVIdx;        // StructuredBuffer<float3>
+    uint GlobalNormalsSRVIdx;          // StructuredBuffer<uint> (RGB10A2_SNORM)
+    uint GlobalUVsSRVIdx;              // StructuredBuffer<uint> (RG16_FLOAT)
+    uint GlobalMeshletsSRVIdx;         // StructuredBuffer<Meshlet>
+    uint GlobalMeshletVerticesSRVIdx;  // StructuredBuffer<uint> (vertex indirection)
+    uint GlobalMeshletTrianglesSRVIdx; // StructuredBuffer<MeshletTriangle>
+    uint GlobalMeshletBoundsSRVIdx;    // StructuredBuffer<MeshletBounds>
+    uint MeshDataSRVIdx;               // StructuredBuffer<MeshData>
+    uint InstanceDataSRVIdx;           // StructuredBuffer<InstanceData>
 };
 ConstantBuffer<VisibilityGBufferParams> RP : register(b1);
 
@@ -32,18 +44,6 @@ StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 // Bindless textures (space0)
 Texture2D g_Textures[] : register(t0, space0);
 SamplerState g_LinearSampler : register(s0);
-
-// Meshlet stream buffers (bound via root param 14 descriptor table t0-t8 space3) —
-// same layout as MeshletRasterizeMS.hlsl / VisibilityDebugView.hlsl.
-StructuredBuffer<float3>          GlobalPositions         : register(t0, space3);
-StructuredBuffer<uint>            GlobalNormals           : register(t1, space3);
-StructuredBuffer<uint>            GlobalUVs               : register(t2, space3);
-StructuredBuffer<Meshlet>         GlobalMeshlets          : register(t3, space3);
-StructuredBuffer<uint>            GlobalMeshletVertices   : register(t4, space3);
-StructuredBuffer<MeshletTriangle> GlobalMeshletTriangles  : register(t5, space3);
-StructuredBuffer<MeshletBounds>   GlobalMeshletBounds     : register(t6, space3); // unused here
-StructuredBuffer<MeshData>        GlobalMeshData          : register(t7, space3);
-StructuredBuffer<InstanceData>    GlobalInstanceData      : register(t8, space3);
 
 struct PSInput
 {
@@ -80,18 +80,28 @@ GBufferOutput PSMain(PSInput input)
 
     StructuredBuffer<MeshletCandidate> visibleMeshlets = ResourceDescriptorHeap[RP.CandidatesSRVIdx];
 
+    // Meshlet stream buffers — bindless heap lookups
+    StructuredBuffer<InstanceData>    globalInstanceData     = ResourceDescriptorHeap[RP.InstanceDataSRVIdx];
+    StructuredBuffer<MeshData>        globalMeshData         = ResourceDescriptorHeap[RP.MeshDataSRVIdx];
+    StructuredBuffer<Meshlet>         globalMeshlets         = ResourceDescriptorHeap[RP.GlobalMeshletsSRVIdx];
+    StructuredBuffer<uint>            globalMeshletVertices  = ResourceDescriptorHeap[RP.GlobalMeshletVerticesSRVIdx];
+    StructuredBuffer<MeshletTriangle> globalMeshletTriangles = ResourceDescriptorHeap[RP.GlobalMeshletTrianglesSRVIdx];
+    StructuredBuffer<float3>          globalPositions        = ResourceDescriptorHeap[RP.GlobalPositionsSRVIdx];
+    StructuredBuffer<uint>            globalNormals          = ResourceDescriptorHeap[RP.GlobalNormalsSRVIdx];
+    StructuredBuffer<uint>            globalUVs              = ResourceDescriptorHeap[RP.GlobalUVsSRVIdx];
+
     float2 viewportInv = float2(1.0f / (float)FrameCB.internalWidth, 1.0f / (float)FrameCB.internalHeight);
     VisBufferVertexAttribute vertex = GetVertexAttributes(
         input.texCoord, FrameCB.viewProj, viewportInv,
         visibleMeshlets,
-        GlobalInstanceData, GlobalMeshData,
-        GlobalMeshlets, GlobalMeshletVertices, GlobalMeshletTriangles,
-        GlobalPositions, GlobalNormals, GlobalUVs,
+        globalInstanceData, globalMeshData,
+        globalMeshlets, globalMeshletVertices, globalMeshletTriangles,
+        globalPositions, globalNormals, globalUVs,
         candidateIndex, primitiveID);
 
     MeshletCandidate candidate = visibleMeshlets[candidateIndex];
-    InstanceData instance      = GlobalInstanceData[candidate.InstanceID];
-    MeshData meshData          = GlobalMeshData[instance.MeshDataIndex];
+    InstanceData instance      = globalInstanceData[candidate.InstanceID];
+    MeshData meshData          = globalMeshData[instance.MeshDataIndex];
     MaterialConstants matConstants = MaterialBuffer[meshData.MaterialIndex];
 
     // --- Albedo --- (alpha test already resolved during rasterization)
