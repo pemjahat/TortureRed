@@ -115,6 +115,25 @@ For warnings and callouts:
 - Keep blockquotes to 1–3 lines
 - Don't nest blockquotes (`>>`)
 
+### Math formulas
+
+Markdown has no native math support, so the delimiters must be ones the renderer recognizes. **Use dollar signs only:**
+
+- **Inline** — `$x^2$`, or `` $`x^2`$ `` when the expression contains characters that collide with Markdown syntax
+- **Block** — `$$` on its own line, with the expression on the following lines, or a fenced `math` code block
+
+**Never use `\(...\)` or `\[...\]`.** Neither GitHub (MathJax) nor the VS Code Markdown preview (KaTeX) recognizes them, so the expression renders as literal text.
+
+Rules:
+
+- **Keep to common LaTeX** — GitHub renders with MathJax and VS Code with KaTeX; KaTeX supports a subset, so exotic macros may render in only one of the two
+- **Escape literal dollars** — `\$` inside math, `<span>$</span>` outside math on the same line
+- **Start block math on a new line** — a `$$` block preceded by text on the same line needs a trailing `\` on that line
+- **Break lines inside a block** with a trailing `\`, or wrap the expression in `\begin{aligned}...\end{aligned}`
+- **Avoid `|` inside math in a table** — it ends the cell; write `\vert` instead
+- **Math inside code fences or code spans is never rendered** — use that deliberately when raw notation must survive every renderer
+- **Prefer plain Unicode** for simple one-off symbols in prose (`4×4×4`, `Σ`) instead of opening math mode
+
 ---
 
 ## Lists
@@ -545,6 +564,7 @@ for refresh token details.
 - [ ] Meaningful link text (no "click here")
 - [ ] Bold used for key terms, not entire sentences
 - [ ] Code formatting for all technical terms
+- [ ] Math uses `$` and `$$` delimiters, never `\(` or `\[`
 
 ### Visual elements
 
