@@ -58,6 +58,7 @@ public:
     uint32_t          GetDimZ() const { return m_DimZ; }
     uint32_t          GetLitSRVIndex() const { return (uint32_t)m_LitProbes.srvIndex; }
     uint32_t          GetMetaSRVIndex() const { return (uint32_t)m_Meta.srvIndex; }
+    uint32_t          GetResponseSRVIndex() const { return (uint32_t)m_Response[m_FinalResponse].srvIndex; }
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
 
     // Post-bake stats logging. Scene bounds / grid dims are logged inside

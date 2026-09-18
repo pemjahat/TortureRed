@@ -124,6 +124,9 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDimX = 0;
     m_FrameConstants.bakedGIDimY = 0;
     m_FrameConstants.bakedGIDimZ = 0;
+    m_FrameConstants.bakedGIDebugView = 0;
+    m_FrameConstants.bakedGIResponseSRVIndex = 0;
+    m_FrameConstants.bakedGIDebugScale = 200.0f;
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -502,6 +505,9 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIValid             = gi.IsValid() ? 1u : 0u;
         m_FrameConstants.bakedGIProbeSRVIndex      = gi.IsValid() ? gi.GetLitSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeMetaSRVIndex  = gi.IsValid() ? gi.GetMetaSRVIndex() : 0u;
+        m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
+        m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
+        m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
         const DirectX::XMFLOAT3 gmin = gi.GetGridMin();
         m_FrameConstants.bakedGIGridMinX = gmin.x;
         m_FrameConstants.bakedGIGridMinY = gmin.y;
@@ -1096,12 +1102,12 @@ void Application::Render()
         cmdList->RSSetScissorRects(1, &outputScissor);
     }
 
-    // Baked GI probe placement debug — post-composite LDR overlay (after TAA /
-    // tonemap, before on-screen text): display-referred colors, no taaEnabled
-    // branching, manual reverse-Z occlusion against the GBuffer depth.
+    // Baked GI probe debug overlay — post-composite LDR (after TAA / tonemap,
+    // before on-screen text): display-referred colors, no taaEnabled branching,
+    // manual reverse-Z occlusion against the GBuffer depth.
     if (!usePathTracingFrame && m_FrameConstants.bakedGIMode != 0 &&
-        m_FrameConstants.bakedGIValid != 0 && m_BakedGIShowProbes)
-        m_Renderer.DrawBakedGIProbeDebug(m_OutputWidth, m_OutputHeight);
+        m_FrameConstants.bakedGIValid != 0 && m_BakedGIDebugView != 0)
+        m_Renderer.DrawBakedGIProbeDebug(m_FrameConstants, m_OutputWidth, m_OutputHeight);
 
     // GPU on-screen debug text/lines — draw on top of the final image, under ImGui
     if (m_DebugScreenText)
@@ -1321,9 +1327,23 @@ void Application::RenderImGui()
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
-                ImGui::Checkbox("Show Probe Placement", &m_BakedGIShowProbes);
+                const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays" };
+                ImGui::SetNextItemWidth(180.f);
+                ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Instanced cube per grid cell, depth-tested against the GBuffer.\nGreen = valid (free space), red = invalid (inside geometry).");
+                    ImGui::SetTooltip("Post-composite overlay, depth-tested against the GBuffer.\n"
+                                      "Placement: cube per cell — green = valid (free space), red = invalid (inside geometry).\n"
+                                      "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
+                                      "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
+                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).");
+
+                if (m_BakedGIDebugView == 2)
+                {
+                    ImGui::SliderFloat("Lit Scale", &m_BakedGIDebugScale, 0.1f, 4000.0f, "%.1f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Multiplier from lit-probe HDR irradiance to display color.\n"
+                                          "Lit values are FP16Scale'd scene HDR — adjust until the balls read well.");
+                }
 
                 const BakedGI& gi = m_Renderer.GetBakedGI();
                 if (gi.IsValid())

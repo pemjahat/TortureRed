@@ -132,6 +132,11 @@ struct FrameConstants {
     uint   bakedGIDimX;             // grid dims (probes per axis, cells are [0, dim-1])
     uint   bakedGIDimY;
     uint   bakedGIDimZ;
+
+    // Probe debug overlay (BakedGI_Debug.hlsl): view enum + lit-preview scale.
+    uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays
+    uint   bakedGIResponseSRVIndex; // response table SRV (visibility rays / mean-V views)
+    float  bakedGIDebugScale;       // lit-irradiance preview multiplier (HDR -> display)
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.

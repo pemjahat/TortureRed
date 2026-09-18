@@ -49,7 +49,8 @@ private:
     bool m_CullStatsOverlay        = false;  // Meshlet culling stats on-screen table
     float m_BakedGISpacing      = 2.0f;  // BakedGI probe grid spacing (m) — used at the next rebuild
     bool  m_PendingGIProbeBake  = false; // BakedGI bake request (auto-set after scene load / Rebuild button)
-    bool  m_BakedGIShowProbes   = false; // BakedGI probe placement debug cube overlay
+    int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays
+    float m_BakedGIDebugScale   = 200.0f; // Lit-irradiance preview multiplier (FP16Scale'd HDR -> display)
     bool  m_IndirectGIEnabled   = true;  // Indirect GI master switch (raster path)
     int   m_IndirectGIMethod    = 0;     // Indirect GI method: 0 = Probe (Baked), 1 = ReSTIR GI
     float m_Exposure = -14.0f;

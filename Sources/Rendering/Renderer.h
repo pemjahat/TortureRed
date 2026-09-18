@@ -52,7 +52,7 @@ public:
     void CreateBakedGIPipelines();
     bool BakeGIProbes(class Model* model, float spacing);
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
-    void DrawBakedGIProbeDebug(uint32_t outputWidth, uint32_t outputHeight);
+    void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }
     void CopyTextureToBackBuffer(const GPUTexture& texture);
     void DrawPathVizLines(const FrameConstants& frame);

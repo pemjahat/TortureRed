@@ -995,9 +995,9 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
                             m_Sky.GetSunIrradiance(), sunToDir);
 }
 
-void Renderer::DrawBakedGIProbeDebug(uint32_t outputWidth, uint32_t outputHeight)
+void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight)
 {
-    if (!m_BakedGI.IsValid())
+    if (!m_BakedGI.IsValid() || frame.bakedGIDebugView == 0)
         return;
 
     ID3D12PipelineState* pso = m_BakedGI.GetDebugPSO();
@@ -1022,10 +1022,20 @@ void Renderer::DrawBakedGIProbeDebug(uint32_t outputWidth, uint32_t outputHeight
     cmdList->RSSetViewports(1, &viewport);
     cmdList->RSSetScissorRects(1, &scissor);
 
+    // Geometry per view: cubes (36 verts) for placement / sky-visibility,
+    // UV spheres (8x8x6 = 384 verts) for lit irradiance, and per-direction
+    // instances for the visibility rays (mode 4).
+    uint32_t vertsPerInstance = 36;
+    uint32_t instanceCount    = m_BakedGI.GetProbeCount();
+    if (frame.bakedGIDebugView == 2u)
+        vertsPerInstance = 384;
+    if (frame.bakedGIDebugView == 4u)
+        instanceCount *= BakedGI::kDirections;
+
     cmdList->SetPipelineState(pso);
     cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->DrawInstanced(36, m_BakedGI.GetProbeCount(), 0, 0);
+    cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
 }
 
 void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bool rasterTaaActive,
