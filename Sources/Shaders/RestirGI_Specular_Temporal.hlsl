@@ -122,7 +122,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             hasFirstBounceCandidate = true;
             // Use cosine-weighted PDF for the reused diffuse sample
             float3 L = normalize(hitPos - surface.worldPos);
-            pdf = max(dot(surface.normal, L), 0.0f) / 3.14159265f;
+            pdf = max(dot(surface.normal, L), 0.0f) / PI;
         }
     }
     else

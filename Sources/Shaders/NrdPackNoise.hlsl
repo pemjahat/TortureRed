@@ -17,7 +17,7 @@
 #include "Common.hlsl"
 #include "NRD.hlsli"
 
-Texture2D g_Textures[] : register(t0, space0);
+// G-Buffer textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 ConstantBuffer<FrameConstants>  FrameCB   : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
@@ -34,7 +34,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> relaxDiffuse     = ResourceDescriptorHeap[g_Indices.OutputIdx0];
     RWTexture2D<float4> relaxSpecular    = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
-    float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
+    float depth = GetTexture2D(FrameCB.depthIndex).Load(int3(screenPos, 0)).r;
     if (depth <= 0.0f) // Reverse-Z: sky/clear pixels at far plane (depth = 0.0)
     {
         relaxDiffuse[screenPos]  = RELAX_FrontEnd_PackRadianceAndHitDist(0.0f.xxx, 0.0f, true);

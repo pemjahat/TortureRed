@@ -26,8 +26,7 @@ ConstantBuffer<NodeData> NodeCB : register(b2);
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 StructuredBuffer<MeshData> MeshBuffer : register(t1, space1);
 
-// Textures
-Texture2D textures[] : register(t0);
+// Textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 SamplerState samplerState : register(s0);
 
 // Vertex shader
@@ -57,7 +56,7 @@ PSOutput PSMain(PSInput input)
     float4 albedo = material.baseColorFactor;
     if (material.baseColorTextureIndex >= 0)
     {
-        albedo *= textures[material.baseColorTextureIndex].Sample(samplerState, input.texCoord);
+        albedo *= GetTexture2D(material.baseColorTextureIndex).Sample(samplerState, input.texCoord);
     }    
 
     if (material.alphaMode == 1 && albedo.a < material.alphaCutoff) {

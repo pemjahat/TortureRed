@@ -91,13 +91,13 @@ bool RAB_ValidateGISampleWithJacobian(float jacobian) {
 }
 
 // Assuming these are globally available where bridge is included
-// Texture2D g_Textures[] : register(t0, space0);
+// (textures are bindless — GetTexture2D comes from Common.hlsl via CommonTracing.hlsl):
 // ConstantBuffer<FrameConstants> g_Frame : register(b0);
 // SamplerState g_LinearSampler : register(s0);
 
 RAB_Surface RAB_GetGBufferSurface(int2 pixelPosition, bool previousFrame) {
     uint2 launchDims;
-    g_Textures[g_Frame.depthIndex].GetDimensions(launchDims.x, launchDims.y);
+    GetTexture2D(g_Frame.depthIndex).GetDimensions(launchDims.x, launchDims.y);
     
     if (any(pixelPosition < 0) || any(pixelPosition >= (int2)launchDims)) {
         return RAB_EmptySurface();
@@ -154,7 +154,7 @@ bool RAB_GetTemporalConservativeVisibility(RAB_Surface currentSurface, RAB_Surfa
 
 int2 RAB_ClampSamplePositionIntoView(int2 pixelPosition, bool previousFrame) {
     uint2 dims;
-    g_Textures[g_Frame.depthIndex].GetDimensions(dims.x, dims.y);
+    GetTexture2D(g_Frame.depthIndex).GetDimensions(dims.x, dims.y);
     return clamp(pixelPosition, int2(0, 0), int2(dims) - 1);
 }
 

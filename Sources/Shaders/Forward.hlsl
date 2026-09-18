@@ -37,7 +37,7 @@ float4 PSMain(PSInput input) : SV_Target0 {
     
     float4 albedo = material.baseColorFactor;
     if (material.baseColorTextureIndex >= 0) {
-        float4 sampled = g_Textures[material.baseColorTextureIndex].Sample(g_LinearSampler, input.texCoord);
+        float4 sampled = GetTexture2D(material.baseColorTextureIndex).Sample(g_LinearSampler, input.texCoord);
         albedo *= sampled;
     }
 
@@ -48,7 +48,7 @@ float4 PSMain(PSInput input) : SV_Target0 {
 
     float3 normal = normalize(input.normal);
     if (material.normalTextureIndex >= 0) {
-        float3 sampledNormal = g_Textures[material.normalTextureIndex].Sample(g_LinearSampler, input.texCoord).rgb;
+        float3 sampledNormal = GetTexture2D(material.normalTextureIndex).Sample(g_LinearSampler, input.texCoord).rgb;
         sampledNormal = sampledNormal * 2.0f - 1.0f;
         
         // Basic normal mapping (assuming tangent space is aligned with world space for simplicity, 
@@ -60,7 +60,7 @@ float4 PSMain(PSInput input) : SV_Target0 {
     float roughness = material.roughnessFactor;
     float metallic = material.metallicFactor;
     if (material.metallicRoughnessTextureIndex >= 0) {
-        float4 mrSample = g_Textures[material.metallicRoughnessTextureIndex].Sample(g_LinearSampler, input.texCoord);
+        float4 mrSample = GetTexture2D(material.metallicRoughnessTextureIndex).Sample(g_LinearSampler, input.texCoord);
         roughness *= mrSample.g;
         metallic *= mrSample.b;
     }

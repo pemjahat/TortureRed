@@ -41,8 +41,7 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 // Material buffer (root SRV param 1, t0 space1)
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
-// Bindless textures (space0)
-Texture2D g_Textures[] : register(t0, space0);
+// Bindless textures (read via GetTexture2D(index) from MeshletCommon.hlsli)
 SamplerState g_LinearSampler : register(s0);
 
 struct PSInput
@@ -107,14 +106,14 @@ GBufferOutput PSMain(PSInput input)
     // --- Albedo --- (alpha test already resolved during rasterization)
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
-        albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertex.UV);
+        albedo *= GetTexture2D(matConstants.baseColorTextureIndex).Sample(g_LinearSampler, vertex.UV);
 
     // --- Roughness / Metallic ---
     float roughness = matConstants.roughnessFactor;
     float metallic  = matConstants.metallicFactor;
     if (matConstants.metallicRoughnessTextureIndex >= 0)
     {
-        float4 mr = g_Textures[matConstants.metallicRoughnessTextureIndex].Sample(g_LinearSampler, vertex.UV);
+        float4 mr = GetTexture2D(matConstants.metallicRoughnessTextureIndex).Sample(g_LinearSampler, vertex.UV);
         roughness *= mr.g;
         metallic  *= mr.b;
     }

@@ -189,7 +189,7 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
     GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // FinalDiffuse/FinalSpecular contain NRD-normalized radiance from ReSTIR passes.
-    if ((frame.enableRestirDI || frame.enableRasterIndirectGI) && !debugActive)
+    if ((frame.enableRestirDI || frame.enableRestirGI) && !debugActive)
     {
         GraphicsHelper::TransitionResource(cmdList, renderer->GetFinalDiffuseTex(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         GraphicsHelper::TransitionResource(cmdList, renderer->GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -206,10 +206,10 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
 
     cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetGraphicsRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    cmdList->SetGraphicsRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
-    cmdList->SetGraphicsRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
+    cmdList->SetGraphicsRootShaderResourceView(4, model->GetGlobalIndexBufferAddress());
+    cmdList->SetGraphicsRootShaderResourceView(5, model->GetGlobalVertexBufferAddress());
 
-    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+    cmdList->SetGraphicsRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
 
     if (rasterTaaActive)
     {

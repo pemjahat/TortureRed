@@ -205,12 +205,12 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
 
     // When GI is disabled but NRD is enabled, trigger the NRD denoise pass here.
     // (When GI is enabled, NRDDenoise is called from DispatchRestirGI.)
-    if (frame.enableNrdRelax != 0u && !frame.enableRasterIndirectGI)
+    if (frame.enableNrdRelax != 0u && !frame.enableRestirGI)
     {
         NRDDenoise(frame);
         // m_NrdWasActiveLastFrame is set inside NRDDenoise on success.
     }
-    else if (frame.enableNrdRelax == 0u && !frame.enableRasterIndirectGI)
+    else if (frame.enableNrdRelax == 0u && !frame.enableRestirGI)
     {
         // NRD disabled and GI disabled: transition Final* to SRV for Lighting.hlsl
         GraphicsHelper::TransitionResource(m_CommandList.Get(), m_FinalDiffuseTex,  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -219,7 +219,7 @@ void Renderer::DispatchRestirDI(class Model* model, const FrameConstants& frame)
 
     // DI debug: FullScreenDebugTex UAV → SRV (only when GI is off;
     // when GI is on, DispatchRestirGI handles the SRV transition).
-    if (diDebugActive && !frame.enableRasterIndirectGI)
+    if (diDebugActive && !frame.enableRestirGI)
     {
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(m_FullScreenDebugTex.resource.Get());
         m_CommandList->ResourceBarrier(1, &b);
@@ -559,18 +559,15 @@ void Renderer::BeginFrame()
     // Set necessary state
     m_CommandList->SetGraphicsRootSignature(m_RootSignature.Get());
 
-    // Bind the global descriptor table (bindless)
-    m_CommandList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-
     // Set Frame constant buffer (viewProj)
     m_CommandList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
 
     // Bind TLAS for ray-traced shadows in pixel shader
-    m_CommandList->SetGraphicsRootShaderResourceView(4, m_AccelStructure.GetTLASGPUAddress());
+    m_CommandList->SetGraphicsRootShaderResourceView(3, m_AccelStructure.GetTLASGPUAddress());
 
-    // Bind Lights Buffer (t0, space2) - root parameter 10
-    m_CommandList->SetGraphicsRootShaderResourceView(10, m_DeferredLighting.GetLightsBufferGPUAddress());
-    m_CommandList->SetGraphicsRootShaderResourceView(11, m_DeferredLighting.GetLightLUTBufferGPUAddress()); // Light LUT (t1, space2)
+    // Bind Lights Buffer (t0, space2) - root parameter 9
+    m_CommandList->SetGraphicsRootShaderResourceView(9, m_DeferredLighting.GetLightsBufferGPUAddress());
+    m_CommandList->SetGraphicsRootShaderResourceView(10, m_DeferredLighting.GetLightLUTBufferGPUAddress()); // Light LUT (t1, space2)
 
     D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(m_InternalWidth), static_cast<float>(m_InternalHeight));
     D3D12_RECT scissorRect = CD3DX12_RECT(0, 0, m_InternalWidth, m_InternalHeight);
@@ -623,8 +620,12 @@ ID3D12Resource* Renderer::GetCurrentBackBuffer() const
 
 void Renderer::CreateRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE srvRanges[2];
-    srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4096, 0, 0); // t0 space0: Bindless textures
+    // the legacy bindless texture descriptor table (t0 space0,
+    // 4096 SRVs, ex root param 3) is gone. Textures are read in shaders via
+    // ResourceDescriptorHeap[index] (GetTexture2D), which
+    // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED makes valid for any heap index without a
+    // table — so this signature no longer carries a texture table parameter and
+    // all following root parameters shifted down by one.
 
     CD3DX12_DESCRIPTOR_RANGE uavRange0;
     uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Restir RTXDI ping pong buffer
@@ -635,33 +636,33 @@ void Renderer::CreateRootSignature()
     CD3DX12_DESCRIPTOR_RANGE srvRangeRtxdiOffsets;
     srvRangeRtxdiOffsets.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 1); // t5 space1: RTXDI Neighbor Offsets
 
-    CD3DX12_ROOT_PARAMETER rootParameters[14];
+    CD3DX12_ROOT_PARAMETER rootParameters[13];
     rootParameters[0].InitAsConstantBufferView(0); // b0: FrameConstants
     rootParameters[1].InitAsShaderResourceView(0, 1); // t0 space1: Material Data
     rootParameters[2].InitAsShaderResourceView(1, 1); // t1 space1: Draw Node Data
-    rootParameters[3].InitAsDescriptorTable(1, &srvRanges[0]); // t0 space0: Bindless textures
-    rootParameters[4].InitAsShaderResourceView(2, 1); // t2 space1: TLAS
-    rootParameters[5].InitAsShaderResourceView(3, 1); // t3 space1: Indices
-    rootParameters[6].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
-    rootParameters[7].InitAsDescriptorTable(1, &uavRange0); // u0 : Restir RTXDI ping pong buffer
-    rootParameters[8].InitAsDescriptorTable(1, &uavRange1); // u1 : Restir RTXDI ping pong buffer
-    rootParameters[9].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
-    rootParameters[10].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
-    rootParameters[11].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
-    // Root param 12 (b1) is SHARED (never bound simultaneously, but re-set per pass)
+    rootParameters[3].InitAsShaderResourceView(2, 1); // t2 space1: TLAS
+    rootParameters[4].InitAsShaderResourceView(3, 1); // t3 space1: Indices
+    rootParameters[5].InitAsShaderResourceView(4, 1); // t4 space1: Vertices
+    rootParameters[6].InitAsDescriptorTable(1, &uavRange0); // u0 : Restir RTXDI ping pong buffer
+    rootParameters[7].InitAsDescriptorTable(1, &uavRange1); // u1 : Restir RTXDI ping pong buffer
+    rootParameters[8].InitAsDescriptorTable(1, &srvRangeRtxdiOffsets); // t5 space1
+    rootParameters[9].InitAsShaderResourceView(0, 2); // t0 space2: Lights Buffer
+    rootParameters[10].InitAsShaderResourceView(1, 2); // t1 space2: Light LUT Buffer
+    // Root param 11 (b1) is SHARED (never bound simultaneously, but re-set per pass)
     // by several unrelated root-constant structs: RasterParams (Meshlet.cpp),
     // BindlessIndices (TAA/RestirGI/RestirDI/PathTracing/Denoise/DeferredLighting —
     // 7 uints), and DebugTextRenderParams (DebugTextRenderer.cpp — 8 uints). Its
     // declared Num32BitValues must cover the LARGEST of them, or every
-    // SetComputeRoot32BitConstants(12, ...)/SetGraphicsRoot32BitConstants(12, ...)
+    // SetComputeRoot32BitConstants(11, ...)/SetGraphicsRoot32BitConstants(11, ...)
     // call from a smaller-capacity slot overflows:
-    constexpr size_t kParam12MaxA = std::max(sizeof(DebugTextRenderParams), std::max(sizeof(RasterParams), sizeof(BindlessIndices)));
-    rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12MaxA / 4), 1, 0); // b1: max of all shared-slot params (see note above)
-    // Root param 13 (b2) is shared the same way: IrCacheBindlessIndices, MeshletDebugParams
+    constexpr size_t kParam11MaxA = std::max(sizeof(DebugTextRenderParams), std::max(sizeof(RasterParams), sizeof(BindlessIndices)));
+    rootParameters[11].InitAsConstants(static_cast<UINT>(kParam11MaxA / 4), 1, 0); // b1: max of all shared-slot params (see note above)
+    // Root param 12 (b2) is shared the same way: IrCacheBindlessIndices, MeshletDebugParams
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams.
-    constexpr size_t kParam13Max = std::max(sizeof(IrCacheBindlessIndices), sizeof(MeshletDebugParams));
-    rootParameters[13].InitAsConstants(static_cast<UINT>(kParam13Max / 4), 2, 0); // b2: max of all shared-slot params
+    constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
+        std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams), sizeof(BakedGIUpdateParams))));
+    rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -812,7 +813,7 @@ void Renderer::DispatchRays(Model* model, const FrameConstants& frame, const Lig
 
 void Renderer::DispatchRestirGI(class Model* model, const FrameConstants& frame)
 {
-    if (!frame.enableRasterIndirectGI)
+    if (!frame.enableRestirGI)
     {
         // Reset the flag: NRD did not run from the GI path this frame.
         // If DI is also active with NRD, DispatchRestirDI will set it back to true.
@@ -943,6 +944,88 @@ void Renderer::CreateGBuffer(uint32_t w, uint32_t h)
 void Renderer::ExecuteGBufferPass(Model* model, const DirectX::BoundingFrustum& frustum, bool enableDepthPrePass)
 {
     m_GBufferPass.Execute(m_CommandList.Get(), model, this, frustum, enableDepthPrePass);
+}
+
+// =============================================================================
+// Baked GI probe system (task017 step 1) — exclusive indirect source
+// =============================================================================
+
+void Renderer::CreateBakedGIPipelines()
+{
+    m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
+}
+
+bool Renderer::BakeGIProbes(Model* model, float spacing)
+{
+    if (!m_RayTracingSupported || !model)
+        return false;
+
+    // Reset for bake recording (BuildAccelerationStructures pattern). The
+    // caller invokes this on a synced GPU (before BeginFrame), so releasing
+    // and recreating the probe buffers inside RecordBake is safe.
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    bool ok = m_BakedGI.RecordBake(m_Device.Get(), m_CommandList.Get(), m_RootSignature.Get(), model,
+                                    m_FrameCB.gpuAddress,
+                                    m_AccelStructure.GetTLASGPUAddress(),
+                                    model->GetMaterialBufferAddress(),
+                                    model->GetDrawNodeBufferAddress(),
+                                    model->GetGlobalIndexBufferAddress(),
+                                    model->GetGlobalVertexBufferAddress(),
+                                    spacing);
+    if (ok)
+        m_BakedGI.RecordMetaReadback(m_Device.Get(), m_CommandList.Get()); // stats readback rides the same list
+    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
+    if (ok)
+        m_BakedGI.LogBakeStats();
+    return ok;
+}
+
+void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun)
+{
+    if (!m_BakedGI.IsValid() || frame.bakedGIValid == 0)
+        return;
+
+    // sun.direction stores the direction the light TRAVELS; the transport
+    // table is indexed by TO-SUN directions.
+    DirectX::XMFLOAT3 sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
+
+    m_BakedGI.RecordUpdate(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
+                            m_Sky.GetSunIrradiance(), sunToDir);
+}
+
+void Renderer::DrawBakedGIProbeDebug(uint32_t outputWidth, uint32_t outputHeight)
+{
+    if (!m_BakedGI.IsValid())
+        return;
+
+    ID3D12PipelineState* pso = m_BakedGI.GetDebugPSO();
+    if (!pso)
+        return;
+
+    auto* cmdList = m_CommandList.Get();
+    GPU_MARKER(cmdList, L"BakedGI Probe Debug");
+
+    // Post-composite LDR overlay: draw onto the final backbuffer at output
+    // resolution. Occlusion is a manual reverse-Z compare in the pixel shader
+    // (the internal-res GBuffer DSV cannot be bound at output resolution under
+    // TAAU), so bind the depth as an SRV instead.
+    GBuffer& gbuffer = m_GBufferPass.GetGBuffer();
+    GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = GetCurrentBackBufferRTV();
+    cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(outputWidth), static_cast<float>(outputHeight));
+    D3D12_RECT scissor = CD3DX12_RECT(0, 0, outputWidth, outputHeight);
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
+    cmdList->SetPipelineState(pso);
+    cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(36, m_BakedGI.GetProbeCount(), 0, 0);
 }
 
 void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bool rasterTaaActive,

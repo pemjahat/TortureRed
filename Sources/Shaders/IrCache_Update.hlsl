@@ -54,7 +54,7 @@ void main(uint3 GroupId   : SV_GroupID,
     float2 u = float2(next_float(rng), next_float(rng));
     float  z = 1.0f - 2.0f * u.x;
     float  r = sqrt(max(0.0f, 1.0f - z * z));
-    float  phi = 6.28318530f * u.y;
+    float  phi = 2.0f * PI * u.y;
     float3 rayDir = float3(r * cos(phi), r * sin(phi), z);
 
     RayDesc ray;

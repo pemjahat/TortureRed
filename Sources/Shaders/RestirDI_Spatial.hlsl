@@ -108,7 +108,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     for (uint i = 0u; i < NUM_NEIGHBORS; ++i)
     {
         // Random neighbor within radius
-        float angle  = next_float(rng) * 6.28318530718f;
+        float angle  = next_float(rng) * 2.0f * PI;
         float radius = sqrt(next_float(rng)) * NEIGHBOR_RADIUS;
         int2  offset = int2(cos(angle) * radius, sin(angle) * radius);
         int2  nbPos  = int2(screenPos) + offset;

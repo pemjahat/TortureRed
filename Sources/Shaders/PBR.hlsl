@@ -1,6 +1,8 @@
 #ifndef PBR_HLSL
 #define PBR_HLSL
 
+#include "Shared/SharedTypes.h" // PI
+
 float3 align_to_normal(float3 v, float3 n) {
     float3 up = abs(n.z) < 0.999f ? float3(0, 0, 1) : float3(1, 0, 0);
     float3 tangent = normalize(cross(up, n));
@@ -19,7 +21,7 @@ float DistributionGGX(float3 N, float3 H, float roughness) {
     float NdotH2 = NdotH * NdotH;
     float nom = a2;
     float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = 3.14159265 * denom * denom;
+    denom = PI * denom * denom;
     return nom / denom;
 }
 
@@ -41,7 +43,7 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
 
 float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
     float a = roughness * roughness;
-    float phi = 2.0 * 3.14159265 * Xi.x;
+    float phi = 2.0 * PI * Xi.x;
     float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
     float3 H;
@@ -65,7 +67,7 @@ void EvaluateBSDF(float3 N, float3 V, float3 L, float3 baseColor, float metallic
 
     specularBRDF = (D * G * F) / (4.0f * dotNV * dotNL + 0.0001f);
     float3 kD = (1.0f - F) * (1.0f - metallic);
-    diffuseBRDF = kD * baseColor / 3.14159265f;
+    diffuseBRDF = kD * baseColor / PI;
 }
 
 // ============================================================================

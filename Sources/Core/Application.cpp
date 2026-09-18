@@ -3,6 +3,7 @@
 #include "Application.h"
 #include <SDL_syswm.h>
 #include <DirectXCollision.h>
+#include "Rendering/BakedGI.h"
 
 const char* WINDOW_TITLE = "TortureRed";
 
@@ -91,7 +92,7 @@ void Application::Initialize()
 
     // Set camera projection parameters (reverse-Z: nearZ controls NDC depth=1.0 plane)
     float aspectRatio = static_cast<float>(WINDOW_WIDTH) / WINDOW_HEIGHT;
-    float fovY = 60.0f * (3.14159265359f / 180.0f); // 60 degrees
+    float fovY = 60.0f * (PI / 180.0f); // 60 degrees
     float nearZ = 0.1f;  // Reverse-Z: near clip at z_view = -1.0
     float farZ  = 0.0f;  // Reverse-Z sentinel: infinite far plane
     m_Camera.SetProjectionParameters(fovY, aspectRatio, nearZ, farZ);
@@ -109,6 +110,20 @@ void Application::Initialize()
     m_FrameConstants.sharcStaleFrameNum = 32;
     m_FrameConstants.sharcDebug = 0;
     m_FrameConstants.restirReservoirDebugMode = RESTIR_RESERVOIR_DEBUG_OFF;
+    // Indirect GI defaults: enabled, probe (baked) method — matches
+    // m_IndirectGIEnabled/m_IndirectGIMethod; the checkbox + enum in
+    // RenderImGui arbitrates the exclusive engine flags from that state.
+    m_FrameConstants.bakedGIMode = 1;
+    m_FrameConstants.bakedGIValid = 0;
+    m_FrameConstants.bakedGIProbeSRVIndex = 0;
+    m_FrameConstants.bakedGIProbeMetaSRVIndex = 0;
+    m_FrameConstants.bakedGIGridMinX = 0.0f;
+    m_FrameConstants.bakedGIGridMinY = 0.0f;
+    m_FrameConstants.bakedGIGridMinZ = 0.0f;
+    m_FrameConstants.bakedGISpacing = 2.0f;
+    m_FrameConstants.bakedGIDimX = 0;
+    m_FrameConstants.bakedGIDimY = 0;
+    m_FrameConstants.bakedGIDimZ = 0;
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -157,6 +172,12 @@ void Application::Initialize()
     // Initialize Rasterizer Indirect GI Resources
     m_Renderer.CreateRasterIndirectGIResources();
     m_Renderer.CreateRasterIndirectGIPipelines();
+
+    // Baked GI probe system : pipelines + runtime bake after
+    // the scene is fully loaded (consumed at the start of the first Render).
+    m_Renderer.CreateBakedGIPipelines();
+    if (m_IndirectGIEnabled && m_IndirectGIMethod == 0)
+        m_PendingGIProbeBake = true; // auto-bake the default probe method
 
     // Initialize TAA / Temporal Super-Resolution
     // Output is always 1920x1080 (WINDOW_WIDTH x WINDOW_HEIGHT).
@@ -438,6 +459,7 @@ void Application::Update(float deltaTime)
     // Motion vectors should encode pure camera motion, not jitter differences.
     // The TAA resolve pass handles jitter compensation separately via its unjitter logic.
     DirectX::XMMATRIX unjitteredViewProj = view * proj;
+    DirectX::XMStoreFloat4x4(&m_FrameConstants.viewProjUnjittered, unjitteredViewProj); // post-composite debug overlays
     DirectX::XMFLOAT4X4 unjitteredVP;
     DirectX::XMStoreFloat4x4(&unjitteredVP, unjitteredViewProj);
     m_LastViewProj = unjitteredVP;
@@ -473,6 +495,24 @@ void Application::Update(float deltaTime)
     m_FrameConstants.skySH9BufferIndex = m_Renderer.GetSkySH9BufferSRVIndex();
     m_FrameConstants.skyTurbidity     = 3.0f;
     m_FrameConstants.skyGroundAlbedo  = 0.3f;
+
+    // Baked GI probe system state.
+    {
+        BakedGI& gi = m_Renderer.GetBakedGI();
+        m_FrameConstants.bakedGIValid             = gi.IsValid() ? 1u : 0u;
+        m_FrameConstants.bakedGIProbeSRVIndex      = gi.IsValid() ? gi.GetLitSRVIndex() : 0u;
+        m_FrameConstants.bakedGIProbeMetaSRVIndex  = gi.IsValid() ? gi.GetMetaSRVIndex() : 0u;
+        const DirectX::XMFLOAT3 gmin = gi.GetGridMin();
+        m_FrameConstants.bakedGIGridMinX = gmin.x;
+        m_FrameConstants.bakedGIGridMinY = gmin.y;
+        m_FrameConstants.bakedGIGridMinZ = gmin.z;
+        m_FrameConstants.bakedGISpacing  = gi.GetSpacing();
+        m_FrameConstants.bakedGIDimX = gi.GetDimX();
+        m_FrameConstants.bakedGIDimY = gi.GetDimY();
+        m_FrameConstants.bakedGIDimZ = gi.GetDimZ();
+        if (m_FrameConstants.bakedGIMode != 0)
+            m_FrameConstants.enableRestirGI = 0; // exclusive modes
+    }
 
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
@@ -515,6 +555,15 @@ void Application::Update(float deltaTime)
 
 void Application::Render()
 {
+    // Baked GI probe bake — runs on a synced command list of
+    // its own before the frame starts recording. Triggered by the scene-load
+    // auto-bake or the "Rebuild GI Probes" button.
+    if (m_PendingGIProbeBake)
+    {
+        m_PendingGIProbeBake = false;
+        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
+    }
+
     // Begin frame rendering
     m_Renderer.BeginFrame();
 
@@ -570,6 +619,16 @@ void Application::Render()
             sun.color     = { solarIrradiance.x, solarIrradiance.y, solarIrradiance.z, 1.0f };
             sun.intensity = 1.0f;
             m_Renderer.UpdateLightsBuffer(m_Scene.GetLights());
+        }
+
+        // Baked GI — fold the live sun/sky state into the lit probe grid
+        // (probe mode only; ReSTIR GI is the exclusive alternative and its
+        // dispatch early-outs via enableRestirGI = 0).
+        if (m_FrameConstants.bakedGIMode != 0 && m_FrameConstants.bakedGIValid != 0
+            && !m_Scene.GetLights().empty())
+        {
+            GPU_MARKER(cmdList, L"BakedGI Update");
+            m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0]);
         }
     }
 
@@ -774,7 +833,7 @@ void Application::Render()
                 debugParams.GlobalMeshletBoundsSRVIdx    = (uint32_t)m_Model.GetGlobalMeshletBoundsSRVIndex();
                 debugParams.MeshDataSRVIdx               = (uint32_t)m_Model.GetMeshDataSRVIndex();
                 debugParams.InstanceDataSRVIdx           = (uint32_t)m_Model.GetInstanceDataSRVIndex();
-                cmdList->SetComputeRoot32BitConstants(13, sizeof(debugParams) / 4, &debugParams, 0);
+                cmdList->SetComputeRoot32BitConstants(12, sizeof(debugParams) / 4, &debugParams, 0);
                 cmdList->Dispatch(
                     (m_InternalWidth  + 7) / 8,
                     (m_InternalHeight + 7) / 8, 1);
@@ -1037,6 +1096,13 @@ void Application::Render()
         cmdList->RSSetScissorRects(1, &outputScissor);
     }
 
+    // Baked GI probe placement debug — post-composite LDR overlay (after TAA /
+    // tonemap, before on-screen text): display-referred colors, no taaEnabled
+    // branching, manual reverse-Z occlusion against the GBuffer depth.
+    if (!usePathTracingFrame && m_FrameConstants.bakedGIMode != 0 &&
+        m_FrameConstants.bakedGIValid != 0 && m_BakedGIShowProbes)
+        m_Renderer.DrawBakedGIProbeDebug(m_OutputWidth, m_OutputHeight);
+
     // GPU on-screen debug text/lines — draw on top of the final image, under ImGui
     if (m_DebugScreenText)
     {
@@ -1225,10 +1291,64 @@ void Application::RenderImGui()
 
     if (!m_UsePathTracer)
     {
-        bool enableRasterIndirectGI = (m_FrameConstants.enableRasterIndirectGI != 0);
-        if (ImGui::Checkbox("Enable Raster Indirect GI", &enableRasterIndirectGI))
+        // Indirect GI — master checkbox, then the exclusive method enum
+        // (Probe default). The UI state (enabled, method) is the single
+        // source of truth; the engine flags are synced from it every frame.
+        const bool wasGIEnabled = m_IndirectGIEnabled;
+        ImGui::Checkbox("Enable Indirect GI", &m_IndirectGIEnabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Indirect (bounced) lighting for the raster path.\nDirect sun and local lights are always analytic regardless of this switch.");
+
+        if (m_IndirectGIEnabled)
         {
-            m_FrameConstants.enableRasterIndirectGI = enableRasterIndirectGI ? 1 : 0;
+            ImGui::Indent();
+
+            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI" };
+            const bool methodChanged = ImGui::Combo("Indirect GI Method", &m_IndirectGIMethod, giMethods, IM_ARRAYSIZE(giMethods));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.");
+
+            // Exactly one of the two engine flags is ever set.
+            m_FrameConstants.bakedGIMode            = (m_IndirectGIMethod == 0) ? 1u : 0u;
+            m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == 1) ? 1u : 0u;
+
+            if (m_IndirectGIMethod == 0)
+            {
+                ImGui::SliderFloat("Probe Spacing", &m_BakedGISpacing, 0.5f, 8.0f, "%.1f m");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Grid spacing used by the next \"Rebuild GI Probes\" (auto-grows to fit the probe cap).");
+
+                if (ImGui::Button("Rebuild GI Probes"))
+                    m_PendingGIProbeBake = true;
+
+                ImGui::Checkbox("Show Probe Placement", &m_BakedGIShowProbes);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Instanced cube per grid cell, depth-tested against the GBuffer.\nGreen = valid (free space), red = invalid (inside geometry).");
+
+                const BakedGI& gi = m_Renderer.GetBakedGI();
+                if (gi.IsValid())
+                    ImGui::Text("Grid %ux%ux%u @ %.2fm  (%u probes)",
+                                gi.GetDimX(), gi.GetDimY(), gi.GetDimZ(), gi.GetSpacing(), gi.GetProbeCount());
+                else
+                {
+                    ImGui::TextDisabled("No bake yet");
+                    // Probe method just became active without data — request
+                    // the bake automatically (parity with scene-load auto-bake).
+                    if ((methodChanged || !wasGIEnabled) && !m_PendingGIProbeBake)
+                        m_PendingGIProbeBake = true;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("SHaRC + reservoir debug: see sections below");
+            }
+
+            ImGui::Unindent();
+        }
+        else
+        {
+            m_FrameConstants.bakedGIMode            = 0u;
+            m_FrameConstants.enableRestirGI = 0u;
         }
 
         bool enableRestirDI = (m_FrameConstants.enableRestirDI != 0);
@@ -1265,7 +1385,7 @@ void Application::RenderImGui()
             m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
         }
         // NRD RELAX is available when either ReSTIR GI or ReSTIR DI is enabled
-        const bool anyRestirActive = enableRasterIndirectGI || (m_FrameConstants.enableRestirDI != 0);
+        const bool anyRestirActive = (m_FrameConstants.enableRestirGI != 0) || (m_FrameConstants.enableRestirDI != 0);
         if (anyRestirActive)
         {
             bool enableNrdRelax = (m_FrameConstants.enableNrdRelax != 0);
@@ -1286,7 +1406,7 @@ void Application::RenderImGui()
             if (!enableNrdRelax)
                 ImGui::EndDisabled();
         }
-        if (enableRasterIndirectGI)
+        if (m_FrameConstants.enableRestirGI != 0)
         {
             const char* sharcDebugModes[] = { "Off", "SHaRC Output", "Bounce Heatmap" };
             int sharcDebugMode = (int)m_FrameConstants.sharcDebug;
@@ -1335,7 +1455,7 @@ void Application::RenderImGui()
     {
         const bool supportsReservoirDebug =
             (m_UsePathTracer && (m_FrameConstants.enableRestir || m_FrameConstants.useRTXDI)) ||
-            (!m_UsePathTracer && m_FrameConstants.enableRasterIndirectGI);
+            (!m_UsePathTracer && m_FrameConstants.enableRestirGI);
 
         if (!supportsReservoirDebug)
         {
@@ -1634,7 +1754,7 @@ void Application::RenderImGui()
 
             if (ImGui::Button("Dump Frame to HTML"))
             {
-                MicroProfileDumpFileImmediately("microprofile_dump.html", nullptr, nullptr);
+                MicroProfileDumpFileImmediately("microprofile_dump.html", 32, nullptr, 0, nullptr);
             }
             ImGui::SameLine();
             ImGui::TextDisabled("(saves to Bin/)");

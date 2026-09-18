@@ -1,7 +1,7 @@
 #include "Common.hlsl"
 #include "NRD.hlsli"
 
-Texture2D g_Textures[] : register(t0, space0);
+// G-Buffer textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 ConstantBuffer<FrameConstants> FrameCB : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
@@ -17,7 +17,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[g_Indices.OutputIdx1];
     RWTexture2D<float> viewZ = ResourceDescriptorHeap[g_Indices.OutputIdx2];
 
-    float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
+    float depth = GetTexture2D(FrameCB.depthIndex).Load(int3(screenPos, 0)).r;
     if (depth <= 0.0f) // Reverse-Z: sky/clear pixels at far plane (depth = 0.0)
     {
         motionVectors[screenPos] = 0.0f.xx;
@@ -26,8 +26,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
         return;
     }
 
-    float4 packedNormal = g_Textures[FrameCB.normalIndex].Load(int3(screenPos, 0));
-    float4 packedMaterial = g_Textures[FrameCB.materialIndex].Load(int3(screenPos, 0));
+    float4 packedNormal = GetTexture2D(FrameCB.normalIndex).Load(int3(screenPos, 0));
+    float4 packedMaterial = GetTexture2D(FrameCB.materialIndex).Load(int3(screenPos, 0));
 
     float3 surfaceNormal = normalize(packedNormal.xyz * 2.0f - 1.0f);
     float roughness = max(0.01f, packedMaterial.r);

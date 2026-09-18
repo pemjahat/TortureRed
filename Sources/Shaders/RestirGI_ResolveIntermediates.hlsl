@@ -36,7 +36,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> giSpecularOut = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
     // Sky pixels: write zero and exit (reverse-Z: clear value = 0.0 = far plane)
-    float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
+    float depth = GetTexture2D(FrameCB.depthIndex).Load(int3(screenPos, 0)).r;
     if (depth <= 0.0f)
     {
         giDiffuseOut[screenPos]  = float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -45,9 +45,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
     }
 
     // Reconstruct surface from G-buffer
-    float3 albedo        = g_Textures[FrameCB.albedoIndex].Load(int3(screenPos, 0)).rgb;
-    float4 packedNormal  = g_Textures[FrameCB.normalIndex].Load(int3(screenPos, 0));
-    float4 packedMaterial= g_Textures[FrameCB.materialIndex].Load(int3(screenPos, 0));
+    float3 albedo        = GetTexture2D(FrameCB.albedoIndex).Load(int3(screenPos, 0)).rgb;
+    float4 packedNormal  = GetTexture2D(FrameCB.normalIndex).Load(int3(screenPos, 0));
+    float4 packedMaterial= GetTexture2D(FrameCB.materialIndex).Load(int3(screenPos, 0));
 
     float2 uv      = (float2(screenPos) + 0.5f) / float2(launchDims);
     float4 ndc     = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);

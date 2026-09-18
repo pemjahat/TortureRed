@@ -12,11 +12,9 @@
 // Root param 12 (b1): RasterParams — contains raw descriptor heap indices
 ConstantBuffer<RasterParams> Params : register(b1, space0);
 
-// VisibleMeshletsCounter (SRV) — single uint counter written by culling
-StructuredBuffer<uint> VisibleMeshletsCounter : register(t0, space4);
-
-// DispatchMeshArgs (UAV) — D3D12_DISPATCH_MESH_ARGUMENTS (3 uints)
-RWStructuredBuffer<uint> DispatchMeshArgs : register(u0, space4);
+// VisibleMeshletsCounter (SRV) and DispatchMeshArgs (UAV) are fully bindless:
+// fetched via ResourceDescriptorHeap[Params.*Idx] at the point of use below,
+// so no static register declarations are needed.
 
 [numthreads(1, 1, 1)]
 void BuildDispatchMeshArgsCS(uint3 tid : SV_DispatchThreadID)

@@ -19,6 +19,7 @@
 #include "DeferredLighting.h"
 #include "Transparency.h"
 #include "Sky.h"
+#include "BakedGI.h"
 
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
@@ -45,6 +46,14 @@ public:
     void BuildAccelerationStructures(class Model* model);
     void DispatchRays(class Model* model, const FrameConstants& frame, const LightConstants& light);
     void DispatchRestirGI(class Model* model, const FrameConstants& frame);
+
+    // Baked GI probe system (task017 step 1) — EXCLUSIVE indirect source with
+    // ReSTIR GI (bakedGIMode in FrameConstants arbitrates).
+    void CreateBakedGIPipelines();
+    bool BakeGIProbes(class Model* model, float spacing);
+    void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
+    void DrawBakedGIProbeDebug(uint32_t outputWidth, uint32_t outputHeight);
+    BakedGI& GetBakedGI() { return m_BakedGI; }
     void CopyTextureToBackBuffer(const GPUTexture& texture);
     void DrawPathVizLines(const FrameConstants& frame);
 
@@ -264,6 +273,9 @@ private:
 
     // ------- ReSTIR GI (SHaRC + split diffuse/specular)
     RestirGI m_RestirGI;
+
+    // ------- Baked GI probe system -------
+    BakedGI m_BakedGI;
 
     GPUTexture m_RasterHdrOutputTex;          // Internal-res HDR output for rasterizer TAA
     // ---- NRD/Denoise textures/state: moved to Rendering/Denoise.h/.cpp ----

@@ -18,7 +18,7 @@
 #define SPHERE_N_SLICES      8
 #define SPHERE_RADIUS_SCALE  0.25f
 
-static const float SPHERE_PI = 3.14159265f;
+static const float SPHERE_PI = PI;
 
 // Clip-space sentinel: z < 0 with w = 1 → behind near plane → entire triangle clipped.
 static const float4 DEGENERATE_POS = float4(0.0f, 0.0f, -1.0f, 1.0f);

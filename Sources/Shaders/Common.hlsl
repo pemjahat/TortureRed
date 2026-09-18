@@ -9,6 +9,17 @@
 
 #define SHARC_HASH_ENTRIES_NUM (4 * 1024 * 1024)
 
+// Bindless texture lookup. Replaces the legacy
+// `Texture2D g_Textures[] : register(t0, space0)` descriptor-table array:
+// every texture already receives a heap SRV index at creation, so any texture
+// is reachable as ResourceDescriptorHeap[index] without a root descriptor
+// table. Guarded with a macro so it can also live in MeshletCommon.hlsli
+// (which does not include this file) without redefinition conflicts.
+#ifndef TORTURE_RED_GET_TEX2D
+#define TORTURE_RED_GET_TEX2D
+Texture2D GetTexture2D(uint index) { return ResourceDescriptorHeap[index]; }
+#endif
+
 float3 ReconstructWorldPos(float2 uv, float depth, float4x4 projectionInverse, float4x4 viewInverse) {
     float4 ndc = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);
     float4 viewPos = mul(ndc, projectionInverse);

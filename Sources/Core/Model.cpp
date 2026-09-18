@@ -27,6 +27,71 @@ Model::~Model()
     }
 }
 
+// World-space scene bounds — union of the per-instance local bounds spheres
+// transformed by each instance's LocalToWorld (max row length = max axis
+// scale under the row-vector mul convention used throughout the shaders).
+// Computed once at load end; served from the cache thereafter.
+const DirectX::BoundingBox& Model::GetSceneWorldBounds() const
+{
+    if (!m_SceneBoundsComputed)
+    {
+        m_SceneWorldBounds = ComputeSceneWorldBounds();
+        m_SceneBoundsComputed = true;
+    }
+    return m_SceneWorldBounds;
+}
+
+DirectX::BoundingBox Model::ComputeSceneWorldBounds() const
+{
+    using namespace DirectX;
+
+    const BoundingBox fallback(XMFLOAT3(0.0f, 5.0f, 0.0f),
+                                XMFLOAT3(30.0f, 30.0f, 30.0f));
+
+    if (m_InstanceDataArray.empty() || m_InstanceBoundsArray.empty())
+        return fallback;
+
+    BoundingBox result = fallback;
+    bool first = true;
+    for (const InstanceData& inst : m_InstanceDataArray)
+    {
+        uint32_t bi = (inst.BoundsIndex < (uint32_t)m_InstanceBoundsArray.size())
+                    ? inst.BoundsIndex
+                    : inst.MeshDataIndex;
+        if (bi >= (uint32_t)m_InstanceBoundsArray.size())
+            continue;
+        const InstanceBounds& b = m_InstanceBoundsArray[bi];
+
+        XMMATRIX M = XMLoadFloat4x4(&inst.LocalToWorld);
+        XMVECTOR c  = XMVector3Transform(XMLoadFloat3(&b.BoundsCenter), M);
+
+        // Max axis scale: basis images under mul(v, M) are the matrix rows.
+        float r1 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._11, inst.LocalToWorld._12, inst.LocalToWorld._13, 0.0f)));
+        float r2 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._21, inst.LocalToWorld._22, inst.LocalToWorld._23, 0.0f)));
+        float r3 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._31, inst.LocalToWorld._32, inst.LocalToWorld._33, 0.0f)));
+        float maxScale = r1 > r2 ? (r1 > r3 ? r1 : r3) : (r2 > r3 ? r2 : r3);
+
+        XMFLOAT3 cf;
+        XMStoreFloat3(&cf, c);
+        BoundingSphere sphere(cf, b.BoundsRadius * maxScale);
+        BoundingBox sphereBox;
+        BoundingBox::CreateFromSphere(sphereBox, sphere);
+        if (first)
+        {
+            result = sphereBox;
+            first = false;
+        }
+        else
+        {
+            BoundingBox merged;
+            BoundingBox::CreateMerged(merged, result, sphereBox);
+            result = merged;
+        }
+    }
+
+    return first ? fallback : result;
+}
+
 bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
 {
     cgltf_options options = {};
@@ -355,6 +420,13 @@ void Model::CreateGLTFResources(Renderer* renderer)
     // recompute transforms for all instances — handles both the initial frame and
     // per-frame animation updates.
     UpdateNodeBuffer();
+
+    // Scene bounds are fixed once the scene is loaded (static-scene contract —
+    // animated content does not move the scene extents): compute them here so
+    // every later query (BakedGI probe grid, world-extent consumers) is a
+    // cache hit.
+    m_SceneWorldBounds = ComputeSceneWorldBounds();
+    m_SceneBoundsComputed = true;
 }
 
 void Model::LoadTextures(Renderer* renderer)
@@ -1112,7 +1184,7 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
     // Bind global vertex buffer to root parameter 6
     if (m_GlobalVertexBuffer.resource)
     {
-        commandList->SetGraphicsRootShaderResourceView(6, m_GlobalVertexBuffer.gpuAddress);
+        commandList->SetGraphicsRootShaderResourceView(5, m_GlobalVertexBuffer.gpuAddress);
     }
 
     // Bind global index buffer to IA

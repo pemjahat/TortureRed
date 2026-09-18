@@ -84,11 +84,10 @@ void TAA::GenerateMotionVectors(ID3D12GraphicsCommandList* cmdList, ID3D12RootSi
     cmdList->SetComputeRootSignature(rootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
     BindlessIndices indices = {};
     indices.OutputIdx0 = motionVectorsTex.uavIndex;
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
 
     cmdList->SetPipelineState(m_MotionVectorsPSO.Get());
     cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -123,15 +122,14 @@ void TAA::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootS
         cmdList->SetComputeRootSignature(rootSignature);
         cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
         cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-        cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-
+    
         BindlessIndices indices = {};
         indices.InputIdx0 = m_TaaHistoryTex[previousHistory].srvIndex;
         indices.InputIdx1 = motionVectorsTex.srvIndex;
         indices.InputIdx2 = gbuffer.depth.srvIndex;
         indices.OutputIdx0 = m_TaaReprojectedHistoryTex.uavIndex;
         indices.OutputIdx1 = m_TaaClosestVelocityTex.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
 
         cmdList->SetPipelineState(m_NaiveTsrReprojectPSO.Get());
         {
@@ -164,7 +162,7 @@ void TAA::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootS
         indices.InputIdx2 = m_TaaClosestVelocityTex.srvIndex;
         indices.OutputIdx0 = m_TaaHistoryTex[currentHistory].uavIndex;
         indices.OutputIdx1 = m_TaaOutputTex.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
 
         cmdList->SetPipelineState(m_NaiveTsrResolvePSO.Get());
         {

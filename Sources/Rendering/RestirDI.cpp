@@ -76,12 +76,11 @@ void RestirDI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
     cmdList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-    cmdList->SetComputeRootShaderResourceView(4, tlasGPUAddress);
-    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(10, lightsBufferAddress);
-    cmdList->SetComputeRootShaderResourceView(11, lightLUTBufferAddress);
+    cmdList->SetComputeRootShaderResourceView(3, tlasGPUAddress);
+    cmdList->SetComputeRootShaderResourceView(4, model->GetGlobalIndexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalVertexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(9, lightsBufferAddress);
+    cmdList->SetComputeRootShaderResourceView(10, lightLUTBufferAddress);
 
     const UINT W = internalWidth, H = internalHeight;
     const UINT gx = (W + 7) / 8, gy = (H + 7) / 8;
@@ -95,7 +94,7 @@ void RestirDI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.InputIdx0  = m_DIReservoirBuffer[prev].srvIndex;
     indices.OutputIdx0 = m_DIReservoirBuffer[curr].uavIndex;
     indices.OutputIdx1 = diDebugActive ? fullScreenDebugTex.uavIndex : UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     cmdList->SetPipelineState(m_RestirDITemporalPSO.Get());
     {
         MICROPROFILE_SCOPEGPUI("DI_Temporal", MP_RED);
@@ -113,7 +112,7 @@ void RestirDI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.InputIdx0  = m_DIReservoirBuffer[curr].srvIndex;
     indices.OutputIdx0 = m_DIReservoirIntermediate.uavIndex;
     indices.OutputIdx1 = diDebugActive ? fullScreenDebugTex.uavIndex : UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     cmdList->SetPipelineState(m_RestirDISpatialPSO.Get());
     {
         MICROPROFILE_SCOPEGPUI("DI_Spatial", MP_RED);
@@ -133,7 +132,7 @@ void RestirDI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
         indices.InputIdx0  = m_DIReservoirIntermediate.srvIndex;
         indices.OutputIdx0 = m_DIDiffuseIntermediate.uavIndex;
         indices.OutputIdx1 = m_DISpecularIntermediate.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
         cmdList->SetPipelineState(m_RestirDISplitShadePSO.Get());
         {
             MICROPROFILE_SCOPEGPUI("DI_SplitShade", MP_RED);
@@ -162,9 +161,9 @@ void RestirDI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
         indices.InputIdx1  = m_DISpecularIntermediate.srvIndex;
         indices.OutputIdx0 = finalDiffuseTex.uavIndex;
         indices.OutputIdx1 = finalSpecularTex.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
         const UINT isFirstPass = 1u;
-        cmdList->SetComputeRoot32BitConstants(13, 1, &isFirstPass, 0);
+        cmdList->SetComputeRoot32BitConstants(12, 1, &isFirstPass, 0);
         cmdList->SetPipelineState(nrdStoreShadingOutputPSO);
         cmdList->Dispatch(gx, gy, 1);
 

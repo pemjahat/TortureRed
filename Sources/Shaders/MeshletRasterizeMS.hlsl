@@ -35,8 +35,8 @@
 // Material buffer (root SRV param 1, t0 space1) — always needed for alpha discard
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
-// Bindless textures (space0) — always needed for alpha discard
-Texture2D g_Textures[] : register(t0, space0);
+// Bindless textures — always needed for alpha discard
+// (read via GetTexture2D(index) from MeshletCommon.hlsli)
 SamplerState g_LinearSampler : register(s0);
 
 // Per-frame constants
@@ -153,7 +153,7 @@ VisOutput PSMain(
     // For blend (alphaMode==2), rejected by culling — never reaches this shader.
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
-        albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
+        albedo *= GetTexture2D(matConstants.baseColorTextureIndex).Sample(g_LinearSampler, vertexData.UV);
     if (matConstants.alphaMode == 1 && albedo.a < matConstants.alphaCutoff)
         discard;
 

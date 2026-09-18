@@ -172,7 +172,7 @@ bool Denoise::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12CommandAllocator
     indices.OutputIdx0 = m_NrdMotionVectorsTex.uavIndex;
     indices.OutputIdx1 = m_NrdNormalRoughnessTex.uavIndex;
     indices.OutputIdx2 = m_NrdViewZTex.uavIndex;
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("NRD_PrepareGuides", MP_GREEN);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -198,7 +198,7 @@ bool Denoise::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12CommandAllocator
     indices.InputIdx1  = finalSpecularTex.srvIndex;
     indices.OutputIdx0 = m_NrdRelaxDiffuseTex.uavIndex;
     indices.OutputIdx1 = m_NrdRelaxSpecularTex.uavIndex;
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("NRD_PackNoise", MP_GREEN);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -294,7 +294,6 @@ bool Denoise::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12CommandAllocator
     cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     cmdList->SetComputeRootSignature(rootSignature);
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
     // The composite pass reads NRD output (SRV) and writes denoised radiance back to Final* (UAV).
     // This is a circular write-back: Final* was read by NrdPackNoise, now overwritten with denoised data.
@@ -308,7 +307,7 @@ bool Denoise::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12CommandAllocator
     indices.InputIdx2 = frame.enableNrdValidation != 0 ? m_NrdValidationTex.srvIndex : UINT(-1);
     indices.OutputIdx0 = finalDiffuseTex.uavIndex;
     indices.OutputIdx1 = finalSpecularTex.uavIndex;
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("NRD_Composite", MP_GREEN);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);

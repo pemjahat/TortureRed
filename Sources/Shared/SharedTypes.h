@@ -27,6 +27,14 @@
 static const float FP16Scale    = 0.0009765625f;       // 2^-10
 static const float FP16Max      = 65504.0f;            // fp16 max
 
+// π — single source of truth for C++ and HLSL (shaders reach it via
+// Common.hlsl -> Shared/SharedTypes.h; C++ via GraphicsTypes.h). Deliberately
+// NOT named PHI: HLSL identifiers are case-insensitive and `phi` is the
+// established azimuth / golden-angle local name in the shaders, so a PHI
+// constant would shadow-collide with them. fl(PI) is bit-identical to the
+// previously scattered 3.14159265f literals.
+static const float PI           = 3.14159265358979f;
+
 #define RESTIR_RESERVOIR_DEBUG_OFF        0u
 #define RESTIR_RESERVOIR_DEBUG_POSITION   1u
 #define RESTIR_RESERVOIR_DEBUG_NORMAL     2u
@@ -61,10 +69,10 @@ struct FrameConstants {
     int materialIndex;
     int depthIndex;
     float exposure;
-    uint enableRestir;
+    uint enableRestir;            // path-tracer ReSTIR GI
     uint enableAvoidCaustics;
     uint enableIndirectSpecular;
-    uint enableRasterIndirectGI;
+    uint enableRestirGI;          // raster-path ReSTIR GI (exclusive with bakedGIMode)
     uint useRTXDI;
     uint numLights;
     uint lightSamplingMode;
@@ -97,6 +105,7 @@ struct FrameConstants {
     uint   _pad0;              // 8-byte padding (2x uint) to align projectionInverseUnjittered to 16 bytes (offset 512)
     uint   _pad1;
     ROW_MAJOR float4x4 projectionInverseUnjittered; // Unjittered projection inverse for motion vectors
+    ROW_MAJOR float4x4 viewProjUnjittered;          // Unjittered view-proj for post-composite debug overlays
 
     // ReSTIR DI (Direct Illumination) flags
     uint enableRestirDI;              // 1 = ReSTIR DI active (direct lighting from local lights)
@@ -109,6 +118,46 @@ struct FrameConstants {
     uint skySH9BufferIndex;     // Bindless SRV index of the SkySH9Buffer (9x float4)
     float skyTurbidity;         // Hosek-Wilkie turbidity [1, 10] — fixed default in code
     float skyGroundAlbedo;      // Hosek-Wilkie ground albedo [0, 1] — fixed default in code
+
+    // Baked GI probe system (task017 step 1) — EXCLUSIVE indirect-GI source:
+    // bakedGIMode 1 = probe system, 0 = ReSTIR GI; never both.
+    uint   bakedGIMode;             // 1 = baked probes, 0 = ReSTIR GI
+    uint   bakedGIValid;            // 1 = bake completed and buffers are live
+    uint   bakedGIProbeSRVIndex;    // StructuredBuffer<float4> lit probes, 9 per probe
+    uint   bakedGIProbeMetaSRVIndex;// StructuredBuffer<uint> per-probe validity (bit 0)
+    float  bakedGIGridMinX;         // grid AABB min (world)
+    float  bakedGIGridMinY;
+    float  bakedGIGridMinZ;
+    float  bakedGISpacing;          // probe spacing (world units)
+    uint   bakedGIDimX;             // grid dims (probes per axis, cells are [0, dim-1])
+    uint   bakedGIDimY;
+    uint   bakedGIDimZ;
+};
+
+// Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
+// One (probe, delta-direction) thread each; see Shaders/BakedGI_Bake.hlsl.
+struct BakedGIBakeParams {
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;
+    uint  probeCount;
+    uint  responseUAVIdx;   // RW output (this iteration)
+    uint  responsePrevSRVIdx; // SRV feedback (previous iteration)
+    uint  metaUAVIdx;
+    uint  iteration;        // 0 = no feedback (first series term)
+};
+
+// Root constants for the per-frame lit-probe update dispatch.
+struct BakedGIUpdateParams {
+    float sunIrradianceX, sunIrradianceY, sunIrradianceZ; // sun perpendicular irradiance (RGB)
+    float sunDirX, sunDirY, sunDirZ;                       // TO-SUN unit direction
+    uint  responseSRVIdx;  // final response table (SRV)
+    uint  metaSRVIdx;      // probe validity (SRV)
+    uint  litUAVIdx;       // lit probe output (UAV)
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;
+    uint  _pad;
 };
 
 struct BindlessIndices {

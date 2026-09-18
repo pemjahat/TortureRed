@@ -3,6 +3,15 @@
 
 #include "Shared/SharedTypes.h"
 
+// Bindless texture lookup : same helper as Common.hlsl,
+// duplicated here under the same guard macro because the meshlet shader
+// family does not include Common.hlsl. Texture reads use GetTexture2D(idx)
+// which maps to ResourceDescriptorHeap[idx] — no descriptor table needed.
+#ifndef TORTURE_RED_GET_TEX2D
+#define TORTURE_RED_GET_TEX2D
+Texture2D GetTexture2D(uint index) { return ResourceDescriptorHeap[index]; }
+#endif
+
 // Unpack helpers for compressed vertex attributes
 
 float3 UnpackPosition(StructuredBuffer<float3> positions, uint offset, uint index)

@@ -28,8 +28,7 @@
 // Material buffer (root SRV param 1, t0 space1)
 StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 
-// Bindless textures (space0)
-Texture2D g_Textures[] : register(t0, space0);
+// Bindless textures (read via GetTexture2D(index) from MeshletCommon.hlsli)
 SamplerState g_LinearSampler : register(s0);
 
 // Per-frame constants
@@ -152,7 +151,7 @@ GBufferOutput PSMain(
     // --- Albedo ---
     float4 albedo = matConstants.baseColorFactor;
     if (matConstants.baseColorTextureIndex >= 0)
-        albedo *= g_Textures[matConstants.baseColorTextureIndex].Sample(g_LinearSampler, vertexData.UV);
+        albedo *= GetTexture2D(matConstants.baseColorTextureIndex).Sample(g_LinearSampler, vertexData.UV);
 
     // --- Alpha discard (unconditional, handles Opaque + Mask) ---
     // For opaque (alphaMode==0), alphaCutoff is 0 so this is always a no-op.
@@ -165,7 +164,7 @@ GBufferOutput PSMain(
     float metallic  = matConstants.metallicFactor;
     if (matConstants.metallicRoughnessTextureIndex >= 0)
     {
-        float4 mr = g_Textures[matConstants.metallicRoughnessTextureIndex].Sample(g_LinearSampler, vertexData.UV);
+        float4 mr = GetTexture2D(matConstants.metallicRoughnessTextureIndex).Sample(g_LinearSampler, vertexData.UV);
         roughness *= mr.g;
         metallic  *= mr.b;
     }

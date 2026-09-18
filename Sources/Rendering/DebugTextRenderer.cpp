@@ -320,7 +320,7 @@ void DebugTextRenderer::Render(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     cmdList->SetComputeRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetPipelineState(m_BuildArgsPSO.Get());
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(DebugTextRenderParams) / 4, &params, 0); // b1
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(DebugTextRenderParams) / 4, &params, 0); // b1
     cmdList->Dispatch(1, 1, 1);
 
     // 2. Raster onto the backbuffer
@@ -337,7 +337,7 @@ void DebugTextRenderer::Render(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     cmdList->SetGraphicsRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(DebugTextRenderParams) / 4, &params, 0); // b1
+    cmdList->SetGraphicsRoot32BitConstants(11, sizeof(DebugTextRenderParams) / 4, &params, 0); // b1
 
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     cmdList->SetPipelineState(m_GlyphPSO.Get());

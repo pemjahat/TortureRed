@@ -30,11 +30,15 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 //Texture2D<float4> g_IndirectLightingTex : register(t0, space3);
 //Texture3D<float4> g_IrCacheTex : register(t1, space3);
 
+// BakedGI.hlsli's SampleBakedGIProbe references FrameCB — include AFTER its
+// declaration above.
+#include "BakedGI.hlsli"
+
 float4 PSMain(PSInput input) : SV_Target {
-    float4 albedo = g_Textures[FrameCB.albedoIndex].Sample(g_LinearSampler, input.texCoord);
-    float3 normal = g_Textures[FrameCB.normalIndex].Sample(g_LinearSampler, input.texCoord).rgb * 2.0f - 1.0f;
-    float4 material = g_Textures[FrameCB.materialIndex].Sample(g_LinearSampler, input.texCoord);
-    float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
+    float4 albedo = GetTexture2D(FrameCB.albedoIndex).Sample(g_LinearSampler, input.texCoord);
+    float3 normal = GetTexture2D(FrameCB.normalIndex).Sample(g_LinearSampler, input.texCoord).rgb * 2.0f - 1.0f;
+    float4 material = GetTexture2D(FrameCB.materialIndex).Sample(g_LinearSampler, input.texCoord);
+    float depth = GetTexture2D(FrameCB.depthIndex).Sample(g_LinearSampler, input.texCoord).r;
 
     // Early exit for sky pixels (reverse-Z: depth <= 0.0 = clear/far plane).
     // Sample the baked sky cubemap for background color; no shading needed.
@@ -115,33 +119,45 @@ float4 PSMain(PSInput input) : SV_Target {
 
     // Ambient term: SH9 sky irradiance (Tier 2). Cancel ambient as this doesn't have occlusion right now
     //float3 irradiance = EvalSH9IrradianceIndex(N, FrameCB.skySH9BufferIndex);
-    //float3 ambient = irradiance * albedo.rgb / 3.14159265f;
+    //float3 ambient = irradiance * albedo.rgb / PI;
     //float3 finalColor = ambient + totalDirectLighting;
     float3 finalColor = totalDirectLighting;
-    
-    // Apply indirect lighting from FinalDiffuse/FinalSpecular.
-    // These textures contain NRD-normalized radiance (with or without denoising).
-    // Re-modulate with NRD_MaterialFactors to recover the final lit color.
-    if (FrameCB.enableRestirDI || FrameCB.enableRasterIndirectGI)
+
+    // Reservoir-path composition: the Final interchange textures are written
+    // this frame iff a reservoir producer ran — ReSTIR DI (StoreShadingOutput
+    // Call 1, overwrite) and/or ReSTIR GI (Call 2, additive over DI / overwrite
+    // when DI is off). Fetch exactly when one did; otherwise the contents are
+    // stale. The baked probe grid is the EXCLUSIVE alternative indirect source
+    // (probe mode forces restirGI off, so the fetch below reduces to DI's
+    // direct-only contribution there): probes supply the indirect diffuse —
+    // sun/sky bounces + occluded first-bounce sky. Indirect specular is absent
+    // in probe mode (SH9 probes are diffuse-only — known trade-off).
+    const bool bakedGIActive = (FrameCB.bakedGIMode != 0) && (FrameCB.bakedGIValid != 0);
+
+    if (FrameCB.enableRestirDI || FrameCB.enableRestirGI)
     {
         Texture2D<float4> finalDiffuseTex  = ResourceDescriptorHeap[g_Indices.InputIdx0];
         Texture2D<float4> finalSpecularTex = ResourceDescriptorHeap[g_Indices.InputIdx1];
-
-        float3 indirectDiffuse  = finalDiffuseTex.SampleLevel(g_LinearSampler,  input.texCoord, 0).rgb;
-        float3 indirectSpecular = finalSpecularTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+        float3 finalDiffuse  = finalDiffuseTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+        float3 finalSpecular = finalSpecularTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
 
         float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo.rgb, metallic);
         float3 diffuseFactor, specularFactor;
         NRD_MaterialFactors(N, V, albedo.rgb, F0, roughness, diffuseFactor, specularFactor);
 
+        // Reservoir debug view — raw reservoir-sampled signal, no material
+        // re-modulation. Probe mode has no reservoirs (the UI only enables
+        // this under ReSTIR GI; 
         if (FrameCB.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF)
-        {
-            return float4(indirectDiffuse + indirectSpecular, 1.0f);
-        }
+            return float4(finalDiffuse + finalSpecular, 1.0f);
 
-        finalColor += indirectDiffuse  * diffuseFactor;
-        finalColor += indirectSpecular * specularFactor;
+        finalColor += finalDiffuse  * diffuseFactor;
+        finalColor += finalSpecular * specularFactor;
     }
+
+    // Baked probe indirect diffuse (validity-renormalized trilinear).
+    if (bakedGIActive)
+        finalColor += albedo.rgb / PI * SampleBakedGIProbe(worldPos.xyz, N);
     
     // When TAA is active, output raw HDR — the TAA resolve shader handles
     // exposure and tonemapping. Otherwise, apply them here for direct display.

@@ -20,7 +20,7 @@
 
 #include "Common.hlsl"
 
-Texture2D g_Textures[] : register(t0, space0);
+// G-Buffer textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 ConstantBuffer<FrameConstants>  FrameCB   : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
@@ -49,7 +49,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
     RWTexture2D<float4> noiseSpecular  = ResourceDescriptorHeap[g_Indices.OutputIdx1];
 
     // Sky pixels: write zero and exit (reverse-Z: clear value = 0.0 = far plane)
-    float depth = g_Textures[FrameCB.depthIndex].Load(int3(screenPos, 0)).r;
+    float depth = GetTexture2D(FrameCB.depthIndex).Load(int3(screenPos, 0)).r;
     if (depth <= 0.0f)
     {
         if (isFirstPass)

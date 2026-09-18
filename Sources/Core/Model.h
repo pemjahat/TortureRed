@@ -116,6 +116,14 @@ public:
 
     bool LoadGLTFModel(Renderer* renderer, const std::string& filepath);
     void UpdateAnimation(float deltaTime);
+
+    // Cached world-space scene bounds: union of the per-instance bounds
+    // spheres (transformed by each instance's LocalToWorld). Computed once
+    // when the scene finishes loading (static-scene contract — animated
+    // content does not re-dirty the scene extents); the lazy path in the
+    // getter only serves queries made before load. Fallback box at the
+    // origin when instance data is unavailable.
+    const DirectX::BoundingBox& GetSceneWorldBounds() const;
     void Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode = AlphaMode::Opaque);
     void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer);
     void UploadBuffers(Renderer* renderer);
@@ -189,6 +197,14 @@ private:
     void LoadMaterials();
     void BuildNodeHierarchy();
     void LoadAnimations();
+
+    // World-space scene bounds computation — fills the load-time cache.
+    DirectX::BoundingBox ComputeSceneWorldBounds() const;
+
+    // Scene-bounds cache: computed once at load end (mutable: lazy safety
+    // path for pre-load queries).
+    mutable DirectX::BoundingBox m_SceneWorldBounds;
+    mutable bool m_SceneBoundsComputed = false;
 
     GLTFModel m_GltfModel;
     std::wstring fileDirectory;

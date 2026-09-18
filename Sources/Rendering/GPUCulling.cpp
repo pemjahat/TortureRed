@@ -436,7 +436,7 @@ void GPUCulling::DebugViewHZB(ID3D12GraphicsCommandList* cmdList, ID3D12RootSign
     cmdList->SetComputeRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetPipelineState(m_HZBDebugViewPSO.Get());
-    cmdList->SetComputeRoot32BitConstants(13, sizeof(HZBDebugParams) / 4, &params, 0);
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(HZBDebugParams) / 4, &params, 0);
     cmdList->Dispatch((outputWidth + 7) / 8, (outputHeight + 7) / 8, 1);
 }
 
@@ -460,7 +460,7 @@ void GPUCulling::DrawOccludedRects(ID3D12GraphicsCommandList* cmdList, ID3D12Roo
     cmdList->SetComputeRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetComputeRoot32BitConstants(13, sizeof(OccludedRectDrawParams) / 4, &params, 0);
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(OccludedRectDrawParams) / 4, &params, 0);
 
     cmdList->SetPipelineState(m_OccludedRectBackgroundPSO.Get());
     cmdList->Dispatch((outputWidth + 7) / 8, (outputHeight + 7) / 8, 1);
@@ -495,7 +495,7 @@ void GPUCulling::EmitDepthReadout(ID3D12GraphicsCommandList* cmdList, ID3D12Root
     cmdList->SetComputeRootSignature(mainRootSignature);
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetPipelineState(m_DepthReadoutPSO.Get());
-    cmdList->SetComputeRoot32BitConstants(13, sizeof(DepthReadoutParams) / 4, &params, 0);
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(DepthReadoutParams) / 4, &params, 0);
     cmdList->Dispatch(1, 1, 1);
 }
 
@@ -527,7 +527,7 @@ void GPUCulling::EmitCullStats(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
     cmdList->SetPipelineState(m_CullStatsPSO.Get());
-    cmdList->SetComputeRoot32BitConstants(13, sizeof(CullStatsParams) / 4, &params, 0);
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(CullStatsParams) / 4, &params, 0);
     cmdList->Dispatch(1, 1, 1);
 }
 
@@ -744,7 +744,7 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
         copyParams.BaseSlot                         = (!isFirstPhase) ? 4u : 0u;
 
         cmdList->SetComputeRootSignature(mainRootSignature);
-        cmdList->SetComputeRoot32BitConstants(13, sizeof(CullStatsCopyParams) / 4, &copyParams, 0);
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(CullStatsCopyParams) / 4, &copyParams, 0);
         cmdList->SetPipelineState(m_CopyCullStatsPSO.Get());
         cmdList->Dispatch(1, 1, 1);
     }

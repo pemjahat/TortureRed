@@ -130,12 +130,11 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
     cmdList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
-    cmdList->SetComputeRootShaderResourceView(4, tlasGPUAddress);
-    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(10, lightsBufferAddress); // Lights Buffer
-    cmdList->SetComputeRootShaderResourceView(11, lightLUTBufferAddress); // Light LUT Buffer
+    cmdList->SetComputeRootShaderResourceView(3, tlasGPUAddress);
+    cmdList->SetComputeRootShaderResourceView(4, model->GetGlobalIndexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalVertexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(9, lightsBufferAddress); // Lights Buffer
+    cmdList->SetComputeRootShaderResourceView(10, lightLUTBufferAddress); // Light LUT Buffer
 
     BindlessIndices indices = {};
 
@@ -143,9 +142,9 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     // SHaRC (Spatial Hash Radiance Cache) Pipeline
     // -----------------------------------------------------------------------
 
-    // Bind SHaRC indices; slot 13 (b2) is read by SHaRC_Update, SHaRC_Resolve,
+    // Bind SHaRC indices; slot 12 (b2) is read by SHaRC_Update, SHaRC_Resolve,
     // and RestirGI_Raster_Temporal (query pass) — set once, persists for all three.
-    cmdList->SetComputeRoot32BitConstants(13, sizeof(SharcBindlessIndices) / 4, &m_SharcIndices, 0);
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(SharcBindlessIndices) / 4, &m_SharcIndices, 0);
 
     // --- Pass 1: SHaRC Update — trace secondary rays, deposit samples into hash table ---
     // Downscale by 5 (matching RTXGI default): each thread updates one rotating
@@ -193,7 +192,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
 
         BindlessIndices debugIndices = {};
         debugIndices.OutputIdx0 = fullScreenDebugTex.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &debugIndices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &debugIndices, 0);
         cmdList->SetPipelineState(m_SharcDebugPSO.Get());
         {
             MICROPROFILE_SCOPEGPUI("SHaRC_Debug", MP_CYAN);
@@ -222,7 +221,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.OutputIdx0 = m_DiffuseReservoirBuffer[currentReservoir].uavIndex;
     indices.OutputIdx1 = m_DiffuseCandidateBuffer.uavIndex;
     indices.OutputIdx2 = useCustomRestirHeatmap ? fullScreenDebugTex.uavIndex : UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("GI_Diffuse_Temporal", MP_PURPLE);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -245,7 +244,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.OutputIdx0 = m_SpecularReservoirBuffer[currentReservoir].uavIndex;
     indices.OutputIdx1 = useCustomRestirHeatmap ? fullScreenDebugTex.uavIndex : UINT(-1);
     indices.OutputIdx2 = UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("GI_Specular_Temporal", MP_PURPLE);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -264,7 +263,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.OutputIdx0 = m_DiffuseReservoirIntermediate.uavIndex;
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("GI_Diffuse_Spatial", MP_PURPLE);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -282,7 +281,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
     indices.OutputIdx0 = m_SpecularReservoirIntermediate.uavIndex;
     indices.OutputIdx1 = UINT(-1);
     indices.OutputIdx2 = UINT(-1);
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
     {
         MICROPROFILE_SCOPEGPUI("GI_Specular_Spatial", MP_PURPLE);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
@@ -308,7 +307,7 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
         indices.InputIdx1  = m_SpecularReservoirIntermediate.srvIndex;
         indices.OutputIdx0 = m_GIDiffuseIntermediate.uavIndex;
         indices.OutputIdx1 = m_GISpecularIntermediate.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
         cmdList->SetPipelineState(m_GIResolveIntermediatesPSO.Get());
         {
             MICROPROFILE_SCOPEGPUI("GI_ResolveIntermediates", MP_BLUE);
@@ -338,10 +337,10 @@ bool RestirGI::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* 
         indices.InputIdx1  = m_GISpecularIntermediate.srvIndex;
         indices.OutputIdx0 = finalDiffuseTex.uavIndex;
         indices.OutputIdx1 = finalSpecularTex.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
         // isFirstPass=0 if DI ran this frame (additive blend), 1 if DI was off (overwrite)
         const UINT isFirstPass = (frame.enableRestirDI != 0u) ? 0u : 1u;
-        cmdList->SetComputeRoot32BitConstants(13, 1, &isFirstPass, 0);
+        cmdList->SetComputeRoot32BitConstants(12, 1, &isFirstPass, 0);
         cmdList->SetPipelineState(nrdStoreShadingOutputPSO);
         {
             MICROPROFILE_SCOPEGPUI("GI_StoreOutput", MP_BLUE);

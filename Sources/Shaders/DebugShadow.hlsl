@@ -35,8 +35,8 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.uv).r;
-    float3 normal = g_Textures[FrameCB.normalIndex].Sample(g_LinearSampler, input.uv).rgb * 2.0f - 1.0f;
+    float depth = GetTexture2D(FrameCB.depthIndex).Sample(g_LinearSampler, input.uv).r;
+    float3 normal = GetTexture2D(FrameCB.normalIndex).Sample(g_LinearSampler, input.uv).rgb * 2.0f - 1.0f;
     
     // Early exit for sky pixels. Reverse-Z: clear = 0.0 (far plane).
     if (depth <= 0.0f) {

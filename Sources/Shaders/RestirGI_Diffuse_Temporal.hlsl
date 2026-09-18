@@ -36,7 +36,7 @@ void SampleDiffuseRay(float3 N, float3 V, float3 baseColor, float metallic, inou
     float3 F_at_surface = FresnelSchlick(max(dot(V, H), 0.0), F0);
     float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
     throughput = kD * baseColor;
-    pdf = max(dot(N, rayDir), 0.0f) / 3.14159265f;
+    pdf = max(dot(N, rayDir), 0.0f) / PI;
 }
 
 // Diffuse-only target PDF (no specular contribution)

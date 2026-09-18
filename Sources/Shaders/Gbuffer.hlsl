@@ -14,7 +14,7 @@ StructuredBuffer<MaterialConstants> MaterialBuffer : register(t0, space1);
 StructuredBuffer<DrawNodeData> DrawNodeBuffer : register(t1, space1);
 StructuredBuffer<GLTFVertex> GlobalVertexBuffer : register(t4, space1);
 
-Texture2D textures[] : register(t0);
+// Textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 SamplerState pointSampler : register(s0);
 
 PSInput VSMain(uint instanceID : SV_StartInstanceLocation, uint vertexID: SV_VertexID)
@@ -45,7 +45,7 @@ GBufferOutput PSMain(PSInput input) {
     
     float4 albedo = material.baseColorFactor;
     if (material.baseColorTextureIndex >= 0) {
-        float4 sampled = textures[material.baseColorTextureIndex].Sample(pointSampler, input.texCoord);
+        float4 sampled = GetTexture2D(material.baseColorTextureIndex).Sample(pointSampler, input.texCoord);
         albedo *= sampled;
     }
     
@@ -60,7 +60,7 @@ GBufferOutput PSMain(PSInput input) {
     float metallic = material.metallicFactor;
     
     if (material.metallicRoughnessTextureIndex >= 0) {
-        float4 mrSample = textures[material.metallicRoughnessTextureIndex].Sample(pointSampler, input.texCoord);
+        float4 mrSample = GetTexture2D(material.metallicRoughnessTextureIndex).Sample(pointSampler, input.texCoord);
         roughness *= mrSample.g;
         metallic *= mrSample.b;
     }

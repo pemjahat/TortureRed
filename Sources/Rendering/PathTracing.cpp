@@ -314,12 +314,11 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
     cmdList->SetComputeRootShaderResourceView(1, model->GetMaterialBufferAddress());
     cmdList->SetComputeRootShaderResourceView(2, model->GetDrawNodeBufferAddress());
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
-    cmdList->SetComputeRootShaderResourceView(4, tlasGPUAddress);
-    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalIndexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(6, model->GetGlobalVertexBufferAddress());
-    cmdList->SetComputeRootShaderResourceView(10, lightsBufferAddress); // Lights Buffer
-    cmdList->SetComputeRootShaderResourceView(11, lightLUTBufferAddress); // Light LUT Buffer
+    cmdList->SetComputeRootShaderResourceView(3, tlasGPUAddress);
+    cmdList->SetComputeRootShaderResourceView(4, model->GetGlobalIndexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(5, model->GetGlobalVertexBufferAddress());
+    cmdList->SetComputeRootShaderResourceView(9, lightsBufferAddress); // Lights Buffer
+    cmdList->SetComputeRootShaderResourceView(10, lightLUTBufferAddress); // Light LUT Buffer
 
     BindlessIndices indices = {};
 
@@ -330,12 +329,12 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
     {
         // NVIDIA RTXDI Path
         // Bind common RTXDI resources
-        cmdList->SetComputeRootDescriptorTable(9, GraphicsHelper::GetSRVGPUHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
+        cmdList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiNeighborOffsetsBuffer.srvIndex));
 
         // Pass 1: Temporal Resampling
         cmdList->SetPipelineState(m_RtxdiRestirTemporalPSO.Get());
-        cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
-        cmdList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
+        cmdList->SetComputeRootDescriptorTable(6, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[previousReservoir].uavIndex));
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier1 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirBuffer[currentReservoir].resource.Get());
@@ -343,8 +342,8 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
 
         // Pass 2: Spatial Resampling
         cmdList->SetPipelineState(m_RtxdiRestirSpatialPSO.Get());
-        cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
-        cmdList->SetComputeRootDescriptorTable(8, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
+        cmdList->SetComputeRootDescriptorTable(6, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
+        cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirBuffer[currentReservoir].uavIndex));
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_RtxdiReservoirIntermediate.resource.Get());
@@ -352,10 +351,10 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
 
         // Pass 3: Resolve
         cmdList->SetPipelineState(m_RtxdiRestirResolvePSO.Get());
-        cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
+        cmdList->SetComputeRootDescriptorTable(6, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices        
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RtxdiRestirReservoirDebugPSO)
@@ -364,9 +363,9 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
             cmdList->ResourceBarrier(1, &debugBarrier);
 
             cmdList->SetPipelineState(m_RtxdiRestirReservoirDebugPSO.Get());
-            cmdList->SetComputeRootDescriptorTable(7, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
+            cmdList->SetComputeRootDescriptorTable(6, GraphicsHelper::GetSRVGPUHandle(m_RtxdiReservoirIntermediate.uavIndex));
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
-            cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+            cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
             cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
         }
     }
@@ -379,7 +378,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
         indices.OutputIdx0 = m_ReservoirBuffer[currentReservoir].uavIndex;
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barriers1[2] = {
@@ -394,7 +393,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
         indices.OutputIdx0 = m_ReservoirIntermediate.uavIndex;
         indices.OutputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.uavIndex : UINT(-1);
         indices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         D3D12_RESOURCE_BARRIER barrier2 = CD3DX12_RESOURCE_BARRIER::UAV(m_ReservoirIntermediate.resource.Get());
@@ -405,7 +404,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
         indices.InputIdx0 = m_ReservoirIntermediate.srvIndex;
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
 
         if (frame.restirReservoirDebugMode != RESTIR_RESERVOIR_DEBUG_OFF && m_RestirReservoirDebugPSO)
@@ -422,7 +421,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
             indices.InputIdx0 = m_ReservoirIntermediate.srvIndex;
             indices.InputIdx1 = useCustomRestirHeatmap ? m_RestirDebugHeatmap.srvIndex : UINT(-1);
             indices.OutputIdx0 = m_PathTracerOutput.uavIndex;
-            cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+            cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
             cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
         }
     }
@@ -431,7 +430,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
         // Old Path Trace
         indices.OutputIdx0 = m_AccumulationBuffer.uavIndex;
         indices.OutputIdx1 = m_PathTracerOutput.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0); // b1: Bindless indices
         cmdList->SetPipelineState(m_PathTracerPSO.Get());
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
     }
@@ -446,7 +445,7 @@ void PathTracing::DispatchRays(ID3D12GraphicsCommandList* cmdList, ID3D12RootSig
         cmdList->SetPipelineState(m_PathTracerPresentPSO.Get());
         indices.InputIdx0 = m_PathTracerOutput.srvIndex;
         indices.OutputIdx0 = m_PathTracerPresentOutput.uavIndex;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &indices, 0);
+        cmdList->SetComputeRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &indices, 0);
         cmdList->Dispatch((internalWidth + 7) / 8, (internalHeight + 7) / 8, 1);
     }
 
@@ -473,11 +472,10 @@ void PathTracing::DrawPathVizLines(ID3D12GraphicsCommandList* cmdList, ID3D12Roo
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetGraphicsRootSignature(rootSignature);
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0)); // Bindless
 
     BindlessIndices vizIndices = {};
     vizIndices.PathVizLineBufferIdx = (uint32_t)m_PathVizLineBuffer.srvIndex;
-    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(BindlessIndices) / 4, &vizIndices, 0);
+    cmdList->SetGraphicsRoot32BitConstants(11, sizeof(BindlessIndices) / 4, &vizIndices, 0);
 
     cmdList->SetPipelineState(m_PathVizLinePSO.Get());
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);

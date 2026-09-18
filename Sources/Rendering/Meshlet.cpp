@@ -224,13 +224,13 @@ void MeshletPass::BuildDispatchMeshArgs(ID3D12GraphicsCommandList* cmdList,
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
 
-    // Pass RasterParams with counter SRV and dispatch args UAV via root constants b1 (param 12)
+    // Pass RasterParams with counter SRV and dispatch args UAV via root constants b1 (param 11)
     RasterParams params = {};
     params.VisibleMeshletsIdx        = 0; // unused by BuildDispatchMeshArgsCS
     params.DispatchMeshArgsIdx       = (uint)m_DispatchMeshArgs.uavIndex;
     params.VisibleMeshletsCounterIdx = (uint)visibleMeshletsCounterSRVIdx;
     params.Phase                     = phase; // selects this phase's own VisibleMeshletsCounter slot
-    cmdList->SetComputeRoot32BitConstants(12, sizeof(RasterParams) / 4, &params, 0);
+    cmdList->SetComputeRoot32BitConstants(11, sizeof(RasterParams) / 4, &params, 0);
 
     cmdList->SetPipelineState(m_BuildDispatchMeshArgsPSO.Get());
     cmdList->Dispatch(1, 1, 1);
@@ -259,7 +259,6 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
     cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
-    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
     RasterParams rp = {};
     rp.VisibleMeshletsIdx        = (uint)visibleMeshletsSRVIdx;
@@ -277,7 +276,7 @@ void MeshletPass::Rasterize(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignat
     rp.GlobalMeshletBoundsSRVIdx    = (uint)model->GetGlobalMeshletBoundsSRVIndex();
     rp.MeshDataSRVIdx               = (uint)model->GetMeshDataSRVIndex();
     rp.InstanceDataSRVIdx           = (uint)model->GetInstanceDataSRVIndex();
-    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(RasterParams) / 4, &rp, 0);
+    cmdList->SetGraphicsRoot32BitConstants(11, sizeof(RasterParams) / 4, &rp, 0);
 
     cmdList->SetPipelineState(pso);
     cmdList->ExecuteIndirect(
@@ -332,8 +331,7 @@ void MeshletPass::ResolveVisibilityGBuffer(ID3D12GraphicsCommandList* cmdList, I
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetGraphicsRootConstantBufferView(0, frameCBAddress);
     cmdList->SetGraphicsRootShaderResourceView(1, model->GetMaterialBufferAddress());
-    cmdList->SetGraphicsRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
-    cmdList->SetGraphicsRoot32BitConstants(12, sizeof(rp) / 4, &rp, 0);
+    cmdList->SetGraphicsRoot32BitConstants(11, sizeof(rp) / 4, &rp, 0);
 
     cmdList->SetPipelineState(m_VisibilityGBufferPSO.Get());
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

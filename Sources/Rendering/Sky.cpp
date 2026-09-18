@@ -488,7 +488,6 @@ void Sky::DispatchSH9Projection(ID3D12GraphicsCommandList* cmdList,
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
     cmdList->SetComputeRootSignature(rootSignature);
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
-    cmdList->SetComputeRootDescriptorTable(3, GraphicsHelper::GetSRVGPUHandle(0));
 
     cmdList->SetPipelineState(m_ProjectSH9PSO.Get());
 

@@ -26,16 +26,16 @@ void EvalSH9IrradianceBasis(float3 N, out float sh[9])
     sh[0] = 0.8862269254527579f; // Y00 * pi = sqrt(pi)/2
 
     // Band 1: Y1m * 2*pi/3
-    float a1 = 2.0f * 3.14159265f / 3.0f * sqrt(3.0f / (4.0f * 3.14159265f));
+    float a1 = 2.0f * PI / 3.0f * sqrt(3.0f / (4.0f * PI));
     sh[1] = a1 * N.y;
     sh[2] = a1 * N.z;
     sh[3] = a1 * N.x;
 
     // Band 2: Y2m * pi/4
-    float a2 = 3.14159265f / 4.0f * 0.5f * sqrt(15.0f / 3.14159265f);
+    float a2 = PI / 4.0f * 0.5f * sqrt(15.0f / PI);
     sh[4] = a2 * N.x * N.y;
     sh[5] = a2 * N.y * N.z;
-    sh[6] = 3.14159265f/4.0f * 0.25f * sqrt(5.0f/3.14159265f) * (3.0f*N.z*N.z - 1.0f);
+    sh[6] = PI/4.0f * 0.25f * sqrt(5.0f/PI) * (3.0f*N.z*N.z - 1.0f);
     sh[7] = a2 * N.x * N.z;
     sh[8] = a2 * 0.5f * (N.x*N.x - N.y*N.y);
 }
@@ -145,7 +145,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
     {
         // Normalize so total integral = 4π  (Stupid SH Tricks equation).
         float totalWeight = gs_Weight[0];
-        float norm = (totalWeight > 0.0f) ? (4.0f * 3.14159265f / totalWeight) : 0.0f;
+        float norm = (totalWeight > 0.0f) ? (4.0f * PI / totalWeight) : 0.0f;
 
         RWStructuredBuffer<float4> skySH9Buf = ResourceDescriptorHeap[FrameCB.skySH9BufferIndex];
         for (int i = 0; i < 9; ++i)

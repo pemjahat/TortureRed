@@ -5,7 +5,8 @@
 #include "PBR.hlsl"
 
 // Global Raytracing Resources (Space 1)
-Texture2D g_Textures[] : register(t0, space0);
+// Textures are fully bindless: read via GetTexture2D(index) from Common.hlsl
+// (maps to ResourceDescriptorHeap[index]) — no descriptor table (task012 Phase 1d).
 RaytracingAccelerationStructure g_Scene : register(t2, space1);
 StructuredBuffer<DrawNodeData> g_DrawNodeBuffer : register(t1, space1);
 StructuredBuffer<MaterialConstants> g_Materials : register(t0, space1);
@@ -32,7 +33,7 @@ SamplerState g_LinearSampler : register(s0);
             float2 hitUv = v0.texCoord * (1.0f - barys.x - barys.y) + v1.texCoord * barys.x + v2.texCoord * barys.y; \
             float alpha = mat.baseColorFactor.a; \
             if (mat.baseColorTextureIndex >= 0) { \
-                alpha *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0).a; \
+                alpha *= GetTexture2D(mat.baseColorTextureIndex).SampleLevel(g_LinearSampler, hitUv, 0).a; \
             } \
             alpha = (mat.alphaMode == 1) ? ((alpha >= mat.alphaCutoff) ? 1.0f : 0.0f) : saturate(alpha); \
             if (next_float(rng) < alpha) { \
@@ -128,7 +129,7 @@ float next_float(inout RNG rng) {
 }
 
 float3 sample_cosine_weighted(float2 u) {
-    float phi = 2.0f * 3.14159265f * u.x;
+    float phi = 2.0f * PI * u.x;
     float sinTheta = sqrt(u.y);
     float cosTheta = sqrt(1.0f - u.y);
     return float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
@@ -195,13 +196,13 @@ void ResolveHitSurface(
 
     float4 albedo = mat.baseColorFactor;
     if (mat.baseColorTextureIndex >= 0) {
-        albedo *= g_Textures[mat.baseColorTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+        albedo *= GetTexture2D(mat.baseColorTextureIndex).SampleLevel(g_LinearSampler, hitUv, 0);
     }
 
     float metallic = mat.metallicFactor;
     float roughness = mat.roughnessFactor;
     if (mat.metallicRoughnessTextureIndex >= 0) {
-        float4 mrSample = g_Textures[mat.metallicRoughnessTextureIndex].SampleLevel(g_LinearSampler, hitUv, 0);
+        float4 mrSample = GetTexture2D(mat.metallicRoughnessTextureIndex).SampleLevel(g_LinearSampler, hitUv, 0);
         roughness *= mrSample.g;
         metallic *= mrSample.b;
     }
@@ -287,7 +288,7 @@ void SampleIndirectRay(float3 N, float3 V, float3 baseColor, float metallic, flo
         float3 F_at_surface = FresnelSchlick(max(dot(V, H), 0.0), F0);
         float3 kD = (1.0 - F_at_surface) * (1.0 - metallic);
         throughput = (kD * baseColor) / (1.0 - probSpecular + 0.0001f);
-        pdf = (max(dot(N, rayDir), 0.0f) / 3.14159265f) * (1.0 - probSpecular);
+        pdf = (max(dot(N, rayDir), 0.0f) / PI) * (1.0 - probSpecular);
         isDiffuse = true;
     }
 }

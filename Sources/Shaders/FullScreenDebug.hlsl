@@ -20,7 +20,7 @@
 
 // Minimal resource declarations — FullScreenDebug does not need RT acceleration
 // structures or DrawNode buffers. Only G-Buffer textures and the bindless heap.
-Texture2D g_Textures[] : register(t0, space0);
+// G-Buffer textures are bindless: read via GetTexture2D(index) (Common.hlsl).
 SamplerState g_LinearSampler : register(s0);
 
 struct VSInput {
@@ -45,7 +45,7 @@ ConstantBuffer<FrameConstants>  FrameCB   : register(b0);
 ConstantBuffer<BindlessIndices> g_Indices : register(b1);
 
 float4 PSMain(PSInput input) : SV_Target {
-    float depth = g_Textures[FrameCB.depthIndex].Sample(g_LinearSampler, input.texCoord).r;
+    float depth = GetTexture2D(FrameCB.depthIndex).Sample(g_LinearSampler, input.texCoord).r;
 
     // Sky pixels — sample the baked sky cubemap for background color.
     // Reverse-Z: clear = 0.0 (far plane).
