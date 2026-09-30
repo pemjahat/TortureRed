@@ -58,6 +58,15 @@ struct GLTFPrimitive
     // meshletBounds, computed in Model::BuildMeshlets(). Feeds InstanceBounds
     DirectX::XMFLOAT3 boundsSphereCenter = { 0.0f, 0.0f, 0.0f };
     float              boundsSphereRadius = 0.0f;
+
+    // Authoritative LOCAL-space AABB, read from the glTF POSITION accessor
+    // min/max at load (spec-defined, written by every conforming exporter;
+    // scanned from the decoded vertices when absent). Feeds the exact
+    // scene-bounds union — the culling sphere above inflates elongated
+    // geometry badly through its sphere->box round trip (Sponza's wall slabs:
+    // a 37x1.5x23 m slab becomes a ~44^3 m box).
+    DirectX::XMFLOAT3 boundsMin = { 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT3 boundsMax = { 0.0f, 0.0f, 0.0f };
 };
 
 struct GLTFMesh
@@ -117,8 +126,8 @@ public:
     bool LoadGLTFModel(Renderer* renderer, const std::string& filepath);
     void UpdateAnimation(float deltaTime);
 
-    // Cached world-space scene bounds: union of the per-instance bounds
-    // spheres (transformed by each instance's LocalToWorld). Computed once
+    // Cached world-space scene bounds: exact union of the per-instance local
+    // AABBs, corner-transformed by each instance's LocalToWorld. Computed once
     // when the scene finishes loading (static-scene contract — animated
     // content does not re-dirty the scene extents); the lazy path in the
     // getter only serves queries made before load. Fallback box at the
@@ -280,6 +289,11 @@ private:
     // so culling follows animated instances (no stale load-time transform).
     std::vector<InstanceBounds> m_InstanceBoundsArray;
     GPUBuffer m_InstanceBoundsBuffer;
+
+    // Per-MeshData LOCAL-space AABB (min, max) — the exact scene-bounds path:
+    // ComputeSceneWorldBounds corner-transforms these and unions. The sphere
+    // array above stays the GPU meshlet-culling path. CPU-only, never uploaded.
+    std::vector<std::pair<DirectX::XMFLOAT3, DirectX::XMFLOAT3>> m_InstanceLocalAABBs;
 
     size_t m_TotalMeshletCount = 0;
 };

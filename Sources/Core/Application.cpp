@@ -119,6 +119,7 @@ void Application::Initialize()
     m_FrameConstants.bakedGIProbeMetaSRVIndex = 0;
     m_FrameConstants.bakedGIProbeSkySRVIndex = 0;
     m_FrameConstants.bakedGIProbeSunSRVIndex = 0;
+    m_FrameConstants.bakedGIProbeVisSRVIndex = 0;
     m_FrameConstants.bakedGIGridMinX = 0.0f;
     m_FrameConstants.bakedGIGridMinY = 0.0f;
     m_FrameConstants.bakedGIGridMinZ = 0.0f;
@@ -130,6 +131,7 @@ void Application::Initialize()
     m_FrameConstants.bakedGIResponseSRVIndex = 0;
     m_FrameConstants.bakedGIDebugScale = 1.0f;
     m_FrameConstants.bakedGILeakDebug = 0;
+    m_FrameConstants.bakedGIVisCheck = 1; // step-3 weights on by default (A/B off = plain step-1 fetch)
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -510,9 +512,11 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIProbeMetaSRVIndex  = gi.IsValid() ? gi.GetMetaSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeSkySRVIndex   = gi.IsValid() ? gi.GetLitSkySRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
+        m_FrameConstants.bakedGIProbeVisSRVIndex   = gi.IsValid() ? gi.GetVisibilitySRVIndex() : 0u;
         m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
+        m_FrameConstants.bakedGIVisCheck           = m_BakedGIVisCheck ? 1u : 0u;
         const DirectX::XMFLOAT3 gmin = gi.GetGridMin();
         m_FrameConstants.bakedGIGridMinX = gmin.x;
         m_FrameConstants.bakedGIGridMinY = gmin.y;
@@ -1365,6 +1369,14 @@ void Application::RenderImGui()
                                       "Per surface: fraction of the trilinear probe blend coming from probes BEHIND the\n"
                                       "receiver's tangent plane — the wrong-side-of-wall leak that backface rejection would remove.\n"
                                       "Green = clean cage, red ramp = contamination, blue = no valid probes (dark-leak risk).");
+
+                ImGui::Checkbox("Visibility Check (Chebyshev)", &m_BakedGIVisCheck);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A/B the step-3 probe-fetch upgrade. Instant per-frame toggle — no re-bake needed.\n"
+                                      "ON:  unified self-shadow bias + backface weight + Chebyshev occlusion from\n"
+                                      "     the baked per-probe depth moments (wall/roof geometry rejects wrong-side\n"
+                                      "     cage probes for that receiver only).\n"
+                                      "OFF: plain validity-renormalized trilinear (the step-1 fetch).");
 
                 const BakedGI& gi = m_Renderer.GetBakedGI();
                 if (gi.IsValid())

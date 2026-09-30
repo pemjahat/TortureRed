@@ -23,6 +23,20 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
         }
     }
 
+    // --- Step-3 visibility bake: octahedral depth moments (compute, ray queries) ---
+    {
+        std::cout << "[BakedGI] compiling visibility bake shader..." << std::endl;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+        computeDesc.pRootSignature = rootSignature;
+        auto cs = GraphicsHelper::CompileShader("Shaders/BakedGI_Visibility.hlsl", "main", "cs_6_6");
+        std::cout << "[BakedGI] visibility bake shader: " << (cs.empty() ? "FAILED" : "ok") << std::endl;
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_VisBakePSO));
+        }
+    }
+
     // --- Per-frame lit-probe update (compute) ---
     {
         std::cout << "[BakedGI] compiling update shader..." << std::endl;
@@ -163,6 +177,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     m_LitProbesSky  = {};
     m_LitProbesSun  = {};
     m_Meta          = {};
+    m_Visibility    = {};
 
     const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
     if (!CreateStructuredBuffer(m_Response[0], sizeof(float) * 4, responseElems,
@@ -176,7 +191,9 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         !CreateStructuredBuffer(m_LitProbesSun, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSun") ||
         !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta"))
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
+        !CreateStructuredBuffer(m_Visibility, sizeof(float) * 2, (uint64_t)m_ProbeCount * kVisStride,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility"))
     {
         std::cerr << "[BakedGI] Failed to create probe buffers" << std::endl;
         return false;
@@ -216,8 +233,37 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         cur = 1 - cur;
     }
 
+    // --- Step-3 visibility bake: per-probe octahedral depth moments. Rides
+    // the same list and root bindings (CBV b0 + material/draw-node/TLAS/
+    // index/vertex SRVs) as the transport dispatches above; only the b2
+    // root-constants block and PSO change. One 16x16-thread group per probe;
+    // probes tile across (x = kVisDispatchX, y) to respect the 65535-per-axis
+    // dispatch cap (kMaxProbeCount is 131072).
+    if (m_VisBakePSO)
+    {
+        BakedGIVisParams vp = {};
+        vp.gridMinX = m_GridMin.x; vp.gridMinY = m_GridMin.y; vp.gridMinZ = m_GridMin.z;
+        vp.spacing  = m_Spacing;
+        vp.dimX = m_DimX; vp.dimY = m_DimY; vp.dimZ = m_DimZ;
+        vp.probeCount = m_ProbeCount;
+        vp.visUAVIdx  = (uint32_t)m_Visibility.uavIndex;
+
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIVisParams) / 4, &vp, 0);
+        cmdList->SetPipelineState(m_VisBakePSO.Get());
+        cmdList->Dispatch(kVisDispatchX, (m_ProbeCount + kVisDispatchX - 1) / kVisDispatchX, 1);
+
+        D3D12_RESOURCE_BARRIER visBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Visibility.resource.Get());
+        cmdList->ResourceBarrier(1, &visBarrier);
+    }
+    else
+    {
+        std::cerr << "[BakedGI] Visibility bake PSO missing — Chebyshev weights skipped" << std::endl;
+    }
+
     m_Valid = true;
-    std::cout << "[BakedGI] Bake recorded (" << m_ProbeCount << " probes)" << std::endl;
+    std::cout << "[BakedGI] Bake recorded (" << m_ProbeCount << " probes, "
+              << "visibility: 16x16 depth moments x" << kVisStride << " texels/probe)"
+              << std::endl;
     return true;
 }
 

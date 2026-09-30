@@ -155,9 +155,11 @@ float4 PSMain(PSInput input) : SV_Target {
         finalColor += finalSpecular * specularFactor;
     }
 
-    // Baked probe indirect diffuse (validity-renormalized trilinear).
+    // Baked probe indirect diffuse — DDGI-style weighted blend: trilinear x
+    // backface x Chebyshev occlusion from the baked depth moments, unified
+    // self-shadow bias, validity-renormalized with a fallback ladder.
     if (bakedGIActive)
-        finalColor += albedo.rgb / PI * SampleBakedGIProbe(worldPos.xyz, N);
+        finalColor += albedo.rgb / PI * SampleBakedGIProbe(worldPos.xyz, N, V);
     
     // When TAA is active, output raw HDR — the TAA resolve shader handles
     // exposure and tonemapping. Otherwise, apply them here for direct display.

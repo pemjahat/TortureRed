@@ -27,9 +27,13 @@ Model::~Model()
     }
 }
 
-// World-space scene bounds — union of the per-instance local bounds spheres
-// transformed by each instance's LocalToWorld (max row length = max axis
-// scale under the row-vector mul convention used throughout the shaders).
+// World-space scene bounds — exact union of the per-instance local AABBs,
+// each corner-transformed by the instance's LocalToWorld (the tight world AABB
+// of a transformed box is the AABB of its transformed corners — exact under
+// rotation and non-uniform scale). Local AABBs come from the glTF POSITION
+// accessor min/max. The previous sphere-based union inflated elongated
+// geometry through its sphere->box round trip (Sponza's 37x1.5x23 m wall
+// slabs each became ~44^3 m boxes, ~2-3.5x per axis — and ~9x the probes).
 // Computed once at load end; served from the cache thereafter.
 const DirectX::BoundingBox& Model::GetSceneWorldBounds() const
 {
@@ -48,48 +52,45 @@ DirectX::BoundingBox Model::ComputeSceneWorldBounds() const
     const BoundingBox fallback(XMFLOAT3(0.0f, 5.0f, 0.0f),
                                 XMFLOAT3(30.0f, 30.0f, 30.0f));
 
-    if (m_InstanceDataArray.empty() || m_InstanceBoundsArray.empty())
+    if (m_InstanceDataArray.empty() || m_InstanceLocalAABBs.empty())
         return fallback;
 
-    BoundingBox result = fallback;
-    bool first = true;
+    XMVECTOR mn = XMVectorReplicate(FLT_MAX);
+    XMVECTOR mx = XMVectorReplicate(-FLT_MAX);
     for (const InstanceData& inst : m_InstanceDataArray)
     {
-        uint32_t bi = (inst.BoundsIndex < (uint32_t)m_InstanceBoundsArray.size())
+        uint32_t bi = (inst.BoundsIndex < (uint32_t)m_InstanceLocalAABBs.size())
                     ? inst.BoundsIndex
                     : inst.MeshDataIndex;
-        if (bi >= (uint32_t)m_InstanceBoundsArray.size())
+        if (bi >= (uint32_t)m_InstanceLocalAABBs.size())
             continue;
-        const InstanceBounds& b = m_InstanceBoundsArray[bi];
+        const auto& ab = m_InstanceLocalAABBs[bi];
 
-        XMMATRIX M = XMLoadFloat4x4(&inst.LocalToWorld);
-        XMVECTOR c  = XMVector3Transform(XMLoadFloat3(&b.BoundsCenter), M);
-
-        // Max axis scale: basis images under mul(v, M) are the matrix rows.
-        float r1 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._11, inst.LocalToWorld._12, inst.LocalToWorld._13, 0.0f)));
-        float r2 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._21, inst.LocalToWorld._22, inst.LocalToWorld._23, 0.0f)));
-        float r3 = XMVectorGetX(XMVector3Length(XMVectorSet(inst.LocalToWorld._31, inst.LocalToWorld._32, inst.LocalToWorld._33, 0.0f)));
-        float maxScale = r1 > r2 ? (r1 > r3 ? r1 : r3) : (r2 > r3 ? r2 : r3);
-
-        XMFLOAT3 cf;
-        XMStoreFloat3(&cf, c);
-        BoundingSphere sphere(cf, b.BoundsRadius * maxScale);
-        BoundingBox sphereBox;
-        BoundingBox::CreateFromSphere(sphereBox, sphere);
-        if (first)
+        const XMMATRIX M = XMLoadFloat4x4(&inst.LocalToWorld);
+        for (uint32_t c = 0; c < 8; ++c)
         {
-            result = sphereBox;
-            first = false;
-        }
-        else
-        {
-            BoundingBox merged;
-            BoundingBox::CreateMerged(merged, result, sphereBox);
-            result = merged;
+            const XMVECTOR corner = XMVectorSet(
+                (c & 1u) ? ab.second.x : ab.first.x,
+                (c & 2u) ? ab.second.y : ab.first.y,
+                (c & 4u) ? ab.second.z : ab.first.z, 1.0f);
+            const XMVECTOR w = XMVector3Transform(corner, M); // point transform (w = 1)
+            mn = XMVectorMin(mn, w);
+            mx = XMVectorMax(mx, w);
         }
     }
 
-    return first ? fallback : result;
+    XMFLOAT3 mnf, mxf;
+    XMStoreFloat3(&mnf, mn);
+    XMStoreFloat3(&mxf, mx);
+    if (mnf.x > mxf.x || mnf.y > mxf.y || mnf.z > mxf.z)
+        return fallback; // nothing accumulated
+
+    BoundingBox result;
+    XMVECTOR mnv = XMLoadFloat3(&mnf);
+    XMVECTOR mxv = XMLoadFloat3(&mxf);
+    XMStoreFloat3(&result.Center, XMVectorScale(XMVectorAdd(mnv, mxv), 0.5f));
+    XMStoreFloat3(&result.Extents, XMVectorScale(XMVectorSubtract(mxv, mnv), 0.5f));
+    return result;
 }
 
 bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
@@ -206,6 +207,35 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
                 {
                     std::cerr << "Failed to read position data from GLTF buffer" << std::endl;
                     return false;
+                }
+            }
+
+            // Authoritative local AABB: the glTF POSITION accessor min/max
+            // (spec-defined — every conforming exporter writes them; Sponza
+            // carries them on all primitives). Fallback for non-conforming
+            // assets: scan the decoded positions we just read.
+            if (positionAccessor->has_min && positionAccessor->has_max)
+            {
+                gltfPrim.boundsMin = { positionAccessor->min[0], positionAccessor->min[1], positionAccessor->min[2] };
+                gltfPrim.boundsMax = { positionAccessor->max[0], positionAccessor->max[1], positionAccessor->max[2] };
+            }
+            else
+            {
+                DirectX::XMFLOAT3 lo = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+                DirectX::XMFLOAT3 hi = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                for (const GLTFVertex& v : gltfPrim.vertices)
+                {
+                    lo.x = std::min(lo.x, v.position[0]);
+                    lo.y = std::min(lo.y, v.position[1]);
+                    lo.z = std::min(lo.z, v.position[2]);
+                    hi.x = std::max(hi.x, v.position[0]);
+                    hi.y = std::max(hi.y, v.position[1]);
+                    hi.z = std::max(hi.z, v.position[2]);
+                }
+                if (lo.x <= hi.x)
+                {
+                    gltfPrim.boundsMin = lo;
+                    gltfPrim.boundsMax = hi;
                 }
             }
 
@@ -1494,6 +1524,7 @@ void Model::CreateMeshletResources(Renderer* renderer)
     m_MeshDataArray.clear();
     m_InstanceDataArray.clear();
     m_InstanceBoundsArray.clear();
+    m_InstanceLocalAABBs.clear();
     m_TotalMeshletCount = 0;
 
     // =========================================================================
@@ -1558,6 +1589,10 @@ void Model::CreateMeshletResources(Renderer* renderer)
                 ib.BoundsRadius = prim.boundsSphereRadius;
                 m_InstanceBoundsArray.push_back(ib);
             }
+
+            // CPU-only local AABB (same MeshData index space) — the exact
+            // scene-bounds path (see ComputeSceneWorldBounds).
+            m_InstanceLocalAABBs.push_back({ prim.boundsMin, prim.boundsMax });
 
             // Record mapping: this primitive → its MeshData index.
             // Used in Pass 2 by nodes that reference this primitive.

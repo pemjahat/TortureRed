@@ -13,6 +13,11 @@
 //             (sky bounces)              (occluded first-bounce sky)
 //     e_sun = E_sun * interp_j(R_j)      (sun bounces only — receiver direct
 //                                          sun stays with the runtime-exact path)
+//   Step 3 adds a per-probe octahedral 16x16 depth-moment map (see the
+//   visibility section below): the deferred fetch weights the probe blend by
+//   a Chebyshev occlusion bound from those moments (geometry stored between a
+//   probe and the receiver rejects that probe), plus a backface weight and
+//   the DDGI 2021 unified self-shadow bias.
 // =============================================================================
 
 #define BAKED_GI_DIRECTIONS    16
@@ -44,32 +49,173 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 }
 
 // ---------------------------------------------------------------------------
-// Deferred fetch (Lighting.hlsl): manual trilinear over the lit probe grid
-// with VALIDITY RENORMALIZATION — invalid (in-geometry) probes are dropped
-// from the blend and the weights renormalized, so they do not darken their
-// neighbors.
+// Step 3 — per-probe octahedral depth-moment visibility.
+//
+// Each probe stores a 16x16 octahedral map of depth moments: texel t holds
+// (M1, M2) = (mean, mean-squared) hit distance over 4 rays jittered within
+// the texel's cone (BakedGI_Visibility.hlsl); misses and hits beyond
+// BAKED_GI_SKY_DISTANCE count as sky distance. Pure geometry — TOD-invariant,
+// baked once with the transport. The padded 18x18 layout duplicates the
+// seam-wrapped neighbor into a one-texel border so the manual bilinear below
+// is continuous across the octahedral fold. Distances are clamped to
+// BAKED_GI_SKY_DISTANCE (keeps M2 fp16-representable for the future step-4
+// compression; anything beyond 100 m is sky as far as a <=2m-spaced probe
+// cage can tell).
+// ---------------------------------------------------------------------------
+#define BAKED_GI_VIS_RES        16
+#define BAKED_GI_VIS_PAD        18
+#define BAKED_GI_VIS_STRIDE     (BAKED_GI_VIS_PAD * BAKED_GI_VIS_PAD) // 324 float2 per probe
+#define BAKED_GI_SKY_DISTANCE   100.0f
+#define BAKED_GI_CHEB_MIN       0.05f // floor on the cubed Chebyshev weight (anti-flicker; keeps the ladder's full tier alive)
+#define BAKED_GI_VIS_DISPATCH_X 4096u // visibility-bake dispatch X tile (C++ mirrors this)
+
+// --- Octahedral mapping (unit direction <-> [0,1]^2), Y-up on the xz plane ---
+float2 BakedGISignNotZero(float2 v)
+{
+    return float2((v.x >= 0.0f) ? 1.0f : -1.0f, (v.y >= 0.0f) ? 1.0f : -1.0f);
+}
+
+float2 BakedGIOctWrap(float2 v)
+{
+    return (float2(1.0f, 1.0f) - abs(v.yx)) * BakedGISignNotZero(v);
+}
+
+float2 BakedGIEncodeOcta(float3 d)
+{
+    float3 n = d / (abs(d.x) + abs(d.y) + abs(d.z));
+    float2 uv = n.xz;
+    if (n.y < 0.0f)
+        uv = BakedGIOctWrap(uv);
+    return uv * 0.5f + 0.5f;
+}
+
+float3 BakedGIDecodeOcta(float2 uv)
+{
+    float2 t = uv * 2.0f - 1.0f;
+    float3 n = float3(t.x, 1.0f - abs(t.x) - abs(t.y), t.y);
+    if (n.y < 0.0f)
+        n.xz = BakedGIOctWrap(n.xz);
+    return normalize(n);
+}
+
+// Seam-correct wrap for bilinear taps that fall off the 16x16 interior map:
+// crossing an octahedral edge = crossing the fold's cut, whose spherical
+// neighbor is the edge-mirrored texel (derived from the cut structure; the
+// double application handles corner taps).
+int2 BakedGIWrapVisTexel(int2 c)
+{
+    [unroll]
+    for (uint it = 0; it < 2u; ++it)
+    {
+        if      (c.x < 0)  c = int2(0,  15 - c.y);
+        else if (c.x > 15) c = int2(15, 15 - c.y);
+        else if (c.y < 0)  c = int2(15 - c.x, 0);
+        else if (c.y > 15) c = int2(15 - c.x, 15);
+    }
+    return clamp(c, int2(0, 0), int2(15, 15));
+}
+
+// Padded-map (18x18) linear index of an interior texel.
+uint BakedGIVisPadIndex(int2 c)
+{
+    return (uint)(c.y + 1) * BAKED_GI_VIS_PAD + (uint)(c.x + 1);
+}
+
+// Manual bilinear (M1, M2) fetch from a probe's padded moment map along dir.
+float2 BakedGISampleMoments(StructuredBuffer<float2> vis, uint probe, float3 dir)
+{
+    float2 uv = BakedGIEncodeOcta(dir) * (float)BAKED_GI_VIS_RES; // texel space [0,16]
+    float2 st = uv - 0.5f;                    // corner space; floor(st) in [-1,15]
+    float2 fr = frac(st);
+    int2   p0 = int2(floor(st));
+
+    float2 m00 = vis[probe * BAKED_GI_VIS_STRIDE + BakedGIVisPadIndex(BakedGIWrapVisTexel(p0 + int2(0, 0)))];
+    float2 m10 = vis[probe * BAKED_GI_VIS_STRIDE + BakedGIVisPadIndex(BakedGIWrapVisTexel(p0 + int2(1, 0)))];
+    float2 m01 = vis[probe * BAKED_GI_VIS_STRIDE + BakedGIVisPadIndex(BakedGIWrapVisTexel(p0 + int2(0, 1)))];
+    float2 m11 = vis[probe * BAKED_GI_VIS_STRIDE + BakedGIVisPadIndex(BakedGIWrapVisTexel(p0 + int2(1, 1)))];
+    return lerp(lerp(m00, m10, fr.x), lerp(m01, m11, fr.x), fr.y);
+}
+
+// One-sided Chebyshev bound (two-moment / VSM form): the probability weight
+// that the probe's stored geometry along the sampled direction sits BEYOND
+// the receiver distance d. d <= mean -> nothing between -> fully visible.
+// The bound is CUBED and floored — the shaping shipped in DDGI / simco50's
+// D3D12_Research / Adria: the raw two-moment bound decays slowly, so a wall
+// between probe and receiver still leaves a large weight; cubing sharpens
+// the rejection curve while moment variance (window frames, foliage) keeps
+// a soft penumbra. The floor keeps a rejected probe at 5% — anti-flicker
+// under renormalization, and it keeps the full-weight tier of the fallback
+// ladder alive (the ladder now only fires on total cage collapse, not on
+// aggressive per-probe rejection).
+float BakedGIChebyshev(float2 m, float d)
+{
+    if (d <= m.x)
+        return 1.0f;
+    float variance = max(m.y - m.x * m.x, 0.0f);
+    float cheb = variance / (variance + (d - m.x) * (d - m.x));
+    cheb = max(cheb * cheb * cheb, 0.0f); // cubed: sharper leak rejection
+    return max(cheb, BAKED_GI_CHEB_MIN);
+}
+
+// ---------------------------------------------------------------------------
+// Deferred fetch (Lighting.hlsl): DDGI-style weighted probe blend over the
+// lit probe grid.
+//
+//   w_p = trilinear_p(x') * backface_p * chebyshev_p
+//
+//   x'        — receiver position advanced by the DDGI 2021 unified
+//               self-shadow bias (n*0.2 + wo*0.8) * (0.75*D)*B, B = 0.3:
+//               slides the query off the receiver's own surface so the
+//               probe's stored geometry (which includes that surface) does
+//               not occlude the receiver itself.
+//   backface  — saturate(dot(N, dir to probe)): cage members behind the
+//               receiver's tangent plane (through-floor / through-wall)
+//               contribute zero.
+//   chebyshev — one-sided bound from the probe's baked octahedral depth
+//               moments along the probe->receiver direction: geometry
+//               stored between the probe and the receiver rejects the probe.
+//
+// Fallback ladder (never black, never worse than the step-1 fetch): if every
+// cage probe is Chebyshev-rejected, retry with backface-only weights; if
+// those also die, degrade to plain validity-renormalized trilinear.
+//
+// A/B toggle (FrameCB.bakedGIVisCheck): 0 disables all three weights AND the
+// self-shadow bias — the fetch is then exactly the step-1 plain
+// validity-renormalized trilinear, for before/after comparison.
 //
 // REQUIRES in scope at include time:
 //   - ConstantBuffer<FrameConstants> FrameCB : register(b0)
 //   - EvalSH9Basis (PBR.hlsl, included via Common.hlsl / CommonTracing.hlsl)
 // ---------------------------------------------------------------------------
-float3 SampleBakedGIProbe(float3 worldPos, float3 N)
+float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
 {
     uint3  dims    = uint3(FrameCB.bakedGIDimX, FrameCB.bakedGIDimY, FrameCB.bakedGIDimZ);
     float3 gridMin = float3(FrameCB.bakedGIGridMinX, FrameCB.bakedGIGridMinY, FrameCB.bakedGIGridMinZ);
+    float  spacing = FrameCB.bakedGISpacing;
+
+    // A/B toggle: 1 = step-3 weighted fetch, 0 = plain step-1 trilinear.
+    const bool visOn = (FrameCB.bakedGIVisCheck != 0u);
+
+    // Unified self-shadow bias (DDGI 2021, B = 0.3). The biased point also
+    // drives the trilinear cell lookup — up to ~0.23*D of cage drift, by design.
+    float3 xq = visOn
+        ? worldPos + (N * 0.2f + V * 0.8f) * (0.75f * spacing * 0.3f)
+        : worldPos; // A/B off: unbiased cage — exactly the step-1 fetch
 
     // Continuous cell coordinates; probes live on integer cells in [0, dim-1].
-    float3 t = clamp((worldPos - gridMin) / FrameCB.bakedGISpacing,
+    float3 t = clamp((xq - gridMin) / spacing,
                      float3(0.0f, 0.0f, 0.0f), dims - 1.0f);
     int3   base = int3(min(floor(t), max(dims - 2.0f, float3(0.0f, 0.0f, 0.0f))));
     float3 f    = t - base;
 
     StructuredBuffer<float4> lit  = ResourceDescriptorHeap[FrameCB.bakedGIProbeSRVIndex];
     StructuredBuffer<uint>   meta = ResourceDescriptorHeap[FrameCB.bakedGIProbeMetaSRVIndex];
+    StructuredBuffer<float2> vis  = ResourceDescriptorHeap[FrameCB.bakedGIProbeVisSRVIndex];
 
-    float3 coef[9] = (float3[9])0;
-    float  wsum = 0.0f;
-
+    // Pass 1 — cage weights: validity * trilinear * backface * Chebyshev.
+    float wTri[8] = (float[8])0;
+    float wBF[8]  = (float[8])0;
+    float wFull[8] = (float[8])0;
     [unroll]
     for (uint k = 0; k < 8; ++k)
     {
@@ -78,13 +224,54 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N)
         float w = w3.x * w3.y * w3.z;
 
         uint flat = BakedGIFlatten(base + off, dims);
-        if (meta[flat] & 1u)
+        if (!(meta[flat] & 1u))
+            continue;
+        wTri[k] = w;
+
+        if (!visOn)
+            continue; // A/B off: plain step-1 fetch — wBF/wFull stay 0 -> tier 0
+
+        float3 toProbe = gridMin + float3(base + off) * spacing - xq;
+        float  dist    = length(toProbe);
+        if (dist < 1e-4f)
         {
-            [unroll]
-            for (uint lm = 0; lm < 9; ++lm)
-                coef[lm] += lit[flat * 9u + lm].rgb * w;
-            wsum += w;
+            // Receiver sits on the probe: trivially visible.
+            wBF[k] = w;
+            wFull[k] = w;
+            continue;
         }
+
+        float3 dir  = toProbe / dist;
+        float  back = saturate(dot(N, dir));
+        wBF[k] = w * back;
+        if (back > 0.0f)
+        {
+            float2 m = BakedGISampleMoments(vis, flat, dir);
+            wFull[k] = wBF[k] * BakedGIChebyshev(m, dist);
+        }
+    }
+
+    // Tier selection: full -> backface-only -> plain validity-renormalized.
+    float sumFull = 0.0f, sumBF = 0.0f;
+    [unroll]
+    for (uint k1 = 0; k1 < 8; ++k1) { sumFull += wFull[k1]; sumBF += wBF[k1]; }
+    const uint tier = (sumFull > 1e-4f) ? 2u : ((sumBF > 1e-4f) ? 1u : 0u);
+
+    // Pass 2 — blend SH coefficients with the selected tier's weights.
+    float3 coef[9] = (float3[9])0;
+    float  wsum = 0.0f;
+    [unroll]
+    for (uint k2 = 0; k2 < 8; ++k2)
+    {
+        float w = (tier == 2u) ? wFull[k2] : ((tier == 1u) ? wBF[k2] : wTri[k2]);
+        if (w <= 0.0f)
+            continue;
+        int3 off = int3(k2 & 1u, (k2 >> 1u) & 1u, (k2 >> 2u) & 1u);
+        uint flat = BakedGIFlatten(base + off, dims);
+        [unroll]
+        for (uint lm = 0; lm < 9; ++lm)
+            coef[lm] += lit[flat * 9u + lm].rgb * w;
+        wsum += w;
     }
 
     if (wsum < 1e-6f)
@@ -105,12 +292,14 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N)
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostic split of the SampleBakedGIProbe trilinear cage (leak map):
-// returns (wValid, wBack) — the validity-renormalized weight total and the
-// portion contributed by probes BEHIND the receiver's tangent plane
-// (dot(N, probePos - x) <= 0). wBack / wValid is the backface-contamination
-// fraction the Backface Leak Map displays; it is exactly the weight backface
-// rejection would remove.
+// Diagnostic split of the probe cage (leak map): returns (wValid, wBack) —
+// the validity-renormalized weight total and the portion contributed by
+// probes BEHIND the receiver's tangent plane (dot(N, probePos - x) <= 0).
+// wBack / wValid is the backface-contamination fraction the Backface Leak Map
+// displays; it is exactly the weight backface rejection would remove.
+// Deliberately the PLAIN cage (no self-shadow bias, no backface/Chebyshev
+// weights): this measures what the raw trilinear fetch WOULD leak, as the
+// baseline the step-3 weights are judged against.
 // REQUIRES in scope at include time: ConstantBuffer<FrameConstants> FrameCB.
 // ---------------------------------------------------------------------------
 float2 BakedGICageContamination(float3 worldPos, float3 N)

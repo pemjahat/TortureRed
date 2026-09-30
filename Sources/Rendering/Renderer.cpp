@@ -661,7 +661,8 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
-        std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams), sizeof(BakedGIUpdateParams))));
+        std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
+        std::max(sizeof(BakedGIUpdateParams), sizeof(BakedGIVisParams)))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];

@@ -127,6 +127,8 @@ struct FrameConstants {
     uint   bakedGIProbeMetaSRVIndex;// StructuredBuffer<uint> per-probe validity (bit 0)
     uint   bakedGIProbeSkySRVIndex; // sky-sourced lit split (debug balls): sky bounces + occluded sky direct
     uint   bakedGIProbeSunSRVIndex; // sun-sourced lit split (debug balls): sun bounces only
+    uint   bakedGIProbeVisSRVIndex; // StructuredBuffer<float2> per-probe octahedral 16x16 depth moments
+                                    // (padded 18x18, (M1, M2) per texel) — step-3 Chebyshev visibility
     float  bakedGIGridMinX;         // grid AABB min (world)
     float  bakedGIGridMinY;
     float  bakedGIGridMinZ;
@@ -145,6 +147,7 @@ struct FrameConstants {
     // post-composite): fraction of the trilinear blend from probes BEHIND
     // the receiver's tangent plane.
     uint   bakedGILeakDebug;        // 1 = active (draws over the tonemapped scene)
+    uint   bakedGIVisCheck;         // 1 = step-3 weighted fetch (bias + backface + Chebyshev), 0 = plain step-1 trilinear (A/B)
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -173,6 +176,16 @@ struct BakedGIUpdateParams {
     float spacing;
     uint  dimX, dimY, dimZ;
     uint  _pad;
+};
+
+// Root constants for the visibility-moment bake dispatch (step 3). One
+// 16x16-thread group per probe; see Shaders/BakedGI_Visibility.hlsl.
+struct BakedGIVisParams {
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;
+    uint  probeCount;
+    uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
 };
 
 struct BindlessIndices {

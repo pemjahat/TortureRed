@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <dxcapi.h>
 #include "GraphicsHelper.h"
 #include "GraphicsTypes.h"
@@ -145,6 +146,79 @@ void GraphicsHelper::SetObjectName(ID3D12Resource* resource, const char* name) {
     resource->SetName(wname.c_str());
 }
 
+namespace {
+
+// Newest last-write time across a shader file and its transitive #include
+// closure — the shader-disk-cache freshness basis. The roots mirror the -I
+// paths passed to DXC in CompileShader; includes resolve relative to the
+// including file's directory first, then the roots in order (DXC semantics).
+// A top-level-only mtime check silently serves cached DXIL compiled against
+// an older shared header (e.g. a grown FrameConstants), which then reads
+// shifted constant offsets — the stale-blob class of bug this kills.
+std::filesystem::file_time_type NewestIncludeTime(const std::filesystem::path& file,
+                                                  const std::vector<std::filesystem::path>& roots,
+                                                  std::set<std::string>& visited,
+                                                  int depth)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::file_time_type newest = fs::last_write_time(file, ec);
+    if (ec || depth <= 0)
+        return newest;
+
+    std::string key = file.string();
+    {
+        std::error_code ecc;
+        const fs::path canonical = fs::weakly_canonical(file, ecc);
+        if (!ecc)
+            key = canonical.string();
+    }
+    if (!visited.insert(key).second)
+        return newest; // already scanned — include-cycle guard
+
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line))
+    {
+        const size_t inc = line.find("#include");
+        if (inc == std::string::npos)
+            continue;
+        const size_t q1 = line.find('"', inc);
+        if (q1 == std::string::npos)
+            continue; // <system> includes are not part of the tracked closure
+        const size_t q2 = line.find('"', q1 + 1);
+        if (q2 == std::string::npos)
+            continue;
+        const std::string includeName = line.substr(q1 + 1, q2 - q1 - 1);
+        if (includeName.empty())
+            continue;
+
+        fs::path candidate = file.parent_path() / includeName;
+        if (!fs::exists(candidate))
+        {
+            bool found = false;
+            for (const fs::path& root : roots)
+            {
+                candidate = root / includeName;
+                if (fs::exists(candidate))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                continue; // unresolved — DXC will report it if it matters
+        }
+
+        const fs::file_time_type t = NewestIncludeTime(candidate, roots, visited, depth - 1);
+        if (t > newest)
+            newest = t;
+    }
+    return newest;
+}
+
+} // namespace
+
 std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target)
 {
     return CompileShader(filename, entryPoint, target, {});
@@ -167,7 +241,8 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
 
     // --- Shader disk cache ---
     // Cache file: <exeDir>/ShaderCache/<stem>.<entry>.<target>[.<definesHash>].dxil
-    // Load from cache if it exists and is newer than the source file.
+    // Load from cache if it exists and is newer than the source file AND its
+    // transitive #includes (headers changing must invalidate the blob).
     namespace fs = std::filesystem;
     auto GetExeDir = []() -> fs::path {
         wchar_t buf[MAX_PATH];
@@ -188,16 +263,42 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
 
     {
         std::error_code ecSrc, ecCache;
-        auto srcTime   = fs::last_write_time(resolvedFilename, ecSrc);
+        const fs::path sourcePath(resolvedFilename);
+        auto srcTime   = fs::last_write_time(sourcePath, ecSrc);
         auto cacheTime = fs::last_write_time(cachePath, ecCache);
         if (!ecSrc && !ecCache && cacheTime >= srcTime)
         {
-            std::ifstream cacheIn(cachePath, std::ios::binary);
-            if (cacheIn.is_open())
+            // Freshness must cover the TRANSITIVE INCLUDES too: a cached blob
+            // older than any included header (BakedGI.hlsli, Shared/SharedTypes.h,
+            // ...) is stale even when the top-level file itself is untouched.
+            std::vector<fs::path> includeRoots;
+#ifdef SHADER_SOURCE_DIR
+            includeRoots.push_back(fs::path(SHADER_SOURCE_DIR));               // Shaders/
+            includeRoots.push_back(fs::path(SHADER_SOURCE_DIR).parent_path()); // Sources/ ("Shared/...")
+#endif
+#ifdef RTXDI_INCLUDE_DIR
+            includeRoots.push_back(fs::path(RTXDI_INCLUDE_DIR));
+#endif
+#ifdef SHARC_INCLUDE_DIR
+            includeRoots.push_back(fs::path(SHARC_INCLUDE_DIR));
+#endif
+#ifdef SPD_INCLUDE_DIR
+            includeRoots.push_back(fs::path(SPD_INCLUDE_DIR));
+#endif
+#ifdef NRD_SHADER_INCLUDE_DIR
+            includeRoots.push_back(fs::path(NRD_SHADER_INCLUDE_DIR));
+#endif
+            std::set<std::string> visited;
+            const auto newestSourceTime = NewestIncludeTime(sourcePath, includeRoots, visited, 16);
+            if (cacheTime >= newestSourceTime)
             {
-                std::vector<char> blob((std::istreambuf_iterator<char>(cacheIn)), {});
-                if (!blob.empty())
-                    return blob;
+                std::ifstream cacheIn(cachePath, std::ios::binary);
+                if (cacheIn.is_open())
+                {
+                    std::vector<char> blob((std::istreambuf_iterator<char>(cacheIn)), {});
+                    if (!blob.empty())
+                        return blob;
+                }
             }
         }
     }
