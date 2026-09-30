@@ -117,6 +117,8 @@ void Application::Initialize()
     m_FrameConstants.bakedGIValid = 0;
     m_FrameConstants.bakedGIProbeSRVIndex = 0;
     m_FrameConstants.bakedGIProbeMetaSRVIndex = 0;
+    m_FrameConstants.bakedGIProbeSkySRVIndex = 0;
+    m_FrameConstants.bakedGIProbeSunSRVIndex = 0;
     m_FrameConstants.bakedGIGridMinX = 0.0f;
     m_FrameConstants.bakedGIGridMinY = 0.0f;
     m_FrameConstants.bakedGIGridMinZ = 0.0f;
@@ -126,7 +128,8 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDimZ = 0;
     m_FrameConstants.bakedGIDebugView = 0;
     m_FrameConstants.bakedGIResponseSRVIndex = 0;
-    m_FrameConstants.bakedGIDebugScale = 200.0f;
+    m_FrameConstants.bakedGIDebugScale = 1.0f;
+    m_FrameConstants.bakedGILeakDebug = 0;
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -505,6 +508,8 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIValid             = gi.IsValid() ? 1u : 0u;
         m_FrameConstants.bakedGIProbeSRVIndex      = gi.IsValid() ? gi.GetLitSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeMetaSRVIndex  = gi.IsValid() ? gi.GetMetaSRVIndex() : 0u;
+        m_FrameConstants.bakedGIProbeSkySRVIndex   = gi.IsValid() ? gi.GetLitSkySRVIndex() : 0u;
+        m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
         m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
@@ -1104,9 +1109,11 @@ void Application::Render()
 
     // Baked GI probe debug overlay — post-composite LDR (after TAA / tonemap,
     // before on-screen text): display-referred colors, no taaEnabled branching,
-    // manual reverse-Z occlusion against the GBuffer depth.
+    // manual reverse-Z occlusion against the GBuffer depth. Includes the
+    // fullscreen Backface Leak Map (drawn first, under the probe views).
     if (!usePathTracingFrame && m_FrameConstants.bakedGIMode != 0 &&
-        m_FrameConstants.bakedGIValid != 0 && m_BakedGIDebugView != 0)
+        m_FrameConstants.bakedGIValid != 0 &&
+        (m_BakedGIDebugView != 0 || m_FrameConstants.bakedGILeakDebug != 0))
         m_Renderer.DrawBakedGIProbeDebug(m_FrameConstants, m_OutputWidth, m_OutputHeight);
 
     // GPU on-screen debug text/lines — draw on top of the final image, under ImGui
@@ -1327,23 +1334,37 @@ void Application::RenderImGui()
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
-                const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays" };
+                const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays",
+                                             "Lit Sky Source", "Lit Sun Source" };
                 ImGui::SetNextItemWidth(180.f);
                 ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Post-composite overlay, depth-tested against the GBuffer.\n"
                                       "Placement: cube per cell — green = valid (free space), red = invalid (inside geometry).\n"
                                       "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
+                                      "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
+                                      "sky = sky bounces + occluded sky direct (V_i-gated), sun = sun bounces only (direct sun never enters probes).\n"
+                                      "The three lit views always sum: total = sky + sun.\n"
                                       "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
                                       "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).");
 
-                if (m_BakedGIDebugView == 2)
+                if (m_BakedGIDebugView == 2 || m_BakedGIDebugView == 5 || m_BakedGIDebugView == 6)
                 {
-                    ImGui::SliderFloat("Lit Scale", &m_BakedGIDebugScale, 0.1f, 4000.0f, "%.1f");
+                    ImGui::SliderFloat("Lit Gain", &m_BakedGIDebugScale, 0.1f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Multiplier from lit-probe HDR irradiance to display color.\n"
-                                          "Lit values are FP16Scale'd scene HDR — adjust until the balls read well.");
+                        ImGui::SetTooltip("Gain on the DC-normalized ball shading: the probe's mean irradiance\n"
+                                          "maps to ~1.0 x gain, band structure swings around it. Same normalization\n"
+                                          "reference (the total buffer's DC) for the Irradiance / Sky / Sun views.");
                 }
+
+                bool leakMap = (m_FrameConstants.bakedGILeakDebug != 0);
+                if (ImGui::Checkbox("Backface Leak Map", &leakMap))
+                    m_FrameConstants.bakedGILeakDebug = leakMap ? 1u : 0u;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Fullscreen map drawn over the tonemapped scene (sky passes through; probe views draw on top).\n"
+                                      "Per surface: fraction of the trilinear probe blend coming from probes BEHIND the\n"
+                                      "receiver's tangent plane — the wrong-side-of-wall leak that backface rejection would remove.\n"
+                                      "Green = clean cage, red ramp = contamination, blue = no valid probes (dark-leak risk).");
 
                 const BakedGI& gi = m_Renderer.GetBakedGI();
                 if (gi.IsValid())

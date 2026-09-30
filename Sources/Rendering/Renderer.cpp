@@ -997,11 +997,9 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
 
 void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight)
 {
-    if (!m_BakedGI.IsValid() || frame.bakedGIDebugView == 0)
+    if (!m_BakedGI.IsValid())
         return;
-
-    ID3D12PipelineState* pso = m_BakedGI.GetDebugPSO();
-    if (!pso)
+    if (frame.bakedGIDebugView == 0 && frame.bakedGILeakDebug == 0)
         return;
 
     auto* cmdList = m_CommandList.Get();
@@ -1022,20 +1020,41 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
     cmdList->RSSetViewports(1, &viewport);
     cmdList->RSSetScissorRects(1, &scissor);
 
-    // Geometry per view: cubes (36 verts) for placement / sky-visibility,
-    // UV spheres (8x8x6 = 384 verts) for lit irradiance, and per-direction
-    // instances for the visibility rays (mode 4).
-    uint32_t vertsPerInstance = 36;
-    uint32_t instanceCount    = m_BakedGI.GetProbeCount();
-    if (frame.bakedGIDebugView == 2u)
-        vertsPerInstance = 384;
-    if (frame.bakedGIDebugView == 4u)
-        instanceCount *= BakedGI::kDirections;
-
-    cmdList->SetPipelineState(pso);
     cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
+
+    // Leak map first: fullscreen pass, alpha-blended so sky passes the
+    // tonemapped scene through (geometry pixels replace).
+    if (frame.bakedGILeakDebug != 0)
+    {
+        ID3D12PipelineState* leakPso = m_BakedGI.GetLeakDebugPSO();
+        if (leakPso)
+        {
+            cmdList->SetPipelineState(leakPso);
+            cmdList->DrawInstanced(3, 1, 0, 0);
+        }
+    }
+
+    if (frame.bakedGIDebugView != 0)
+    {
+        ID3D12PipelineState* pso = m_BakedGI.GetDebugPSO();
+        if (!pso)
+            return;
+
+        // Geometry per view: cubes (36 verts) for placement / sky-visibility,
+        // UV spheres (8x8x6 = 384 verts) for the three lit views, and
+        // per-direction instances for the visibility rays (mode 4).
+        const uint32_t view = frame.bakedGIDebugView;
+        uint32_t vertsPerInstance = 36;
+        uint32_t instanceCount    = m_BakedGI.GetProbeCount();
+        if (view == 2u || view == 5u || view == 6u)
+            vertsPerInstance = 384;
+        if (view == 4u)
+            instanceCount *= BakedGI::kDirections;
+
+        cmdList->SetPipelineState(pso);
+        cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
+    }
 }
 
 void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bool rasterTaaActive,

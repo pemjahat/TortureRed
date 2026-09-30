@@ -104,4 +104,48 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N)
     return max(E, 0.0f.xxx);
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic split of the SampleBakedGIProbe trilinear cage (leak map):
+// returns (wValid, wBack) — the validity-renormalized weight total and the
+// portion contributed by probes BEHIND the receiver's tangent plane
+// (dot(N, probePos - x) <= 0). wBack / wValid is the backface-contamination
+// fraction the Backface Leak Map displays; it is exactly the weight backface
+// rejection would remove.
+// REQUIRES in scope at include time: ConstantBuffer<FrameConstants> FrameCB.
+// ---------------------------------------------------------------------------
+float2 BakedGICageContamination(float3 worldPos, float3 N)
+{
+    uint3  dims    = uint3(FrameCB.bakedGIDimX, FrameCB.bakedGIDimY, FrameCB.bakedGIDimZ);
+    float3 gridMin = float3(FrameCB.bakedGIGridMinX, FrameCB.bakedGIGridMinY, FrameCB.bakedGIGridMinZ);
+
+    // Identical cage computation to SampleBakedGIProbe.
+    float3 t = clamp((worldPos - gridMin) / FrameCB.bakedGISpacing,
+                     float3(0.0f, 0.0f, 0.0f), dims - 1.0f);
+    int3   base = int3(min(floor(t), max(dims - 2.0f, float3(0.0f, 0.0f, 0.0f))));
+    float3 f    = t - base;
+
+    StructuredBuffer<uint> meta = ResourceDescriptorHeap[FrameCB.bakedGIProbeMetaSRVIndex];
+
+    float wValid = 0.0f;
+    float wBack  = 0.0f;
+    [unroll]
+    for (uint k = 0; k < 8; ++k)
+    {
+        int3  off = int3(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
+        float3 w3 = lerp(float3(1.0f, 1.0f, 1.0f) - f, f, off);
+        float w = w3.x * w3.y * w3.z;
+
+        uint flat = BakedGIFlatten(base + off, dims);
+        if (meta[flat] & 1u)
+        {
+            wValid += w;
+            // Sign test only — normalization cannot flip the sign.
+            float3 probePos = gridMin + float3(base + off) * FrameCB.bakedGISpacing;
+            if (dot(N, probePos - worldPos) <= 0.0f)
+                wBack += w;
+        }
+    }
+    return float2(wValid, wBack);
+}
+
 #endif // BAKED_GI_HLSLI

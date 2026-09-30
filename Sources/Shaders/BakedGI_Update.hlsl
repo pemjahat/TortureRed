@@ -12,6 +12,10 @@
 //   sun: cos^8-kernel interpolation over the 16 directions (the response is
 //        INDIRECT-ONLY, so there is no double count with the runtime-exact
 //        direct sun; below-horizon sun fades out with the kernel weights).
+//
+// Writes THREE buffers: the sky-sourced and sun-sourced splits, and the
+// TOTAL as their exact sum (the runtime fetch reads only the total; the
+// splits feed the Lit Sky / Lit Sun debug ball views).
 // =============================================================================
 #include "CommonTracing.hlsl"
 
@@ -31,12 +35,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
 
     StructuredBuffer<float4> response = ResourceDescriptorHeap[Upd.responseSRVIdx];
-    RWStructuredBuffer<float4> lit      = ResourceDescriptorHeap[Upd.litUAVIdx];
+    RWStructuredBuffer<float4> lit     = ResourceDescriptorHeap[Upd.litUAVIdx];
+    RWStructuredBuffer<float4> litSky  = ResourceDescriptorHeap[Upd.litSkyUAVIdx];
+    RWStructuredBuffer<float4> litSun  = ResourceDescriptorHeap[Upd.litSunUAVIdx];
 
     float3 sunDir = normalize(float3(Upd.sunDirX, Upd.sunDirY, Upd.sunDirZ));
     float3 sunE   = float3(Upd.sunIrradianceX, Upd.sunIrradianceY, Upd.sunIrradianceZ);
 
-    float3 coef[9] = (float3[9])0;
+    float3 coefSky[9] = (float3[9])0;
+    float3 coefSun[9] = (float3[9])0;
 
     // --- Sky: quadrature over the hemisphere direction set ---
     float skyWeight = 2.0f * PI / (float)BAKED_GI_DIRECTIONS;
@@ -56,7 +63,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         {
             float3 Rbounce = response[slot + lm].rgb;                    // sky bounces
             float3 Rdirect = BakedGIA_l(lm) * basis[lm] * V;             // occluded first-bounce sky
-            coef[lm] += skyWeight * Lsky * (Rbounce + Rdirect);
+            coefSky[lm] += skyWeight * Lsky * (Rbounce + Rdirect);
         }
     }
 
@@ -80,11 +87,17 @@ void main(uint3 dtid : SV_DispatchThreadID)
             uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
             [unroll]
             for (uint lm = 0; lm < 9; ++lm)
-                coef[lm] += sunE * b * response[slot + lm].rgb;
+                coefSun[lm] += sunE * b * response[slot + lm].rgb;
         }
     }
 
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
-        lit[probe * 9u + lm2] = float4(coef[lm2], 0.0f);
+    {
+        // Total = sky + sun, computed as the exact same sum the debug views
+        // display — the three balls always add up.
+        litSky[probe * 9u + lm2] = float4(coefSky[lm2], 0.0f);
+        litSun[probe * 9u + lm2] = float4(coefSun[lm2], 0.0f);
+        lit[probe * 9u + lm2]    = float4(coefSky[lm2] + coefSun[lm2], 0.0f);
+    }
 }

@@ -37,6 +37,43 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
         }
     }
 
+    // --- Fullscreen backface-contamination leak map (post-composite, alpha-blended) ---
+    {
+        std::cout << "[BakedGI] compiling leak-map shaders..." << std::endl;
+        auto vs = GraphicsHelper::CompileShader("Shaders/BakedGI_Debug.hlsl", "LeakVS", "vs_6_6");
+        auto ps = GraphicsHelper::CompileShader("Shaders/BakedGI_Debug.hlsl", "LeakPS", "ps_6_6");
+        std::cout << "[BakedGI] leak-map shaders: " << (vs.empty() || ps.empty() ? "FAILED" : "ok") << std::endl;
+        if (!vs.empty() && !ps.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature         = rootSignature;
+            desc.VS                      = { vs.data(), vs.size() };
+            desc.PS                      = { ps.data(), ps.size() };
+            desc.BlendState              = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            desc.SampleMask              = UINT_MAX;
+            desc.RasterizerState         = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT); // FillMode=SOLID etc.
+            desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;                  // fullscreen triangle
+            desc.PrimitiveTopologyType   = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            desc.NumRenderTargets        = 1;
+            desc.SampleDesc.Count        = 1;
+            desc.RTVFormats[0]           = DXGI_FORMAT_R8G8B8A8_UNORM; // backbuffer (post-composite)
+            desc.DepthStencilState.DepthEnable = FALSE;
+            // Alpha blend: sky pixels write a=0 so the tonemapped scene shows
+            // through; geometry pixels (a=1) replace.
+            desc.BlendState.RenderTarget[0].BlendEnable    = TRUE;
+            desc.BlendState.RenderTarget[0].SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
+            desc.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+            desc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+            HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_LeakDebugPSO));
+            if (FAILED(hr))
+                std::cerr << "[BakedGI] leak-map PSO creation failed (hr = 0x"
+                          << std::hex << hr << std::dec << ")" << std::endl;
+        }
+    }
+
     // --- Probe placement debug cubes (post-composite LDR overlay) ---
     {
         std::cout << "[BakedGI] compiling debug shaders..." << std::endl;
@@ -120,10 +157,12 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // --- (Re)create buffers. The caller synced the GPU before recording, so
     // releasing the previous bake's buffers here is safe (same pattern as
     // Renderer::BuildAccelerationStructures). ---
-    m_Response[0] = {};
-    m_Response[1] = {};
-    m_LitProbes   = {};
-    m_Meta        = {};
+    m_Response[0]   = {};
+    m_Response[1]   = {};
+    m_LitProbes     = {};
+    m_LitProbesSky  = {};
+    m_LitProbesSun  = {};
+    m_Meta          = {};
 
     const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
     if (!CreateStructuredBuffer(m_Response[0], sizeof(float) * 4, responseElems,
@@ -132,6 +171,10 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse1") ||
         !CreateStructuredBuffer(m_LitProbes, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILit") ||
+        !CreateStructuredBuffer(m_LitProbesSky, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSky") ||
+        !CreateStructuredBuffer(m_LitProbesSun, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSun") ||
         !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta"))
     {
@@ -246,6 +289,8 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     p.responseSRVIdx = (uint32_t)m_Response[m_FinalResponse].srvIndex;
     p.metaSRVIdx      = (uint32_t)m_Meta.srvIndex;
     p.litUAVIdx       = (uint32_t)m_LitProbes.uavIndex;
+    p.litSkyUAVIdx    = (uint32_t)m_LitProbesSky.uavIndex;
+    p.litSunUAVIdx    = (uint32_t)m_LitProbesSun.uavIndex;
     p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
     p.spacing  = m_Spacing;
     p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
@@ -256,6 +301,10 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     cmdList->SetPipelineState(m_UpdatePSO.Get());
     cmdList->Dispatch((m_ProbeCount + 63) / 64, 1, 1);
 
-    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_LitProbes.resource.Get());
-    cmdList->ResourceBarrier(1, &barrier);
+    D3D12_RESOURCE_BARRIER barriers[3] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_LitProbes.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_LitProbesSky.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_LitProbesSun.resource.Get()),
+    };
+    cmdList->ResourceBarrier(3, barriers);
 }

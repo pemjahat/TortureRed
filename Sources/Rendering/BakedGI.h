@@ -57,9 +57,12 @@ public:
     uint32_t          GetDimY() const { return m_DimY; }
     uint32_t          GetDimZ() const { return m_DimZ; }
     uint32_t          GetLitSRVIndex() const { return (uint32_t)m_LitProbes.srvIndex; }
+    uint32_t          GetLitSkySRVIndex() const { return (uint32_t)m_LitProbesSky.srvIndex; }
+    uint32_t          GetLitSunSRVIndex() const { return (uint32_t)m_LitProbesSun.srvIndex; }
     uint32_t          GetMetaSRVIndex() const { return (uint32_t)m_Meta.srvIndex; }
     uint32_t          GetResponseSRVIndex() const { return (uint32_t)m_Response[m_FinalResponse].srvIndex; }
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
+    ID3D12PipelineState* GetLeakDebugPSO() const { return m_LeakDebugPSO.Get(); }
 
     // Post-bake stats logging. Scene bounds / grid dims are logged inside
     // RecordBake; these two cover the GPU-side probe validity:
@@ -73,7 +76,9 @@ public:
 private:
     // Ping-pong transport table: probeCount x kDirections x kResponseFloat4s float4s.
     GPUBuffer m_Response[2];
-    GPUBuffer m_LitProbes; // per-frame lit SH9 RGB: probeCount x kLitFloat4s float4s
+    GPUBuffer m_LitProbes;    // per-frame lit SH9 RGB, TOTAL (runtime fetch source)
+    GPUBuffer m_LitProbesSky; // per-frame lit SH9 RGB, sky-sourced split (debug)
+    GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)
     GPUBuffer m_Meta;      // per-probe validity (bit 0)
 
     uint32_t  m_FinalResponse = 0; // response buffer holding the completed bake
@@ -85,5 +90,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_BakePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_UpdatePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO; // RTV R8G8B8A8 (post-composite overlay)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LeakDebugPSO; // fullscreen leak map (post-composite, alpha-blended)
     Microsoft::WRL::ComPtr<ID3D12Resource> m_MetaReadback; // per-bake validity stats readback
 };

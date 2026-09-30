@@ -123,8 +123,10 @@ struct FrameConstants {
     // bakedGIMode 1 = probe system, 0 = ReSTIR GI; never both.
     uint   bakedGIMode;             // 1 = baked probes, 0 = ReSTIR GI
     uint   bakedGIValid;            // 1 = bake completed and buffers are live
-    uint   bakedGIProbeSRVIndex;    // StructuredBuffer<float4> lit probes, 9 per probe
+    uint   bakedGIProbeSRVIndex;    // StructuredBuffer<float4> lit probes, 9 per probe (total = sky + sun)
     uint   bakedGIProbeMetaSRVIndex;// StructuredBuffer<uint> per-probe validity (bit 0)
+    uint   bakedGIProbeSkySRVIndex; // sky-sourced lit split (debug balls): sky bounces + occluded sky direct
+    uint   bakedGIProbeSunSRVIndex; // sun-sourced lit split (debug balls): sun bounces only
     float  bakedGIGridMinX;         // grid AABB min (world)
     float  bakedGIGridMinY;
     float  bakedGIGridMinZ;
@@ -134,9 +136,15 @@ struct FrameConstants {
     uint   bakedGIDimZ;
 
     // Probe debug overlay (BakedGI_Debug.hlsl): view enum + lit-preview scale.
-    uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays
+    uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays,
+                                    // 5 lit sky source, 6 lit sun source
     uint   bakedGIResponseSRVIndex; // response table SRV (visibility rays / mean-V views)
-    float  bakedGIDebugScale;       // lit-irradiance preview multiplier (HDR -> display)
+    float  bakedGIDebugScale;       // lit-ball gain (DC-normalized shading multiplier)
+
+    // Fullscreen backface-contamination map (BakedGI_Debug.hlsl LeakPS,
+    // post-composite): fraction of the trilinear blend from probes BEHIND
+    // the receiver's tangent plane.
+    uint   bakedGILeakDebug;        // 1 = active (draws over the tonemapped scene)
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -158,7 +166,9 @@ struct BakedGIUpdateParams {
     float sunDirX, sunDirY, sunDirZ;                       // TO-SUN unit direction
     uint  responseSRVIdx;  // final response table (SRV)
     uint  metaSRVIdx;      // probe validity (SRV)
-    uint  litUAVIdx;       // lit probe output (UAV)
+    uint  litUAVIdx;       // lit probe output, TOTAL (runtime fetch source)
+    uint  litSkyUAVIdx;    // lit probe output, sky-sourced split (debug views)
+    uint  litSunUAVIdx;    // lit probe output, sun-sourced split (debug views)
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
     uint  dimX, dimY, dimZ;

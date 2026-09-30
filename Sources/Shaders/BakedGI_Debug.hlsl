@@ -9,6 +9,13 @@
 //                      normal, showing the directional structure of e(p);
 //                      scaled by bakedGIDebugScale (lit values are
 //                      FP16Scale'd scene HDR).
+//   5 Lit Sky Source  — same ball, reading the sky-sourced split buffer:
+//                      sky bounces + occluded sky-direct (zero where V_i = 0
+//                      for the direct part).
+//   6 Lit Sun Source  — same ball, reading the sun-sourced split buffer:
+//                      sun bounces only (direct sun never enters the probes).
+//                      Modes 2/5/6 read the three update-pass outputs and
+//                      always sum: total = sky + sun.
 //   3 Sky Visibility — cube per cell, grayscale = mean of the 16 baked
 //                      directional visibilities V_i (sky-open fraction);
 //                      red = invalid.
@@ -35,6 +42,8 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 #define BAKED_GI_DEBUG_LIT        2u
 #define BAKED_GI_DEBUG_SKYVIS     3u
 #define BAKED_GI_DEBUG_VISRAYS    4u
+#define BAKED_GI_DEBUG_LIT_SKY    5u
+#define BAKED_GI_DEBUG_LIT_SUN    6u
 
 // UV-sphere tessellation (same layout as IrCache_DebugSpheres: 8x8 quads).
 #define DBG_N_STACKS    8
@@ -141,7 +150,7 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
     const bool   valid    = (meta[probe] & 1u) != 0u;
 
-    if (mode == BAKED_GI_DEBUG_LIT)
+    if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN)
     {
         if (!valid)
             return o;
@@ -160,7 +169,21 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float3 n = float3(sin(sph) * cos(theta), cos(sph), sin(sph) * sin(theta));
 
         // Lit SH9 evaluation at the sphere normal: the ball's shading IS e(p).
-        StructuredBuffer<float4> lit = ResourceDescriptorHeap[FrameCB.bakedGIProbeSRVIndex];
+        // Mode selects the buffer: total, or the sky/sun source split written
+        // by the update pass (total = sky + sun, so the three views add up).
+        const uint litSRV = (mode == BAKED_GI_DEBUG_LIT_SKY) ? FrameCB.bakedGIProbeSkySRVIndex
+                        : (mode == BAKED_GI_DEBUG_LIT_SUN) ? FrameCB.bakedGIProbeSunSRVIndex
+                        : FrameCB.bakedGIProbeSRVIndex;
+        StructuredBuffer<float4> lit = ResourceDescriptorHeap[litSRV];
+
+        // Auto-normalize by the TOTAL buffer's DC luminance — the same
+        // reference for all three lit views, so sky + sun = total holds
+        // visually. (A fixed 200x scale saturated everything: lit DC is ~4e3
+        // in FP16Scale'd units, not the ~1e-2 the default assumed.)
+        StructuredBuffer<float4> litTotal = ResourceDescriptorHeap[FrameCB.bakedGIProbeSRVIndex];
+        const float dcLum = dot(litTotal[probe * 9u + 0].rgb, float3(0.2126f, 0.7152f, 0.0722f));
+        const float norm  = max(dcLum, 1e-9f);
+
         float basis[9];
         EvalSH9Basis(n, basis);
         float3 e = float3(0.0f, 0.0f, 0.0f);
@@ -168,7 +191,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         for (uint lm = 0; lm < 9; ++lm)
             e += lit[probe * 9u + lm].rgb * basis[lm];
 
-        o.color = float4(saturate(max(e, 0.0f.xxx) * FrameCB.bakedGIDebugScale), 1.0f);
+        // DC maps to ~1.0 x gain; band structure swings around it.
+        o.color = float4(saturate(max(e, 0.0f.xxx) / norm * FrameCB.bakedGIDebugScale), 1.0f);
 
         const float3 world = probePos + n * (spacing * 0.12f);
         o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
@@ -216,4 +240,67 @@ float4 PSMain(VSOut i) : SV_Target
     clip(i.pos.z - sceneZ + 1e-5f); // visible when fragZ >= sceneZ (reverse-Z)
 
     return i.color;
+}
+
+// =============================================================================
+// Backface Leak Map — fullscreen post-composite pass (separate PSO, alpha-
+// blended so sky pixels pass the tonemapped scene through). Per geometry
+// pixel: reconstruct the GBuffer surface, split the trilinear cage weight
+// into front/back-of-tangent-plane (BakedGICageContamination), and paint the
+// contamination fraction. Display-referred colors — no inverse tonemap.
+//   green = clean cage | green->red ramp = contamination | blue = no valid
+//   probes (dark-leak risk) | sky (alpha 0) = scene shows through.
+// =============================================================================
+struct LeakOut
+{
+    float4 pos : SV_POSITION;
+};
+
+LeakOut LeakVS(uint vid : SV_VertexID)
+{
+    // Y-flipped fullscreen triangle (front-facing under default culling).
+    LeakOut o;
+    float2 tc = float2((vid << 1) & 2, vid & 2);
+    o.pos = float4(tc.x * 2.0f - 1.0f, 1.0f - tc.y * 2.0f, 0.0f, 1.0f);
+    return o;
+}
+
+float4 LeakPS(LeakOut i) : SV_Target
+{
+    // Map this output-res pixel to its internal-res GBuffer texel (same
+    // mapping as the depth test above).
+    Texture2D<float>  depthTex  = ResourceDescriptorHeap[FrameCB.depthIndex];
+    Texture2D<float4> normalTex = ResourceDescriptorHeap[FrameCB.normalIndex];
+
+    float2 scale = float2(FrameCB.internalWidth, FrameCB.internalHeight)
+                 / float2(FrameCB.outputWidth, FrameCB.outputHeight);
+    int2 ip = min(int2(i.pos.xy * scale),
+                  int2(FrameCB.internalWidth, FrameCB.internalHeight) - 1);
+
+    float depth = depthTex[ip];
+    if (depth <= 0.0f)
+        return float4(0.0f, 0.0f, 0.0f, 0.0f); // sky — pass the scene through
+
+    float3 N = normalize(normalTex[ip].rgb * 2.0f - 1.0f);
+
+    // World position reconstruction (same as RestirDI_Temporal).
+    float2 uv     = (float2(ip) + 0.5f) / float2(FrameCB.internalWidth, FrameCB.internalHeight);
+    float4 ndc     = float4(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f, depth, 1.0f);
+    float4 viewPos = mul(ndc, FrameCB.projectionInverse);
+    viewPos /= viewPos.w;
+    float3 worldPos = mul(viewPos, FrameCB.viewInverse).xyz;
+
+    float2 wb       = BakedGICageContamination(worldPos, N);
+    float  wValid   = wb.x;
+    float  wBack    = wb.y;
+
+    float3 d;
+    if (wValid < 1e-6f)
+        d = float3(0.0f, 0.2f, 1.0f); // no valid probes — dark-leak risk
+    else
+    {
+        float contamination = saturate(wBack / wValid);
+        d = lerp(float3(0.1f, 0.9f, 0.2f), float3(0.95f, 0.15f, 0.15f), contamination);
+    }
+    return float4(d, 1.0f);
 }
