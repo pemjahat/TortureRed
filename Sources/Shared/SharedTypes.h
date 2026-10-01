@@ -161,6 +161,9 @@ struct BakedGIBakeParams {
     uint  responsePrevSRVIdx; // SRV feedback (previous iteration)
     uint  metaUAVIdx;
     uint  iteration;        // 0 = no feedback (first series term)
+    uint  visSRVIdx;        // SRV: per-probe octahedral depth moments — the feedback
+                            // read is visibility-weighted (backface + Chebyshev) so
+                            // series light cannot cross walls/roofs (ProbeGI4 leak)
 };
 
 // Root constants for the per-frame lit-probe update dispatch.

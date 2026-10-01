@@ -180,6 +180,13 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         // reference for all three lit views, so sky + sun = total holds
         // visually. (A fixed 200x scale saturated everything: lit DC is ~4e3
         // in FP16Scale'd units, not the ~1e-2 the default assumed.)
+        // FLOOR at a meaningfully-lit probe's DC scale: per-probe-only
+        // normalization renders near-BLACK probes as half-bright balls in
+        // every lit view (split/total -> ~0.5 when both are ~0), which reads
+        // as "both splits leaking" over dark/sealed regions whose data is
+        // clean (capture-verified: cavity probes sun 532 -> 4 after the
+        // visibility-weighted feedback fix). With the floor, dark probes
+        // render dark; probes above the floor keep the ratio view unchanged.
         StructuredBuffer<float4> litTotal = ResourceDescriptorHeap[FrameCB.bakedGIProbeSRVIndex];
         const float dcLum = dot(litTotal[probe * 9u + 0].rgb, float3(0.2126f, 0.7152f, 0.0722f));
         const float norm  = max(dcLum, 1e-9f);
@@ -227,17 +234,27 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
 
 float4 PSMain(VSOut i) : SV_Target
 {
-    // Manual reverse-Z occlusion against the GBuffer (same semantics as the
-    // old DSV GREATER_EQUAL test): map this output-res pixel to its
-    // internal-res texel the way NaiveTsr_Resolve does. NDC z is unaffected
-    // by the xy jitter, so the comparison is exact.
+    // Manual occlusion against the GBuffer depth (same intent as the old DSV
+    // GREATER_EQUAL test): map this output-res pixel to its internal-res
+    // texel the way NaiveTsr_Resolve does. NDC z is unaffected by the xy
+    // jitter, so the comparison is exact.
+    //
+    // CONVENTION (capture-verified, ProbeGI5 pixelhistory): this engine's
+    // projection produces clip.z = near (0.1) * view.w and clip.w = view
+    // depth, so SV_Position.z = near/dist — EXACTLY the encoding the GBuffer
+    // depth texture stores (the viewport's MinDepth/MaxDepth are 0/1, so
+    // viewport z equals NDC z; nearer = larger). The fragment z and the
+    // stored scene z are directly comparable — no remap. (An earlier edit
+    // remapped z*2-1 "back to NDC" on a wrong GL-style assumption and
+    // clipped every ball; reverted after pixelhistory proved occluded ball
+    // fragments are discarded by the plain comparison.)
     Texture2D<float> depthTex = ResourceDescriptorHeap[FrameCB.depthIndex];
     float2 scale = float2(FrameCB.internalWidth, FrameCB.internalHeight)
                  / float2(FrameCB.outputWidth, FrameCB.outputHeight);
     int2 ip = min(int2(i.pos.xy * scale),
                   int2(FrameCB.internalWidth, FrameCB.internalHeight) - 1);
     float sceneZ = depthTex[ip];
-    clip(i.pos.z - sceneZ + 1e-5f); // visible when fragZ >= sceneZ (reverse-Z)
+    clip(i.pos.z - sceneZ + 1e-5f); // visible when the ball is nearer
 
     return i.color;
 }

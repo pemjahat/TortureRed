@@ -54,19 +54,32 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 // Each probe stores a 16x16 octahedral map of depth moments: texel t holds
 // (M1, M2) = (mean, mean-squared) hit distance over 4 rays jittered within
 // the texel's cone (BakedGI_Visibility.hlsl); misses and hits beyond
-// BAKED_GI_SKY_DISTANCE count as sky distance. Pure geometry — TOD-invariant,
+// 2 x probe spacing count as sky distance. Pure geometry — TOD-invariant,
 // baked once with the transport. The padded 18x18 layout duplicates the
 // seam-wrapped neighbor into a one-texel border so the manual bilinear below
-// is continuous across the octahedral fold. Distances are clamped to
-// BAKED_GI_SKY_DISTANCE (keeps M2 fp16-representable for the future step-4
-// compression; anything beyond 100 m is sky as far as a <=2m-spaced probe
-// cage can tell).
+// is continuous across the octahedral fold.
+//
+// The sky-distance clamp is 2 x spacing (DDGI's convention), NOT a large
+// constant: cage receivers are always within ~1.5 spacings of their probes,
+// so anything beyond 2 spacings is equally "sky" for the Chebyshev test —
+// but its M2 is NOT equivalent for the BILINEAR mix. A 100 m sky texel
+// (M2 = 10000) contaminating a seam texel (0.2 m) at even 0.5% bilinear
+// weight explodes the blended variance (var ~55) and the Chebyshev bound
+// then passes the probe — a jagged per-pixel accept/reject staircase along
+// geometry seams (capture-verified, ProbeGI3.rdc). With sky = 2 x spacing
+// the same mix keeps var ~0.02 and both sides of the seam reject. The small
+// clamp also keeps M2 fp16-representable for the future step-4 compression.
 // ---------------------------------------------------------------------------
 #define BAKED_GI_VIS_RES        16
 #define BAKED_GI_VIS_PAD        18
 #define BAKED_GI_VIS_STRIDE     (BAKED_GI_VIS_PAD * BAKED_GI_VIS_PAD) // 324 float2 per probe
-#define BAKED_GI_SKY_DISTANCE   100.0f
-#define BAKED_GI_CHEB_MIN       0.05f // floor on the cubed Chebyshev weight (anti-flicker; keeps the ladder's full tier alive)
+#define BAKED_GI_SKY_DISTANCE_SPACINGS 2.0f // sky clamp = this x spacing (DDGI convention; see comment above)
+#define BAKED_GI_CHEB_MIN       0.0f  // floor on the cubed Chebyshev weight — DELIBERATELY ZERO here
+                                       // (DDGI/Adria ship ~0.05: their moments are re-traced per frame
+                                       // and they have no fallback path. Our moments are static and the
+                                       // tier ladder owns anti-black. A nonzero floor leaks floor x HDR
+                                       // through around-the-corner cage members that pass the backface
+                                       // test — the corner-band artifact. Raise only for A/B.)
 #define BAKED_GI_VIS_DISPATCH_X 4096u // visibility-bake dispatch X tile (C++ mirrors this)
 
 // --- Octahedral mapping (unit direction <-> [0,1]^2), Y-up on the xz plane ---
@@ -139,22 +152,26 @@ float2 BakedGISampleMoments(StructuredBuffer<float2> vis, uint probe, float3 dir
 // One-sided Chebyshev bound (two-moment / VSM form): the probability weight
 // that the probe's stored geometry along the sampled direction sits BEYOND
 // the receiver distance d. d <= mean -> nothing between -> fully visible.
-// The bound is CUBED and floored — the shaping shipped in DDGI / simco50's
+// The bound is CUBED — the sharpening shipped in DDGI / simco50's
 // D3D12_Research / Adria: the raw two-moment bound decays slowly, so a wall
 // between probe and receiver still leaves a large weight; cubing sharpens
 // the rejection curve while moment variance (window frames, foliage) keeps
-// a soft penumbra. The floor keeps a rejected probe at 5% — anti-flicker
-// under renormalization, and it keeps the full-weight tier of the fallback
-// ladder alive (the ladder now only fires on total cage collapse, not on
-// aggressive per-probe rejection).
+// a soft penumbra.
+//
+// NO floor (unlike DDGI/Adria's 0.05): their floor is anti-flicker insurance
+// for per-frame re-traced moments and a substitute for a fallback path. Our
+// moments are baked and static — nothing flickers — and the tier ladder
+// already handles total cage rejection. A 5% floor here leaked ~5% of sunlit
+// HDR probes through around-the-corner cage members that pass the backface
+// test (probes across a flat wall fail it; probes around a corner do not):
+// the Sponza corner-band leak, verified absent in the path tracer.
 float BakedGIChebyshev(float2 m, float d)
 {
     if (d <= m.x)
         return 1.0f;
     float variance = max(m.y - m.x * m.x, 0.0f);
     float cheb = variance / (variance + (d - m.x) * (d - m.x));
-    cheb = max(cheb * cheb * cheb, 0.0f); // cubed: sharper leak rejection
-    return max(cheb, BAKED_GI_CHEB_MIN);
+    return max(cheb * cheb * cheb, BAKED_GI_CHEB_MIN); // cubed: sharper leak rejection
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +263,15 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
         wBF[k] = w * back;
         if (back > 0.0f)
         {
-            float2 m = BakedGISampleMoments(vis, flat, dir);
+            // Moment lookup: the map stores rays fired FROM the probe, so the
+            // occlusion test needs the probe->receiver direction — the NEGATION
+            // of dir (dir = receiver->probe, which the backface test above
+            // correctly uses as-is; simco50's DDGI does the same negation:
+            // GetDDGIProbeUV(..., -probeDirection, ...)). Sampling at +dir
+            // read the probe's FAR hemisphere (usually open sky, M1 = sky
+            // distance -> weight 1) so walled-off probes were never rejected —
+            // the Sponza intersection leak, capture-verified (ProbeGI2.rdc).
+            float2 m = BakedGISampleMoments(vis, flat, -dir);
             wFull[k] = wBF[k] * BakedGIChebyshev(m, dist);
         }
     }

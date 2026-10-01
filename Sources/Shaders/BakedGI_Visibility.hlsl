@@ -72,9 +72,14 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
 
         // Misses and hits beyond the sky distance are indistinguishable to a
         // receiver that is always within ~1.5 spacings of its cage probes.
+        // skyDist = 2 x spacing (DDGI convention): a large constant (e.g. 100)
+        // makes sky texels' M2 (10000) poison any bilinear mix they touch —
+        // a 0.5% sky weight on a seam texel explodes the variance and the
+        // Chebyshev bound passes the probe (jagged seam leak, ProbeGI3.rdc).
+        const float skyDist = BAKED_GI_SKY_DISTANCE_SPACINGS * Vis.spacing;
         float d = (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
-                    ? min(q.CommittedRayT(), BAKED_GI_SKY_DISTANCE)
-                    : BAKED_GI_SKY_DISTANCE;
+                    ? min(q.CommittedRayT(), skyDist)
+                    : skyDist;
         m1 += d;
         m2 += d * d;
     }

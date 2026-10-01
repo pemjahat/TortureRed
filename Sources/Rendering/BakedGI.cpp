@@ -209,33 +209,12 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     cmdList->SetComputeRootShaderResourceView(4, indicesAddress);
     cmdList->SetComputeRootShaderResourceView(5, verticesAddress);
 
-    uint32_t cur = 0;
-    for (uint32_t it = 0; it < kBakeIterations; ++it)
-    {
-        BakedGIBakeParams p = {};
-        p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
-        p.spacing  = m_Spacing;
-        p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
-        p.probeCount = m_ProbeCount;
-        p.responseUAVIdx    = (uint32_t)m_Response[cur].uavIndex;
-        p.responsePrevSRVIdx = (uint32_t)m_Response[1 - cur].srvIndex;
-        p.metaUAVIdx         = (uint32_t)m_Meta.uavIndex;
-        p.iteration          = it;
-
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
-        cmdList->SetPipelineState(m_BakePSO.Get());
-        cmdList->Dispatch((m_ProbeCount + 7) / 8, kDirections / 8, 1);
-
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
-        cmdList->ResourceBarrier(1, &barrier);
-
-        m_FinalResponse = cur;
-        cur = 1 - cur;
-    }
-
-    // --- Step-3 visibility bake: per-probe octahedral depth moments. Rides
-    // the same list and root bindings (CBV b0 + material/draw-node/TLAS/
-    // index/vertex SRVs) as the transport dispatches above; only the b2
+    // --- Step-3 visibility bake FIRST: the transport iterations' feedback
+    // reads are visibility-weighted (BakedGI_Bake.hlsl EvalResponseIndirect
+    // gates each feedback cage probe with backface + Chebyshev weights read
+    // from these moment maps), so the moments must exist before iteration 1.
+    // Rides the same list and root bindings (CBV b0 + material/draw-node/
+    // TLAS/index/vertex SRVs) as the transport dispatches; only the b2
     // root-constants block and PSO change. One 16x16-thread group per probe;
     // probes tile across (x = kVisDispatchX, y) to respect the 65535-per-axis
     // dispatch cap (kMaxProbeCount is 131072).
@@ -258,6 +237,31 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     else
     {
         std::cerr << "[BakedGI] Visibility bake PSO missing — Chebyshev weights skipped" << std::endl;
+    }
+
+    uint32_t cur = 0;
+    for (uint32_t it = 0; it < kBakeIterations; ++it)
+    {
+        BakedGIBakeParams p = {};
+        p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
+        p.spacing  = m_Spacing;
+        p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
+        p.probeCount = m_ProbeCount;
+        p.responseUAVIdx    = (uint32_t)m_Response[cur].uavIndex;
+        p.responsePrevSRVIdx = (uint32_t)m_Response[1 - cur].srvIndex;
+        p.metaUAVIdx         = (uint32_t)m_Meta.uavIndex;
+        p.iteration          = it;
+        p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
+
+        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
+        cmdList->SetPipelineState(m_BakePSO.Get());
+        cmdList->Dispatch((m_ProbeCount + 7) / 8, kDirections / 8, 1);
+
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
+        cmdList->ResourceBarrier(1, &barrier);
+
+        m_FinalResponse = cur;
+        cur = 1 - cur;
     }
 
     m_Valid = true;
