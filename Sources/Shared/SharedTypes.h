@@ -189,6 +189,8 @@ struct BakedGIVisParams {
     uint  dimX, dimY, dimZ;
     uint  probeCount;
     uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
+    uint  metaUAVIdx;       // RW output: per-probe validity bits (DDGI classification
+                            // + old-criteria diagnostic bit — see BakedGI.hlsli)
 };
 
 struct BindlessIndices {

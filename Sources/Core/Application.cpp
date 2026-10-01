@@ -1344,7 +1344,11 @@ void Application::RenderImGui()
                 ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Post-composite overlay, depth-tested against the GBuffer.\n"
-                                      "Placement: cube per cell — green = valid (free space), red = invalid (inside geometry).\n"
+                                      "Placement: cube per cell — classification A/B.\n"
+                                      "Green = valid under both criteria. Red = bad under both.\n"
+                                      "BLUE = newly bad: the old 1cm test said valid, DDGI's rule\n"
+                                      "(>= 25% backfaces among 32 stable rays) kills it.\n"
+                                      "Yellow = newly valid (old test killed it, DDGI keeps it).\n"
                                       "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
                                       "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
                                       "sky = sky bounces + occluded sky direct (V_i-gated), sun = sun bounces only (direct sun never enters probes).\n"

@@ -2,8 +2,10 @@
 // BakedGI_Debug.hlsl — probe debug overlay (post-composite LDR).
 //
 // Four views (FrameConstants::bakedGIDebugView):
-//   1 Placement      — cube per grid cell: green = valid (free space),
-//                      red = invalid (inside geometry).
+//   1 Placement      — cube per grid cell, classification A/B: green = valid
+//                      under both criteria, red = bad under both, BLUE =
+//                      newly bad (old 1cm test said valid, DDGI's >= 25%
+//                      backface rule kills it), yellow = newly valid.
 //   2 Lit Irradiance — billboard SH ball per valid probe: each sphere point
 //                      evaluates the probe's lit SH9 coefficients at its own
 //                      normal, showing the directional structure of e(p);
@@ -222,8 +224,19 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     }
     else // BAKED_GI_DEBUG_PLACEMENT
     {
-        o.color = valid ? float4(0.1f, 0.9f, 0.2f, 1.0f)             // valid (free space)
-                        : float4(0.95f, 0.15f, 0.15f, 1.0f);         // invalid (inside geometry)
+        // Classification A/B (meta bits, see BakedGI.hlsli): the DDGI
+        // criteria vs the old 1cm test, so the criteria swap's flips are
+        // visible in place. BLUE is the experiment's headline — probes the
+        // old test called valid that DDGI's classification kills.
+        const uint  m         = meta[probe];
+        const bool  ddgiValid = (m & BAKED_GI_META_VALID)     != 0u;
+        const bool  oldValid  = (m & BAKED_GI_META_OLD_VALID) != 0u;
+        if (ddgiValid)
+            o.color = oldValid ? float4(0.1f, 0.9f, 0.2f, 1.0f)   // valid under both
+                               : float4(0.9f, 0.9f, 0.2f, 1.0f);  // newly valid (old test killed it)
+        else
+            o.color = oldValid ? float4(0.2f, 0.4f, 1.0f, 1.0f)   // NEWLY BAD (old test kept it)
+                               : float4(0.95f, 0.15f, 0.15f, 1.0f); // bad under both
     }
 
     const float3 c = kCubeTris[vid % 36u];

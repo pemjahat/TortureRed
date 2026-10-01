@@ -43,6 +43,97 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
     float3 gridMin  = float3(Vis.gridMinX, Vis.gridMinY, Vis.gridMinZ);
     float3 probePos = gridMin + float3(cell) * Vis.spacing;
 
+    // --- Probe classification (DDGI criteria, NO relocation) — one lane.
+    //
+    // Faithful port of D3D12_Research's UpdateProbeStatesCS classification:
+    // 32 fixed full-sphere fibonacci rays; a backface hit marks the probe as
+    // exiting through the far side of one-sided geometry. Death rules:
+    //   1. >= 25% backfaces among the 32 rays (substantially inside geometry)
+    //   2. nearest frontface beyond 3x spacing (their "usefulness" rule —
+    //      provably unreachable while depths clamp at 2x spacing, exactly as
+    //      in their code; kept for fidelity)
+    // Misses count as a frontface at 2x spacing (their maxDepth sentinel), so
+    // an all-miss probe floats in "open air" and stays active.
+    //
+    // The OLD criterion (any of the 16 delta directions hitting within 1cm =
+    // center inside geometry) is traced alongside and stored in a diagnostic
+    // bit so the placement view and bake log can show exactly which probes
+    // the criteria swap flips. No offsets are written — bad probes stay put.
+    if (gt.x == 0u && gt.y == 0u)
+    {
+        RWStructuredBuffer<uint> metaOut = ResourceDescriptorHeap[Vis.metaUAVIdx];
+
+        const float skyDist = BAKED_GI_SKY_DISTANCE_SPACINGS * Vis.spacing;
+        uint  numBackfaces       = 0;
+        float nearestFrontface   = 1e30f;
+
+        [loop]
+        for (uint r = 0; r < BAKED_GI_CLASSIFY_RAYS; ++r)
+        {
+            float3 dir = BakedGIClassifyDirection(r, BAKED_GI_CLASSIFY_RAYS);
+
+            RayDesc ray;
+            ray.Origin    = probePos + dir * 0.001f;
+            ray.Direction = dir;
+            ray.TMin      = 0.001f;
+            ray.TMax      = 1e4f;
+            RayQuery<RAY_FLAG_NONE> q;
+            q.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+            while (q.Proceed()) { /* non-opaque candidates do not block */ }
+
+            if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+            {
+                nearestFrontface = min(nearestFrontface, skyDist); // miss sentinel
+                continue;
+            }
+
+            // Front/back classification — same convention as the transport
+            // gather's backface rejection (normal pointing along the ray =
+            // the far side of one-sided geometry).
+            Surface surf;
+            ResolveHitSurface(ray, q.CommittedRayT(), q.CommittedInstanceIndex(),
+                              q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(), surf);
+            const float d = min(q.CommittedRayT(), skyDist); // DDGI's maxDepth clamp
+            if (dot(surf.normal, dir) >= 0.0f)
+                ++numBackfaces; // backface: the probe is on the wrong side here
+            else
+                nearestFrontface = min(nearestFrontface, d);
+        }
+
+        const bool deadBackface = numBackfaces >= (BAKED_GI_CLASSIFY_RAYS / 4u); // >= 25% of 32 = 8
+        const bool deadFar      = nearestFrontface > 3.0f * Vis.spacing;
+        const bool ddgiValid    = !deadBackface && !deadFar;
+
+        // Old criterion: any of the 16 delta directions hitting within 1cm
+        // (the pre-swap validity test, deterministic single-lane version).
+        bool oldValid = true;
+        [loop]
+        for (uint d16 = 0; d16 < BAKED_GI_DIRECTIONS; ++d16)
+        {
+            float3 dir = BakedGIDeltaDirection(d16);
+            RayDesc ray;
+            ray.Origin    = probePos;
+            ray.Direction = dir;
+            ray.TMin      = 0.0f;
+            ray.TMax      = max(0.01f, Vis.spacing * 0.005f);
+            RayQuery<RAY_FLAG_NONE> oq;
+            oq.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+            while (oq.Proceed()) { }
+            if (oq.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+            {
+                oldValid = false;
+                break;
+            }
+        }
+
+        uint m = 0u;
+        if (ddgiValid) m |= BAKED_GI_META_VALID;
+        if (oldValid)  m |= BAKED_GI_META_OLD_VALID;
+        if (!ddgiValid && deadBackface) m |= BAKED_GI_META_DEAD_BACKFACE;
+        if (!ddgiValid && deadFar)      m |= BAKED_GI_META_DEAD_FAR;
+        metaOut[probe] = m;
+    }
+
     // --- Interior texel moments: 4 jittered distance-only rays ---
     RNG rng;
     rng.state = pcg_hash(probe * 7919u + gt.y * 61u + gt.x * 13u + 0x9e3779b9u);

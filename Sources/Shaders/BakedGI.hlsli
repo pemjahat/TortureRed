@@ -49,6 +49,43 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 }
 
 // ---------------------------------------------------------------------------
+// Probe meta (validity) bit layout — written once per bake by the
+// classification stage in BakedGI_Visibility.hlsl, read by the transport bake,
+// the runtime fetch, the update pass, and the debug views.
+//   bit 0: VALID under the DDGI classification — THE live bit every consumer
+//          gates on (kept at bit 0 so existing `meta & 1` checks are unchanged)
+//   bit 1: valid under the OLD 1cm existential test (diagnostic only — lets
+//          the placement view and bake stats show the flip between criteria)
+//   bit 2: dead by DDGI rule 1 — >= 25% of the 32 stable rays hit backfaces
+//   bit 3: dead by DDGI rule 2 — nearest frontface beyond 3x spacing
+//          (unreachable while depths clamp at 2x spacing — DDGI's own code
+//          neuters this rule identically; kept for fidelity)
+// ---------------------------------------------------------------------------
+#define BAKED_GI_META_VALID         0x1u
+#define BAKED_GI_META_OLD_VALID     0x2u
+#define BAKED_GI_META_DEAD_BACKFACE 0x4u
+#define BAKED_GI_META_DEAD_FAR      0x8u
+
+// DDGI's classification ray set (D3D12_Research DDGICommon.hlsli,
+// DDGI_NUM_STABLE_RAYS = 32): fixed full-sphere spherical-fibonacci
+// directions. Per-frame systems keep them temporally stable so probe states
+// don't flicker; bake-time here that just means deterministic — every bake
+// classifies with the same 32 directions.
+#define BAKED_GI_CLASSIFY_RAYS 32
+
+// Spherical fibonacci over the FULL sphere (DDGI's SphericalFibonacci,
+// faithful copy — z is the pole).
+float3 BakedGIClassifyDirection(uint i, uint n)
+{
+    const float PHI = sqrt(5.0f) * 0.5f + 0.5f;
+    float fraction = (i * (PHI - 1.0f)) - floor(i * (PHI - 1.0f));
+    float phi       = 2.0f * PI * fraction;
+    float cosTheta  = 1.0f - (2.0f * i + 1.0f) / (float)n;
+    float sinTheta  = sqrt(saturate(1.0f - cosTheta * cosTheta));
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+// ---------------------------------------------------------------------------
 // Step 3 — per-probe octahedral depth-moment visibility.
 //
 // Each probe stores a 16x16 octahedral map of depth moments: texel t holds

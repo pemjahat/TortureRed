@@ -226,13 +226,20 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         vp.dimX = m_DimX; vp.dimY = m_DimY; vp.dimZ = m_DimZ;
         vp.probeCount = m_ProbeCount;
         vp.visUAVIdx  = (uint32_t)m_Visibility.uavIndex;
+        vp.metaUAVIdx = (uint32_t)m_Meta.uavIndex;
 
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIVisParams) / 4, &vp, 0);
         cmdList->SetPipelineState(m_VisBakePSO.Get());
         cmdList->Dispatch(kVisDispatchX, (m_ProbeCount + kVisDispatchX - 1) / kVisDispatchX, 1);
 
-        D3D12_RESOURCE_BARRIER visBarrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Visibility.resource.Get());
-        cmdList->ResourceBarrier(1, &visBarrier);
+        // Barrier BOTH outputs: the transport iterations read the meta bits
+        // the classification lane wrote (the visibility barrier alone would
+        // leave that write-read unordered).
+        D3D12_RESOURCE_BARRIER visBarriers[2] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_Visibility.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_Meta.resource.Get()),
+        };
+        cmdList->ResourceBarrier(2, visBarriers);
     }
     else
     {
@@ -310,16 +317,32 @@ void BakedGI::LogBakeStats() const
         return;
     }
 
-    uint32_t valid = 0;
+    uint32_t ddgiValid = 0, oldValid = 0, newlyBad = 0, newlyValid = 0;
+    uint32_t deadBackface = 0, deadFar = 0;
     for (uint32_t i = 0; i < m_ProbeCount; ++i)
-        valid += (meta[i] & 1u);
+    {
+        const uint32_t m = meta[i];
+        const bool v  = (m & 0x1u) != 0; // BAKED_GI_META_VALID (DDGI criteria)
+        const bool ov = (m & 0x2u) != 0; // BAKED_GI_META_OLD_VALID (1cm test)
+        ddgiValid += v ? 1u : 0u;
+        oldValid  += ov ? 1u : 0u;
+        newlyBad   += (!v && ov) ? 1u : 0u;
+        newlyValid += (v && !ov) ? 1u : 0u;
+        deadBackface += (m & 0x4u) ? 1u : 0u;
+        deadFar      += (m & 0x8u) ? 1u : 0u;
+    }
     m_MetaReadback->Unmap(0, nullptr);
 
-    const uint32_t invalid = m_ProbeCount - valid;
-    const float    pct     = 100.0f * (float)valid / (float)m_ProbeCount;
-    std::cout << "[BakedGI] Probe coverage: " << valid << "/" << m_ProbeCount
-              << " valid (" << pct << "%) : " << invalid
-              << " inside geometry (excluded from interpolation)" << std::endl;
+    const float pctNew = 100.0f * (float)ddgiValid / (float)m_ProbeCount;
+    const float pctOld = 100.0f * (float)oldValid / (float)m_ProbeCount;
+    std::cout << "[BakedGI] Probe coverage (DDGI criteria): " << ddgiValid << "/" << m_ProbeCount
+              << " valid (" << pctNew << "%) — dead: " << deadBackface
+              << " by >= 25% backfaces, " << deadFar << " by > 3x spacing far rule" << std::endl;
+    std::cout << "[BakedGI] Old 1cm test for comparison:      " << oldValid << "/" << m_ProbeCount
+              << " valid (" << pctOld << "%)" << std::endl;
+    std::cout << "[BakedGI] Criteria swap flips: " << newlyBad
+              << " valid -> BAD (blue in placement view), " << newlyValid
+              << " bad -> valid (yellow)" << std::endl;
 }
 
 void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,

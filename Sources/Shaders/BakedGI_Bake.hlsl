@@ -2,9 +2,9 @@
 // BakedGI_Bake.hlsl — step-1 transport bake .
 //
 // One thread per (probe, delta direction W_i):
-//   - Validity: short ray from the probe center (backfaces hit when inside
-//     geometry) — the only step-1 placement logic; probes in solid geometry
-//     are marked invalid and their response is zeroed.
+//   - Validity: READ from the meta bits classified by the visibility pass
+//     (DDGI criteria — >= 25% backfaces among 32 stable fibonacci rays;
+//     see BakedGI_Visibility.hlsl). Dead probes' responses are zeroed.
 //   - Direct-delta visibility V_i: one shadow ray toward W_i (stored in slot
 //     [9].x; the update pass uses it for the occluded first-bounce sky term).
 //   - INDIRECT-ONLY directional-irradiance SH9 RGB response R_i to a unit
@@ -137,17 +137,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
     RWStructuredBuffer<uint>    meta     = ResourceDescriptorHeap[BakeParams.metaUAVIdx];
     uint slot = (probe * BAKED_GI_DIRECTIONS + dir) * BAKED_GI_RESPONSE_F4;
 
-    // --- Validity: probe center in free space (backfaces must hit if inside) ---
-    RayDesc probeRay;
-    probeRay.Origin    = probePos;
-    probeRay.Direction = wDelta;
-    probeRay.TMin      = 0.0f;
-    probeRay.TMax      = max(0.01f, BakeParams.spacing * 0.005f);
-    RayQuery<RAY_FLAG_NONE> insideQuery;
-    insideQuery.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, probeRay);
-    while (insideQuery.Proceed()) { /* non-opaque candidates do not block */ }
-    bool valid = (insideQuery.CommittedStatus() == COMMITTED_NOTHING);
-    meta[probe] = valid ? 1u : 0u; // benign same-value race across direction threads
+    // --- Validity: classified by the visibility pass (dispatched BEFORE the
+    // transport iterations — its UAV barrier orders the write). DDGI
+    // criteria: >= 25% backfaces among 32 stable fibonacci rays = dead; no
+    // relocation (bad probes stay put — the experiment measures the criteria
+    // swap alone). The old 1cm existential test runs alongside as a
+    // diagnostic bit. Dead probes get zeroed responses; all direction
+    // threads read the same verdict, so the old same-value race is gone. ---
+    const bool valid = (meta[probe] & BAKED_GI_META_VALID) != 0u;
 
     if (!valid)
     {
