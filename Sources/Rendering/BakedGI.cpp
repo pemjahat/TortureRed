@@ -142,6 +142,9 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
             desc.BlendState              = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
             desc.SampleMask              = UINT_MAX;
             desc.RasterizerState         = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            // Engine convention (GBuffer/DeferredLighting/Shadow/Transparency/
+            // Meshlet all set this): geometry is CCW-from-outside.
+            desc.RasterizerState.FrontCounterClockwise = TRUE;
             desc.PrimitiveTopologyType   = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             desc.NumRenderTargets        = 1;
             desc.SampleDesc.Count        = 1;
