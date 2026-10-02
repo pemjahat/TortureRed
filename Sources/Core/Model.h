@@ -176,6 +176,9 @@ public:
     void GetAllPrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
     void GetDrawNodePrimitives(std::vector<const struct GLTFPrimitive*>& primitives) const;
     const std::vector<DrawNodeData>& GetDrawNodeData() const { return m_DrawNodeData; }
+
+    // Source glTF path — the disk-cache identity (Clusters/, Probes/).
+    const std::string& GetSourcePath() const { return m_SourcePath; }
     
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalVertexBufferAddress() const { return m_GlobalVertexBuffer.gpuAddress; }
     D3D12_GPU_VIRTUAL_ADDRESS GetGlobalIndexBufferAddress() const { return m_GlobalIndexBuffer.gpuAddress; }
@@ -198,7 +201,7 @@ public:
 
 private:
     void CreateGLTFResources(Renderer* renderer);
-    void BuildMeshlets(GLTFPrimitive& prim);
+    void BuildMeshlets(GLTFPrimitive& prim, const std::string& cachePath);
     void CreateMeshletResources(Renderer* renderer);
     void RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode);
     void UpdateNodeBufferRecursive(GLTFNode* node, DirectX::XMMATRIX parentTransform);
@@ -289,6 +292,8 @@ private:
     // so culling follows animated instances (no stale load-time transform).
     std::vector<InstanceBounds> m_InstanceBoundsArray;
     GPUBuffer m_InstanceBoundsBuffer;
+
+    std::string m_SourcePath; // the loaded glTF path — disk-cache identity
 
     // Per-MeshData LOCAL-space AABB (min, max) — the exact scene-bounds path:
     // ComputeSceneWorldBounds corner-transforms these and unions. The sphere

@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <filesystem>
 #include "d3dx12.h"
 
 struct GPUResource;
@@ -91,6 +92,20 @@ public:
     static std::vector<char> CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target,
                                            const std::vector<std::pair<std::wstring, std::wstring>>& defines);
     static void InvalidateShaderCache();
+
+    // ---------------------------------------------------------------------
+    // Disk-cache plumbing shared by the shader / probe / cluster caches
+    // ---------------------------------------------------------------------
+    // Directory of the running executable (where Bin/<Config>/ caches live).
+    static std::filesystem::path GetExeDir();
+    // <exeDir>/<subDir>, created if missing (e.g. L"ShaderCache", L"Probes",
+    // L"Clusters"). Returns an empty path on failure.
+    static std::filesystem::path GetCacheDir(const wchar_t* subDir);
+    // Newest mtime across a shader file AND its transitive #include closure
+    // (resolved with the same -I roots DXC gets) — the freshness basis for any
+    // cache whose output depends on shader code. A top-level-only check
+    // serves stale blobs after shared-header edits (see the walker above).
+    static std::filesystem::file_time_type NewestShaderIncludeTime(const std::string& shaderPath);
 
     static D3D12_CPU_DESCRIPTOR_HANDLE GetSRVCPUHandle(UINT index);
     static D3D12_GPU_DESCRIPTOR_HANDLE GetSRVGPUHandle(UINT index);

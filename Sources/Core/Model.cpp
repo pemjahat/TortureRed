@@ -95,6 +95,7 @@ DirectX::BoundingBox Model::ComputeSceneWorldBounds() const
 
 bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
 {
+    m_SourcePath = filepath; // disk-cache identity (Clusters/, Probes/)
     cgltf_options options = {};
     cgltf_result result = cgltf_parse_file(&options, filepath.c_str(), &m_GltfModel.data);
 
@@ -299,14 +300,35 @@ bool Model::LoadGLTFModel(Renderer* renderer, const std::string& filepath)
 
     std::cout << "Successfully loaded GLTF model: " << filepath << " (" << m_GltfModel.meshes.size() << " meshes)" << std::endl;
 
-    // Generate meshlets for all primitives (with cache)
-    for (auto& mesh : m_GltfModel.meshes)
+    // Generate meshlets for all primitives — serialized to the Clusters/
+    // disk cache beside the exe, so reloads skip the
+    // meshopt build entirely on a fresh hit. One folder per map (the glTF
+    // stem), one file per primitive inside it (global primitive index,
+    // stable across runs): Clusters/<map>/<prim>.meshlet.bin
     {
-        for (auto& prim : mesh.primitives)
+        const std::filesystem::path clustersRoot = GraphicsHelper::GetCacheDir(L"Clusters");
+        std::filesystem::path mapDir;
+        if (!clustersRoot.empty())
         {
-            if (!prim.vertices.empty() && !prim.indices.empty())
+            mapDir = clustersRoot / std::filesystem::path(m_SourcePath).stem();
+            std::error_code ec;
+            std::filesystem::create_directories(mapDir, ec);
+            if (ec)
+                mapDir.clear();
+        }
+        uint32_t primIndex = 0;
+        for (auto& mesh : m_GltfModel.meshes)
+        {
+            for (auto& prim : mesh.primitives)
             {
-                BuildMeshlets(prim);
+                if (!prim.vertices.empty() && !prim.indices.empty())
+                {
+                    std::string cachePath;
+                    if (!mapDir.empty())
+                        cachePath = (mapDir / (std::to_string(primIndex) + ".meshlet.bin")).string();
+                    BuildMeshlets(prim, cachePath);
+                }
+                ++primIndex;
             }
         }
     }
@@ -1355,15 +1377,89 @@ static uint32_t PackUVRG16_FLOAT(float u, float v)
     return (static_cast<uint32_t>(hV) << 16) | static_cast<uint32_t>(hU);
 }
 
-void Model::BuildMeshlets(GLTFPrimitive& prim)
+// Inverse of PackNormalRGB10A2_SNORM — dequantize the 10-bit components.
+static void UnpackNormalRGB10A2_SNORM(uint32_t packed, float out[3])
+{
+    auto unpack10 = [](uint32_t v) -> float {
+        const int32_t s = static_cast<int32_t>(v & 0x3FF) - 512; // [-512, 511]
+        return static_cast<float>(s) / 511.0f;
+    };
+    out[0] = unpack10(packed);
+    out[1] = unpack10((packed >> 10) & 0x3FF);
+    out[2] = unpack10((packed >> 20) & 0x3FF);
+}
+
+// Inverse of PackUVRG16_FLOAT — dequantize the two f16 halves.
+static void UnpackUVRG16_FLOAT(uint32_t packed, float out[2])
+{
+    auto f16_to_f32 = [](uint16_t h) -> float {
+        const uint32_t sign     = (h & 0x8000) << 16;
+        const int32_t  exponent = (h >> 10) & 0x1F;
+        const uint32_t mantissa = h & 0x3FF;
+        uint32_t bits;
+        if (exponent == 0) // zero / subnormal — flush to zero (UV scale)
+            bits = sign;
+        else if (exponent == 0x1F) // INF / NAN
+            bits = sign | 0x7F800000u | (mantissa << 13);
+        else
+            bits = sign | (static_cast<uint32_t>(exponent + 112) << 23) | (mantissa << 13);
+        float f;
+        std::memcpy(&f, &bits, sizeof(float));
+        return f;
+    };
+    out[0] = f16_to_f32(static_cast<uint16_t>(packed & 0xFFFF));
+    out[1] = f16_to_f32(static_cast<uint16_t>(packed >> 16));
+}
+
+void Model::BuildMeshlets(GLTFPrimitive& prim, const std::string& cachePath)
 {
     const size_t vertexCount = prim.vertices.size();
     const size_t indexCount  = prim.indices.size();
     if (vertexCount == 0 || indexCount == 0)
         return;
 
-    // Cache plumbing note: the disk cache is skipped until the GLTF filepath and
-    // primitive index are passed in from LoadGLTFModel. Always regenerate for now.
+    // --- Clusters/ disk cache (exe dir — the ShaderCache pattern). On a
+    // fresh hit, restore every post-build field and skip meshopt entirely.
+    // Hit = file exists (the path is already per-map) + the header VERSION
+    // matches — no mtime freshness during development; delete the cache or
+    // bump the version when the build's behavior changes.
+    if (!cachePath.empty() && MeshletCache::IsCacheValid(cachePath))
+    {
+        MeshletCache::CacheData cached;
+        if (MeshletCache::ReadBin(cachePath, cached) && !cached.meshlets.empty())
+        {
+            prim.meshlets         = std::move(cached.meshlets);
+            prim.meshletVertices  = std::move(cached.meshletVertices);
+            prim.meshletTriangles = std::move(cached.meshletTriangles);
+            prim.meshletBounds    = std::move(cached.meshletBounds);
+            prim.indices          = std::move(cached.indices);
+            prim.boundsSphereCenter = { cached.primSphere[0], cached.primSphere[1], cached.primSphere[2] };
+            prim.boundsSphereRadius  = cached.primSphere[3];
+
+            // Rebuild the interleaved GLTFVertex stream from the packed
+            // streams: positions exact; normals/UVs dequantized (RGB10A2 /
+            // RG16 — the same precision the mesh-shader path consumes
+            // anyway; the RT path's float normals lose ~0.1% direction
+            // precision). The meshlet indirection table references this
+            // same (remapped) vertex order, so everything downstream —
+            // CreateMeshletResources, the global vertex/index buffers, the
+            // TLAS — sees the identical data the build path produces.
+            prim.vertices.resize(cached.positions.size() / 3);
+            for (size_t i = 0; i < prim.vertices.size(); ++i)
+            {
+                prim.vertices[i].position[0] = cached.positions[i * 3 + 0];
+                prim.vertices[i].position[1] = cached.positions[i * 3 + 1];
+                prim.vertices[i].position[2] = cached.positions[i * 3 + 2];
+                UnpackNormalRGB10A2_SNORM(cached.packedNormals[i], prim.vertices[i].normal);
+                UnpackUVRG16_FLOAT(cached.packedUVs[i], prim.vertices[i].texCoord);
+            }
+
+            std::cout << "[Meshlet] Cache hit: " << prim.meshlets.size() << " meshlets, "
+                      << prim.vertices.size() << " vertices — " << cachePath << std::endl;
+            return;
+        }
+    }
+
 
     // --- Extract flat position array ---
     std::vector<float> positions(vertexCount * 3);
@@ -1504,6 +1600,36 @@ void Model::BuildMeshlets(GLTFPrimitive& prim)
 
     std::cout << "[Meshlet] Generated " << meshletCount << " meshlets from "
               << uniqueVertices << " vertices, " << indexCount << " triangles" << std::endl;
+
+    // --- Serialize the post-build state to the Clusters/ cache ---
+    if (!cachePath.empty())
+    {
+        MeshletCache::CacheData out;
+        out.meshlets         = prim.meshlets;
+        out.meshletVertices  = prim.meshletVertices;
+        out.meshletTriangles = prim.meshletTriangles;
+        out.meshletBounds    = prim.meshletBounds;
+        out.indices          = prim.indices;
+        out.primSphere[0]    = prim.boundsSphereCenter.x;
+        out.primSphere[1]    = prim.boundsSphereCenter.y;
+        out.primSphere[2]    = prim.boundsSphereCenter.z;
+        out.primSphere[3]    = prim.boundsSphereRadius;
+        out.positions.resize(prim.vertices.size() * 3);
+        out.packedNormals.resize(prim.vertices.size());
+        out.packedUVs.resize(prim.vertices.size());
+        for (size_t i = 0; i < prim.vertices.size(); ++i)
+        {
+            out.positions[i * 3 + 0] = prim.vertices[i].position[0];
+            out.positions[i * 3 + 1] = prim.vertices[i].position[1];
+            out.positions[i * 3 + 2] = prim.vertices[i].position[2];
+            out.packedNormals[i]     = PackNormalRGB10A2_SNORM(prim.vertices[i].normal[0],
+                                                               prim.vertices[i].normal[1],
+                                                               prim.vertices[i].normal[2]);
+            out.packedUVs[i]         = PackUVRG16_FLOAT(prim.vertices[i].texCoord[0],
+                                                        prim.vertices[i].texCoord[1]);
+        }
+        MeshletCache::WriteBin(cachePath, out);
+    }
 }
 
 // =============================================================================

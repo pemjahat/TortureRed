@@ -314,11 +314,17 @@ if(WIN32)
     )
 endif()
 
-# Copy content folder to output directory
+# Copy content folder to output directory — incremental (robocopy /XO copies
+# only changed files; an unconditional copy_directory would rewrite all 2.4 GB
+# of Content on every rebuild). /XO is purely a build-speed optimization.
+# robocopy exit codes 0-7 are success variants (1 = files copied); >= 8 is a
+# real failure. NOTE: add_custom_command(TARGET) has no COMMAND_ERROR_IS_ANY —
+# it would leak into the command line as a robocopy file spec (a silent no-op:
+# matched zero files, copied nothing). And the raw exit code would fail the
+# post-build event on every copied file, so normalize it in PowerShell:
+# exit nonzero only when robocopy reports >= 8.
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_SOURCE_DIR}/Content
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/Content
+    COMMAND powershell -Command "robocopy '${CMAKE_SOURCE_DIR}/Content' '$<TARGET_FILE_DIR:${PROJECT_NAME}>/Content' /E /XO /NJH /NJS /NDL /NFL; if ($LASTEXITCODE -ge 8) { exit 1 } else { exit 0 }"
 )
 
 # Compiler warnings

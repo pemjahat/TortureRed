@@ -6,6 +6,45 @@
 
 #include <DirectXCollision.h>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <cstring>
+#include <cmath>
+
+// =============================================================================
+// Probes/ disk cache — the ShaderCache pattern applied to the bake outputs.
+// =============================================================================
+namespace
+{
+
+constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
+constexpr uint32_t kProbeCacheVersion = 0; // development: format/semantics not finalized — no
+                                           // compatibility across changes; freeze at 1 once stable
+
+#pragma pack(push, 4)
+struct ProbeCacheHeader
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t dimX, dimY, dimZ;
+    uint32_t probeCount;
+    uint32_t finalResponse; // ping-pong index holding the final table
+    float    spacing;
+    float    gridMinX, gridMinY, gridMinZ;
+};
+#pragma pack(pop)
+
+std::filesystem::path ProbeCachePath(const std::string& scenePath, float spacing)
+{
+    const std::filesystem::path dir = GraphicsHelper::GetCacheDir(L"Probes");
+    if (dir.empty())
+        return {};
+    char sp[32];
+    snprintf(sp, sizeof(sp), "%.2f", static_cast<double>(spacing));
+    return dir / (std::filesystem::path(scenePath).stem().string() + "_s" + sp + ".probebin");
+}
+
+} // namespace
 
 void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSignature)
 {
@@ -128,6 +167,13 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     if (!device || !cmdList || !rootSignature || !model || !m_BakePSO)
         return false;
 
+    // The caller synced the GPU — release the previous bake's cache staging
+    // now (the upload buffer must only die between executions, never while a
+    // recorded list still references it).
+    m_CacheUpload.Reset();
+    m_CacheReadback.Reset();
+    m_LoadedFromCache = false;
+
     // --- Grid from the scene bounds (auto-grow spacing to fit the caps) ---
     const DirectX::BoundingBox bounds = model->GetSceneWorldBounds();
     DirectX::XMFLOAT3 mn, mx;
@@ -168,36 +214,14 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
               << kBakeIterations << " series iterations)"
               << " — world " << (mx.x - mn.x) << "x" << (mx.y - mn.y) << "x" << (mx.z - mn.z) << "m" << std::endl;
 
-    // --- (Re)create buffers. The caller synced the GPU before recording, so
-    // releasing the previous bake's buffers here is safe (same pattern as
-    // Renderer::BuildAccelerationStructures). ---
-    m_Response[0]   = {};
-    m_Response[1]   = {};
-    m_LitProbes     = {};
-    m_LitProbesSky  = {};
-    m_LitProbesSun  = {};
-    m_Meta          = {};
-    m_Visibility    = {};
+    // --- Probes/ disk cache: on a hit (file exists + grid header matches),
+    // restore the outputs with plain buffer copies and skip the dispatches
+    // entirely. ---
+    if (TryLoadCache(device, cmdList, model->GetSourcePath()))
+        return true;
 
-    const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
-    if (!CreateStructuredBuffer(m_Response[0], sizeof(float) * 4, responseElems,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse0") ||
-        !CreateStructuredBuffer(m_Response[1], sizeof(float) * 4, responseElems,
-                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse1") ||
-        !CreateStructuredBuffer(m_LitProbes, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILit") ||
-        !CreateStructuredBuffer(m_LitProbesSky, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSky") ||
-        !CreateStructuredBuffer(m_LitProbesSun, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSun") ||
-        !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
-        !CreateStructuredBuffer(m_Visibility, sizeof(float) * 2, (uint64_t)m_ProbeCount * kVisStride,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility"))
-    {
-        std::cerr << "[BakedGI] Failed to create probe buffers" << std::endl;
+    if (!CreateProbeBuffers())
         return false;
-    }
 
     // --- Record the series-expansion iterations (ping-pong) ---
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
@@ -343,6 +367,224 @@ void BakedGI::LogBakeStats() const
     std::cout << "[BakedGI] Criteria swap flips: " << newlyBad
               << " valid -> BAD (blue in placement view), " << newlyValid
               << " bad -> valid (yellow)" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+// Probes/ disk cache
+// -----------------------------------------------------------------------------
+
+bool BakedGI::CreateProbeBuffers()
+{
+    // The caller synced the GPU before recording, so releasing the previous
+    // bake's buffers here is safe (same pattern as
+    // Renderer::BuildAccelerationStructures).
+    m_Response[0]   = {};
+    m_Response[1]   = {};
+    m_LitProbes     = {};
+    m_LitProbesSky  = {};
+    m_LitProbesSun  = {};
+    m_Meta          = {};
+    m_Visibility    = {};
+
+    const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
+    if (!CreateStructuredBuffer(m_Response[0], sizeof(float) * 4, responseElems,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse0") ||
+        !CreateStructuredBuffer(m_Response[1], sizeof(float) * 4, responseElems,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse1") ||
+        !CreateStructuredBuffer(m_LitProbes, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILit") ||
+        !CreateStructuredBuffer(m_LitProbesSky, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSky") ||
+        !CreateStructuredBuffer(m_LitProbesSun, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSun") ||
+        !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
+        !CreateStructuredBuffer(m_Visibility, sizeof(float) * 2, (uint64_t)m_ProbeCount * kVisStride,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility"))
+    {
+        std::cerr << "[BakedGI] Failed to create probe buffers" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const std::string& scenePath)
+{
+    namespace fs = std::filesystem;
+    if (scenePath.empty())
+        return false;
+
+    const fs::path cachePath = ProbeCachePath(scenePath, m_Spacing);
+
+    // Hit = the file exists + the header validates against the grid this
+    // run computed (the map stem + spacing are already in the path). No
+    // mtime freshness during development — delete the cache or bump the
+    // version after editing the bake.
+
+    // Read + validate the header against the grid RecordBake just computed.
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in.is_open())
+        return false;
+    ProbeCacheHeader h = {};
+    in.read(reinterpret_cast<char*>(&h), sizeof(h));
+    if (h.magic != kProbeCacheMagic || h.version != kProbeCacheVersion ||
+        h.dimX != m_DimX || h.dimY != m_DimY || h.dimZ != m_DimZ ||
+        h.probeCount != m_ProbeCount || h.finalResponse > 1 ||
+        std::fabs(h.spacing - m_Spacing) > 1e-6f ||
+        std::fabs(h.gridMinX - m_GridMin.x) > 1e-4f ||
+        std::fabs(h.gridMinY - m_GridMin.y) > 1e-4f ||
+        std::fabs(h.gridMinZ - m_GridMin.z) > 1e-4f)
+    {
+        return false;
+    }
+
+    const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
+    const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
+    const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
+    const uint64_t total         = responseBytes + metaBytes + visBytes;
+
+    std::vector<char> blob(static_cast<size_t>(total));
+    in.read(blob.data(), static_cast<std::streamsize>(total));
+    if (in.fail() || in.gcount() != static_cast<std::streamsize>(total))
+    {
+        std::cerr << "[BakedGI] Probe cache truncated: " << cachePath.string() << std::endl;
+        return false;
+    }
+
+    if (!CreateProbeBuffers())
+        return false;
+    m_FinalResponse = h.finalResponse;
+
+    // One UPLOAD staging buffer for all three sections — kept alive as a
+    // member until the next bake (the recorded list outlives this call).
+    D3D12_HEAP_PROPERTIES up = {};
+    up.Type = D3D12_HEAP_TYPE_UPLOAD;
+    const D3D12_RESOURCE_DESC upDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    if (FAILED(device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &upDesc,
+                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                               IID_PPV_ARGS(&m_CacheUpload))))
+    {
+        std::cerr << "[BakedGI] Failed to create the cache upload buffer" << std::endl;
+        return false;
+    }
+    GraphicsHelper::SetObjectName(m_CacheUpload.Get(), "UP_BakedGICacheLoad");
+
+    {
+        uint8_t* mapped = nullptr;
+        if (FAILED(m_CacheUpload->Map(0, nullptr, reinterpret_cast<void**>(&mapped))))
+            return false;
+        memcpy(mapped, blob.data(), static_cast<size_t>(total));
+        m_CacheUpload->Unmap(0, nullptr);
+    }
+
+    struct Copy { GPUBuffer* dst; uint64_t offset; uint64_t bytes; };
+    const Copy copies[] = {
+        { &m_Response[m_FinalResponse], 0,                          responseBytes },
+        { &m_Meta,                      responseBytes,              metaBytes },
+        { &m_Visibility,                responseBytes + metaBytes,  visBytes },
+    };
+    for (const Copy& c : copies)
+    {
+        c.dst->Transition(cmdList, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyBufferRegion(c.dst->resource.Get(), 0, m_CacheUpload.Get(), c.offset, c.bytes);
+        c.dst->Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    m_LoadedFromCache = true;
+    m_Valid = true;
+    std::cout << "[BakedGI] Probe cache hit: " << m_ProbeCount << " probes ("
+              << m_DimX << "x" << m_DimY << "x" << m_DimZ << " @ " << m_Spacing
+              << "m) — " << cachePath.string() << std::endl;
+    return true;
+}
+
+bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
+{
+    if (!m_Valid || !device || !cmdList)
+        return false;
+
+    const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
+    const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
+    const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
+    const uint64_t total         = responseBytes + metaBytes + visBytes;
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+    const D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    if (FAILED(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&m_CacheReadback))))
+    {
+        std::cerr << "[BakedGI] Failed to create the cache readback buffer" << std::endl;
+        return false;
+    }
+    GraphicsHelper::SetObjectName(m_CacheReadback.Get(), "RB_BakedGICache");
+
+    // response | meta | vis -> one readback, three copies.
+    struct Copy { GPUBuffer* src; uint64_t dstOffset; uint64_t bytes; };
+    const Copy copies[] = {
+        { &m_Response[m_FinalResponse], 0,                          responseBytes },
+        { &m_Meta,                      responseBytes,              metaBytes },
+        { &m_Visibility,                responseBytes + metaBytes,  visBytes },
+    };
+    for (const Copy& c : copies)
+    {
+        c.src->Transition(cmdList, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmdList->CopyBufferRegion(m_CacheReadback.Get(), c.dstOffset, c.src->resource.Get(), 0, c.bytes);
+        c.src->Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    return true;
+}
+
+void BakedGI::WriteCacheFile(const std::string& scenePath)
+{
+    if (!m_CacheReadback || scenePath.empty())
+        return;
+
+    const std::filesystem::path cachePath = ProbeCachePath(scenePath, m_Spacing);
+    if (cachePath.empty())
+        return;
+
+    ProbeCacheHeader h = {};
+    h.magic = kProbeCacheMagic;
+    h.version = kProbeCacheVersion;
+    h.dimX = m_DimX; h.dimY = m_DimY; h.dimZ = m_DimZ;
+    h.probeCount = m_ProbeCount;
+    h.finalResponse = m_FinalResponse;
+    h.spacing = m_Spacing;
+    h.gridMinX = m_GridMin.x; h.gridMinY = m_GridMin.y; h.gridMinZ = m_GridMin.z;
+
+    const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
+    const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
+    const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
+    const uint64_t total         = responseBytes + metaBytes + visBytes;
+
+    uint8_t* mapped = nullptr;
+    if (FAILED(m_CacheReadback->Map(0, nullptr, reinterpret_cast<void**>(&mapped))))
+    {
+        std::cerr << "[BakedGI] Failed to map the cache readback buffer" << std::endl;
+        return;
+    }
+
+    std::ofstream out(cachePath, std::ios::binary);
+    if (!out.is_open())
+    {
+        std::cerr << "[BakedGI] Failed to open the probe cache for writing: "
+                  << cachePath.string() << std::endl;
+        m_CacheReadback->Unmap(0, nullptr);
+        return;
+    }
+    out.write(reinterpret_cast<const char*>(&h), sizeof(h));
+    out.write(reinterpret_cast<const char*>(mapped + 0),
+              static_cast<std::streamsize>(responseBytes));
+    out.write(reinterpret_cast<const char*>(mapped + responseBytes),
+              static_cast<std::streamsize>(metaBytes));
+    out.write(reinterpret_cast<const char*>(mapped + responseBytes + metaBytes),
+              static_cast<std::streamsize>(visBytes));
+    m_CacheReadback->Unmap(0, nullptr);
+
+    std::cout << "[BakedGI] Probe cache written: " << cachePath.string()
+              << " (" << (total >> 20) << " MB)" << std::endl;
 }
 
 void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,

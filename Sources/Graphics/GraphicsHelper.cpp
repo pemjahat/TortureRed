@@ -219,6 +219,55 @@ std::filesystem::file_time_type NewestIncludeTime(const std::filesystem::path& f
 
 } // namespace
 
+std::filesystem::path GraphicsHelper::GetExeDir()
+{
+    wchar_t buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    return std::filesystem::path(buf).parent_path();
+}
+
+std::filesystem::path GraphicsHelper::GetCacheDir(const wchar_t* subDir)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = GetExeDir() / subDir;
+    fs::create_directories(dir, ec);
+    if (ec)
+    {
+        std::wcerr << L"[Cache] Failed to create " << dir.wstring() << std::endl;
+        return fs::path();
+    }
+    return dir;
+}
+
+std::filesystem::file_time_type GraphicsHelper::NewestShaderIncludeTime(const std::string& shaderPath)
+{
+    namespace fs = std::filesystem;
+    const fs::path sourcePath(shaderPath);
+
+    // The -I roots DXC gets (mirrors the compile call below).
+    std::vector<fs::path> includeRoots;
+#ifdef SHADER_SOURCE_DIR
+    includeRoots.push_back(fs::path(SHADER_SOURCE_DIR));               // Shaders/
+    includeRoots.push_back(fs::path(SHADER_SOURCE_DIR).parent_path()); // Sources/ ("Shared/...")
+#endif
+#ifdef RTXDI_INCLUDE_DIR
+    includeRoots.push_back(fs::path(RTXDI_INCLUDE_DIR));
+#endif
+#ifdef SHARC_INCLUDE_DIR
+    includeRoots.push_back(fs::path(SHARC_INCLUDE_DIR));
+#endif
+#ifdef SPD_INCLUDE_DIR
+    includeRoots.push_back(fs::path(SPD_INCLUDE_DIR));
+#endif
+#ifdef NRD_SHADER_INCLUDE_DIR
+    includeRoots.push_back(fs::path(NRD_SHADER_INCLUDE_DIR));
+#endif
+
+    std::set<std::string> visited;
+    return NewestIncludeTime(sourcePath, includeRoots, visited, 16);
+}
+
 std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, const std::string& entryPoint, const std::string& target)
 {
     return CompileShader(filename, entryPoint, target, {});
@@ -244,11 +293,6 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
     // Load from cache if it exists and is newer than the source file AND its
     // transitive #includes (headers changing must invalidate the blob).
     namespace fs = std::filesystem;
-    auto GetExeDir = []() -> fs::path {
-        wchar_t buf[MAX_PATH];
-        GetModuleFileNameW(nullptr, buf, MAX_PATH);
-        return fs::path(buf).parent_path();
-    };
     fs::path cacheDir = GetExeDir() / L"ShaderCache";
     std::string cacheFileStem = fs::path(resolvedFilename).stem().string()
                                 + "." + entryPoint + "." + target;
@@ -271,25 +315,7 @@ std::vector<char> GraphicsHelper::CompileShader(const std::string& filename, con
             // Freshness must cover the TRANSITIVE INCLUDES too: a cached blob
             // older than any included header (BakedGI.hlsli, Shared/SharedTypes.h,
             // ...) is stale even when the top-level file itself is untouched.
-            std::vector<fs::path> includeRoots;
-#ifdef SHADER_SOURCE_DIR
-            includeRoots.push_back(fs::path(SHADER_SOURCE_DIR));               // Shaders/
-            includeRoots.push_back(fs::path(SHADER_SOURCE_DIR).parent_path()); // Sources/ ("Shared/...")
-#endif
-#ifdef RTXDI_INCLUDE_DIR
-            includeRoots.push_back(fs::path(RTXDI_INCLUDE_DIR));
-#endif
-#ifdef SHARC_INCLUDE_DIR
-            includeRoots.push_back(fs::path(SHARC_INCLUDE_DIR));
-#endif
-#ifdef SPD_INCLUDE_DIR
-            includeRoots.push_back(fs::path(SPD_INCLUDE_DIR));
-#endif
-#ifdef NRD_SHADER_INCLUDE_DIR
-            includeRoots.push_back(fs::path(NRD_SHADER_INCLUDE_DIR));
-#endif
-            std::set<std::string> visited;
-            const auto newestSourceTime = NewestIncludeTime(sourcePath, includeRoots, visited, 16);
+            const auto newestSourceTime = NewestShaderIncludeTime(resolvedFilename);
             if (cacheTime >= newestSourceTime)
             {
                 std::ifstream cacheIn(cachePath, std::ios::binary);

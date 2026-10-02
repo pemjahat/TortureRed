@@ -79,7 +79,27 @@ public:
     bool RecordMetaReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
     void LogBakeStats() const;
 
+    // Disk cache (Probes/ — the ShaderCache pattern). After a bake, the bake
+    // outputs (final response table, meta bits, visibility moments) are read
+    // back on the same list (RecordCacheReadback, before executing) and
+    // written to <exeDir>/Probes/<stem>_s<spacing>.probebin after the sync
+    // (WriteCacheFile). A later RecordBake with the same grid config and
+    // fresh mtimes (scene file + the bake shaders' include closure) restores
+    // the state with plain buffer copies instead of dispatching — check
+    // LoadedFromCache() after RecordBake to know which path ran.
+    bool RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+    void WriteCacheFile(const std::string& scenePath);
+    bool LoadedFromCache() const { return m_LoadedFromCache; }
+
 private:
+    // Shared by the bake and the cache-load paths: (re)creates the seven
+    // probe buffers for the current grid (dims/spacing/probeCount members).
+    bool CreateProbeBuffers();
+    // Restores the bake outputs from the Probes/ cache (fresh mtimes +
+    // matching grid header). Called inside RecordBake after the grid is
+    // computed; on a hit RecordBake returns true immediately.
+    bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const std::string& scenePath);
+
     // Ping-pong transport table: probeCount x kDirections x kResponseFloat4s float4s.
     GPUBuffer m_Response[2];
     GPUBuffer m_LitProbes;    // per-frame lit SH9 RGB, TOTAL (runtime fetch source)
@@ -100,4 +120,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO; // RTV R8G8B8A8 (post-composite overlay)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LeakDebugPSO; // fullscreen leak map (post-composite, alpha-blended)
     Microsoft::WRL::ComPtr<ID3D12Resource> m_MetaReadback; // per-bake validity stats readback
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_CacheReadback; // per-bake serialization readback (response|meta|vis)
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_CacheUpload;   // cache-load staging — must outlive the recorded list
+    bool m_LoadedFromCache = false;
 };

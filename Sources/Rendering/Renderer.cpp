@@ -976,10 +976,18 @@ bool Renderer::BakeGIProbes(Model* model, float spacing)
                                     model->GetGlobalVertexBufferAddress(),
                                     spacing);
     if (ok)
-        m_BakedGI.RecordMetaReadback(m_Device.Get(), m_CommandList.Get()); // stats readback rides the same list
+    {
+        if (!m_BakedGI.LoadedFromCache())
+            m_BakedGI.RecordCacheReadback(m_Device.Get(), m_CommandList.Get()); // serialize readback rides the same list
+        m_BakedGI.RecordMetaReadback(m_Device.Get(), m_CommandList.Get()); // stats readback (also on cache load)
+    }
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
+    {
+        if (!m_BakedGI.LoadedFromCache())
+            m_BakedGI.WriteCacheFile(model->GetSourcePath());
         m_BakedGI.LogBakeStats();
+    }
     return ok;
 }
 

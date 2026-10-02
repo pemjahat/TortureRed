@@ -17,8 +17,11 @@ bool WriteBin(const std::string& path, const CacheData& data)
     Header header;
     header.meshletCount  = static_cast<uint32_t>(data.meshlets.size());
     header.vertexCount   = static_cast<uint32_t>(data.meshletVertices.size());
+    header.uniqueVertexCount = static_cast<uint32_t>(data.positions.size() / 3); // the STREAM length, not the indirection length
     header.triangleCount = static_cast<uint32_t>(data.meshletTriangles.size());
     header.boundsCount   = static_cast<uint32_t>(data.meshletBounds.size());
+    header.indexCount    = static_cast<uint32_t>(data.indices.size());
+    memcpy(header.primSphere, data.primSphere, sizeof(header.primSphere));
 
     // Write header
     file.write(reinterpret_cast<const char*>(&header), sizeof(Header));
@@ -35,11 +38,12 @@ bool WriteBin(const std::string& path, const CacheData& data)
     WriteVec(data.positions);
     WriteVec(data.packedNormals);
     WriteVec(data.packedUVs);
+    WriteVec(data.indices);
 
     file.close();
-    std::cout << "[MeshletCache] Wrote " << path << " (" 
+    std::cout << "[MeshletCache] Wrote " << path << " ("
               << header.meshletCount << " meshlets, "
-              << header.vertexCount << " vertices)" << std::endl;
+              << header.uniqueVertexCount << " vertices)" << std::endl;
     return true;
 }
 
@@ -73,18 +77,32 @@ bool ReadBin(const std::string& path, CacheData& data)
     ReadVec(data.meshletTriangles, header.triangleCount);
     ReadVec(data.meshletBounds,    header.boundsCount);
 
-    // Read positions: vertexCount * 3 floats
+    // Vertex streams are sized by the UNIQUE vertex count — the
+    // indirection-table length (header.vertexCount) double-counts vertices
+    // shared between meshlets and would read past the file.
+    const uint32_t uniqueVerts = header.uniqueVertexCount;
+    if (uniqueVerts == 0) {
+        std::cerr << "[MeshletCache] Corrupt cache (zero vertices): " << path << std::endl;
+        return false;
+    }
+
+    // Read positions: uniqueVerts * 3 floats
     {
-        uint32_t positionCount = header.vertexCount * 3;
+        uint32_t positionCount = uniqueVerts * 3;
         data.positions.resize(positionCount);
         file.read(reinterpret_cast<char*>(data.positions.data()), positionCount * sizeof(float));
     }
 
-    // Read packed normals: vertexCount uints
-    ReadVec(data.packedNormals, header.vertexCount);
+    // Read packed normals: uniqueVerts uints
+    ReadVec(data.packedNormals, uniqueVerts);
 
-    // Read packed UVs: vertexCount uints
-    ReadVec(data.packedUVs, header.vertexCount);
+    // Read packed UVs: uniqueVerts uints
+    ReadVec(data.packedUVs, uniqueVerts);
+
+    // Indices (the primitive sphere rides IN THE HEADER — there is no
+    // trailing blob; reading one over-runs the file by exactly 16 bytes)
+    ReadVec(data.indices, header.indexCount);
+    memcpy(data.primSphere, header.primSphere, sizeof(data.primSphere));
 
     if (file.fail()) {
         std::cerr << "[MeshletCache] Failed to read cache data: " << path << std::endl;
@@ -94,23 +112,10 @@ bool ReadBin(const std::string& path, CacheData& data)
     return true;
 }
 
-bool IsCacheValid(const std::string& cachePath, const std::string& sourcePath)
+bool IsCacheValid(const std::string& cachePath)
 {
-    namespace fs = std::filesystem;
-    std::error_code ecSrc, ecCache;
-
-    if (!fs::exists(cachePath, ecCache))
-        return false;
-    if (!fs::exists(sourcePath, ecSrc))
-        return false;
-
-    auto srcTime  = fs::last_write_time(sourcePath, ecSrc);
-    auto cacheTime = fs::last_write_time(cachePath, ecCache);
-
-    if (ecSrc || ecCache)
-        return false;
-
-    return cacheTime >= srcTime;
+    std::error_code ec;
+    return std::filesystem::exists(cachePath, ec);
 }
 
 } // namespace MeshletCache
