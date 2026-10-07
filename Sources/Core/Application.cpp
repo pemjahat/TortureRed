@@ -3,6 +3,7 @@
 #include "Application.h"
 #include <SDL_syswm.h>
 #include <DirectXCollision.h>
+#include <cstdio>
 #include "Rendering/BakedGI.h"
 
 const char* WINDOW_TITLE = "TortureRed";
@@ -55,6 +56,11 @@ void Application::Run()
 
 void Application::Initialize()
 {
+    // RenderDoc must enter the process before the D3D12 device is created.
+    // Then the capture layer can wrap the device. A capture is impossible when
+    // this call happens later.
+    m_RenderDoc.Initialize(RenderDocCapture::kDefaultCapturePathTemplate);
+
     // Initialize SDL
     CHECK_BOOL(SDL_Init(SDL_INIT_VIDEO) == 0, "SDL_Init failed");
 
@@ -1780,6 +1786,9 @@ void Application::RenderImGui()
         ImGui::TextDisabled("Profiling disabled (zero overhead)");
     }
 
+    // --- RenderDoc GPU capture section ---
+    RenderRenderDocSection();
+
     ImGui::Separator();
     ImGui::Checkbox("Show ImGui Demo Window", &m_ShowDemoWindow);
 
@@ -1821,4 +1830,53 @@ void Application::RenderImGui()
 
     if (m_ShowDemoWindow)
         ImGui::ShowDemoWindow(&m_ShowDemoWindow);
+}
+
+void Application::RenderRenderDocSection()
+{
+    ImGui::SeparatorText("RenderDoc");
+
+    // RenderDoc is absent. A capture is impossible from this process, because
+    // RenderDoc must enter the process before the D3D12 device exists. This
+    // section only reports the state, and it offers no button.
+    if (!m_RenderDoc.IsAvailable())
+    {
+        ImGui::TextDisabled("RenderDoc is not loaded in this process.");
+        ImGui::TextWrapped("RenderDoc must enter the process before the D3D12 device exists. "
+                           "Start the program with the argument \"-autoattach\", or start it "
+                           "from RenderDoc.");
+        return;
+    }
+
+    ImGui::Text("Connected: RenderDoc %s", m_RenderDoc.VersionString().c_str());
+
+    // One-frame dump. The click is inside the frame, so this frame is captured.
+    if (ImGui::Button("Capture Frame"))
+    {
+        m_RenderDoc.TriggerCapture();
+        m_RenderDocStatus = "Dumped this frame.";
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Dumps the frame that contains this click to a .rdc file.\nRenderDoc writes the file when the frame ends.");
+
+    ImGui::Text("Captures this session: %u", m_RenderDoc.CaptureCount());
+    const std::string lastCapture = m_RenderDoc.LastCapturePath();
+    if (!lastCapture.empty())
+        ImGui::TextWrapped("Last file: %s", lastCapture.c_str());
+
+    // The capture path is fixed at compile time. The line reports the value that
+    // RenderDoc holds.
+    ImGui::TextDisabled("Capture path: %s (fixed)", m_RenderDoc.CapturePathTemplate().c_str());
+
+    if (ImGui::Button("Open Last Capture"))
+    {
+        m_RenderDocStatus = m_RenderDoc.LaunchReplayUI()
+            ? "Replay UI opened."
+            : "The replay UI did not start.";
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Opens the RenderDoc replay user interface for the last capture.");
+
+    if (!m_RenderDocStatus.empty())
+        ImGui::TextWrapped("%s", m_RenderDocStatus.c_str());
 }

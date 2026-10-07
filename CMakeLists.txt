@@ -223,6 +223,8 @@ include_directories(${directxtex_SOURCE_DIR}/DirectXTex)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/rtxdi-library/Include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/sharc/include)
 include_directories(${CMAKE_SOURCE_DIR}/Externals/HosekSky)
+# renderdoc_app.h — the public RenderDoc in-application API header
+include_directories(${CMAKE_SOURCE_DIR}/Externals/renderdoc)
 include_directories(${fidelityfx_spd_SOURCE_DIR}/ffx-spd)
 include_directories(${microprofile_SOURCE_DIR})
 include_directories(${meshoptimizer_SOURCE_DIR}/src)

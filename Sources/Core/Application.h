@@ -4,6 +4,7 @@
 #include "Camera.h"
 #include "Model.h"
 #include "Rendering/Renderer.h"
+#include "RenderDocCapture.h"
 
 
 #include "Graphics/Scene.h"
@@ -29,6 +30,7 @@ private:
 
     void InitializeImGui();
     void RenderImGui();
+    void RenderRenderDocSection();
 
     bool m_IsRunning;
     bool m_EnableDepthPrePass    = false;
@@ -73,6 +75,10 @@ private:
 
     // ImGui
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_ImGuiDescriptorHeap;
+
+    // RenderDoc in-application capture — see Sources/Core/RenderDocCapture.h
+    RenderDocCapture m_RenderDoc;
+    std::string m_RenderDocStatus;            // result of the last capture action
 
     // Input state for camera
     bool m_RightMouseButtonHeld;
