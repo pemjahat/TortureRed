@@ -237,11 +237,17 @@ float BakedGIChebyshev(float2 m, float d)
 // self-shadow bias — the fetch is then exactly the step-1 plain
 // validity-renormalized trilinear, for before/after comparison.
 //
+// The lit table is an explicit parameter, not a fixed FrameCB read: the update
+// pass writes the TOTAL, the sky-sourced and the sun-sourced SH9 tables
+// separately, and the indirect-only debug view (Lighting.hlsl) needs to fetch
+// any one of the three through this same filter. SampleBakedGIProbe below is
+// the normal path and always reads the TOTAL table.
+//
 // REQUIRES in scope at include time:
 //   - ConstantBuffer<FrameConstants> FrameCB : register(b0)
 //   - EvalSH9Basis (PBR.hlsl, included via Common.hlsl / CommonTracing.hlsl)
 // ---------------------------------------------------------------------------
-float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
+float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float3 V)
 {
     uint3  dims    = uint3(FrameCB.bakedGIDimX, FrameCB.bakedGIDimY, FrameCB.bakedGIDimZ);
     float3 gridMin = float3(FrameCB.bakedGIGridMinX, FrameCB.bakedGIGridMinY, FrameCB.bakedGIGridMinZ);
@@ -262,7 +268,7 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
     int3   base = int3(min(floor(t), max(dims - 2.0f, float3(0.0f, 0.0f, 0.0f))));
     float3 f    = t - base;
 
-    StructuredBuffer<float4> lit  = ResourceDescriptorHeap[FrameCB.bakedGIProbeSRVIndex];
+    StructuredBuffer<float4> lit  = ResourceDescriptorHeap[litSrvIndex];
     StructuredBuffer<uint>   meta = ResourceDescriptorHeap[FrameCB.bakedGIProbeMetaSRVIndex];
     StructuredBuffer<float2> vis  = ResourceDescriptorHeap[FrameCB.bakedGIProbeVisSRVIndex];
 
@@ -351,6 +357,13 @@ float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
         E += coef[lm2] * basis[lm2];
     }
     return max(E, 0.0f.xxx);
+}
+
+// Normal runtime fetch: the TOTAL lit table (sky + sun, written every frame by
+// BakedGI_Update.hlsl as the exact sum of the two debug splits).
+float3 SampleBakedGIProbe(float3 worldPos, float3 N, float3 V)
+{
+    return SampleBakedGIProbeFrom(FrameCB.bakedGIProbeSRVIndex, worldPos, N, V);
 }
 
 // ---------------------------------------------------------------------------

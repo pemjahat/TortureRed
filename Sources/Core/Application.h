@@ -60,6 +60,9 @@ private:
     float m_DDGIDebugScale      = 1.0f;  // DDGI debug gain
     bool  m_IndirectGIEnabled   = true;  // Indirect GI master switch (raster path)
     int   m_IndirectGIMethod    = 0;     // Indirect GI method: 0 = Probe (Baked), 1 = ReSTIR GI, 2 = DDGI
+    bool  m_GIIndirectOnly      = false; // Indirect-only scene view: draw just the indirect GI term
+    int   m_GIIndirectOnlySource = 0;    // Indirect source split: 0 = full (sky + sun), 1 = sky only, 2 = sun only
+    int   m_GIIndirectOnlyAlbedo = 0;    // Indirect-only albedo override: 0 = surface albedo, 1 = all white
     float m_Exposure = -14.0f;
     SDL_Window* m_Window;
 

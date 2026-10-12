@@ -158,6 +158,11 @@ void Application::Initialize()
     m_FrameConstants.ddgiMaxRaysPerProbe = 0;
     m_FrameConstants.ddgiDebugView = 0;
     m_FrameConstants.ddgiDebugScale = 1.0f;
+    // Indirect-only scene view: off by default. Source split defaults to the
+    // total (sky + sun), matching the normal fetch.
+    m_FrameConstants.giIndirectOnly = 0;
+    m_FrameConstants.giIndirectOnlySource = 0;
+    m_FrameConstants.giIndirectOnlyAlbedo = 0;
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -549,6 +554,12 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
         m_FrameConstants.bakedGIVisCheck           = m_BakedGIVisCheck ? 1u : 0u;
+        // Indirect-only view state. Lives here because the BakedGI block always
+        // runs, whatever indirect method is selected, and the view covers DDGI
+        // too — only the sun/sky split is baked-probe specific.
+        m_FrameConstants.giIndirectOnly            = m_GIIndirectOnly ? 1u : 0u;
+        m_FrameConstants.giIndirectOnlySource      = (uint32_t)m_GIIndirectOnlySource;
+        m_FrameConstants.giIndirectOnlyAlbedo      = (uint32_t)m_GIIndirectOnlyAlbedo;
         const DirectX::XMFLOAT3 gmin = gi.GetGridMin();
         m_FrameConstants.bakedGIGridMinX = gmin.x;
         m_FrameConstants.bakedGIGridMinY = gmin.y;
@@ -1417,6 +1428,47 @@ void Application::RenderImGui()
             m_FrameConstants.bakedGIMode            = (m_IndirectGIMethod == 0) ? 1u : 0u;
             m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == 1) ? 1u : 0u;
             m_FrameConstants.ddgiMode      = (m_IndirectGIMethod == 2) ? 1u : 0u;
+
+            ImGui::Checkbox("Indirect Only View", &m_GIIndirectOnly);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Draw only the indirect-GI contribution and nothing else: the direct sun,\n"
+                                  "the local lights, the reservoir composition and indirect specular are all\n"
+                                  "skipped, and sky pixels render black. Use it to see what the indirect path\n"
+                                  "actually adds to the scene.\n"
+                                  "Covers the two sources that keep a separate indirect field: the baked probe\n"
+                                  "grid and DDGI. Under ReSTIR GI the interchange textures mix direct and\n"
+                                  "indirect, so the view is inert there and the normal image is drawn.");
+
+            if (m_GIIndirectOnly)
+            {
+                ImGui::Indent();
+                const bool splitAvailable = (m_IndirectGIMethod == 0);
+                ImGui::BeginDisabled(!splitAvailable);
+                const char* indirectSources[] = { "Full (Sky + Sun)", "Sky Only", "Sun Only" };
+                ImGui::SetNextItemWidth(180.f);
+                ImGui::Combo("Indirect Source", &m_GIIndirectOnlySource, indirectSources, IM_ARRAYSIZE(indirectSources));
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Which half of the indirect light to show.\n"
+                                      "The update pass bakes the total, the sky-sourced and the sun-sourced SH9\n"
+                                      "tables separately, and total = sky + sun exactly, so the three views\n"
+                                      "are directly comparable.\n"
+                                      "Sky Only: sky bounces + occluded first-bounce sky (V_i gated).\n"
+                                      "Sun Only: sun bounces only — the direct sun never enters the probes.\n"
+                                      "The split exists only for Probe (Baked); DDGI stores one unsplit field.");
+
+                const char* indirectAlbedos[] = { "Surface Albedo", "All White" };
+                ImGui::SetNextItemWidth(180.f);
+                ImGui::Combo("Indirect Albedo", &m_GIIndirectOnlyAlbedo, indirectAlbedos, IM_ARRAYSIZE(indirectAlbedos));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Albedo applied by the indirect-only view.\n"
+                                      "Surface Albedo: the material's albedo texture, as in the normal image.\n"
+                                      "All White: the albedo is forced to 1 in every channel, so the image is the\n"
+                                      "indirect light field alone — no texture detail modulates it, which makes a\n"
+                                      "lighting change easy to tell apart from an albedo change.\n"
+                                      "Both modes keep the Lambert 1/PI, so they differ only by the albedo factor.");
+                ImGui::Unindent();
+            }
 
             if (m_IndirectGIMethod == 0)
             {

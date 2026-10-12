@@ -46,6 +46,11 @@ float4 PSMain(PSInput input) : SV_Target {
     // Sample the baked sky cubemap for background color; no shading needed.
     if (depth <= 0.0f)
     {
+        // Indirect-only view: the sky is direct environment light, not
+        // indirect GI, so it must not mask the signal. Render it black.
+        if (FrameCB.giIndirectOnly != 0u)
+            return float4(0.0f, 0.0f, 0.0f, 1.0f);
+
         float3 cameraRayDir = GetCameraRayDirection(
             input.texCoord, FrameCB.projectionInverse,
             FrameCB.viewInverse, FrameCB.cameraPosition.xyz);
@@ -73,6 +78,67 @@ float4 PSMain(PSInput input) : SV_Target {
     float3 V = normalize(FrameCB.cameraPosition.xyz - worldPos.xyz);
     float roughness = max(0.01f, material.r);
     float metallic = material.g;
+
+    // The baked probe grid is the EXCLUSIVE alternative indirect source
+    // (probe mode forces restirGI off, so the fetch below reduces to DI's
+    // direct-only contribution there): probes supply the indirect diffuse —
+    // sun/sky bounces + occluded first-bounce sky. Indirect specular is absent
+    // in probe mode (SH9 probes are diffuse-only — known trade-off).
+    // Declared here because the indirect-only view below also needs it.
+    const bool bakedGIActive = (FrameCB.bakedGIMode != 0u) && (FrameCB.bakedGIValid != 0u);
+    const bool ddgiActive    = (FrameCB.ddgiMode != 0u) && (FrameCB.ddgiValid != 0u);
+
+    // ---------------------------------------------------------------------
+    // Indirect-only debug view. Replaces the shaded image with the selected
+    // indirect-GI term alone, so the bounced contribution can be inspected
+    // with every direct term removed: the sun and the local lights, the ReSTIR
+    // interchange composition, and the indirect specular. Placed before the
+    // shadow trace, so holding the view open also costs less than a full frame.
+    //
+    // The view covers the two indirect sources that store a separable indirect
+    // field: the baked probe grid (which additionally carries the sun/sky
+    // split) and DDGI. Under ReSTIR GI the interchange textures mix the
+    // direct and the indirect producers, so the flag is inert there and the
+    // normal image is drawn — an "indirect" label on a mixed buffer would be
+    // misleading.
+    if ((FrameCB.giIndirectOnly != 0u) && (bakedGIActive || ddgiActive))
+    {
+        float3 indirect = float3(0.0f, 0.0f, 0.0f);
+
+        // Albedo override. With the albedo flattened to white the shaded image
+        // is the indirect light field itself, with no texture detail on top of
+        // it — the way to tell an albedo modulation apart from a lighting
+        // change when reading the image. The Lambert 1/PI below is kept in both
+        // modes, so the two views differ only by the albedo factor.
+        const float3 debugAlbedo = (FrameCB.giIndirectOnlyAlbedo != 0u)
+            ? float3(1.0f, 1.0f, 1.0f)
+            : albedo.rgb;
+
+        if (bakedGIActive)
+        {
+            // The update pass writes the total, the sky-sourced and the
+            // sun-sourced SH9 tables separately, and total == sky + sun
+            // exactly, so the three views are directly comparable.
+            uint litIdx = FrameCB.bakedGIProbeSRVIndex;
+            if (FrameCB.giIndirectOnlySource == 1u)
+                litIdx = FrameCB.bakedGIProbeSkySRVIndex;
+            else if (FrameCB.giIndirectOnlySource == 2u)
+                litIdx = FrameCB.bakedGIProbeSunSRVIndex;
+
+            indirect = debugAlbedo / PI * SampleBakedGIProbeFrom(litIdx, worldPos.xyz, N, V);
+        }
+        else
+        {
+            // DDGI keeps no sun/sky split: the atlas holds one indirect field,
+            // because sun light enters the probes through frontface hits only.
+            indirect = debugAlbedo / PI * DDGISampleIrradiance(worldPos.xyz, N, V);
+        }
+
+        if (FrameCB.taaEnabled)
+            return float4(min(max(indirect, 0.0f), FP16Max), 1.0f);
+        float3 debugExposed = (indirect / FP16Scale) * exp2(FrameCB.exposure);
+        return float4(debugExposed / (debugExposed + 1.0f), 1.0f);
+    }
 
     // 1. Main Directional Light (Index 0) with Ray-Traced Shadows
     float3 L_main = normalize(-mainLight.direction.xyz);
@@ -129,13 +195,7 @@ float4 PSMain(PSInput input) : SV_Target {
     // this frame iff a reservoir producer ran — ReSTIR DI (StoreShadingOutput
     // Call 1, overwrite) and/or ReSTIR GI (Call 2, additive over DI / overwrite
     // when DI is off). Fetch exactly when one did; otherwise the contents are
-    // stale. The baked probe grid is the EXCLUSIVE alternative indirect source
-    // (probe mode forces restirGI off, so the fetch below reduces to DI's
-    // direct-only contribution there): probes supply the indirect diffuse —
-    // sun/sky bounces + occluded first-bounce sky. Indirect specular is absent
-    // in probe mode (SH9 probes are diffuse-only — known trade-off).
-    const bool bakedGIActive = (FrameCB.bakedGIMode != 0) && (FrameCB.bakedGIValid != 0);
-
+    // stale. (The probe-mode note lives with the bakedGIActive declaration.)
     if (FrameCB.enableRestirDI || FrameCB.enableRestirGI)
     {
         Texture2D<float4> finalDiffuseTex  = ResourceDescriptorHeap[g_Indices.InputIdx0];
@@ -169,7 +229,7 @@ float4 PSMain(PSInput input) : SV_Target {
     // DDGI self-shadow bias, the backface weight and the Chebyshev bound from
     // the depth-moment atlas, so the wall/floor leak the trilinear cage shows
     // is rejected there for this receiver only.
-    if ((FrameCB.ddgiMode != 0) && (FrameCB.ddgiValid != 0))
+    if (ddgiActive)
         finalColor += albedo.rgb / PI * DDGISampleIrradiance(worldPos.xyz, N, V);
     
     // When TAA is active, output raw HDR — the TAA resolve shader handles

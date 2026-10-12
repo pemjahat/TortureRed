@@ -79,6 +79,20 @@ public:
     bool RecordMetaReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
     void LogBakeStats() const;
 
+    // ---------------------------------------------------------------------
+    // Probe disk cache switch. TEMPORARILY OFF.
+    //
+    // The cache code below is intact and still compiled; this constant only
+    // decides whether the bake path uses it. While it is false:
+    //   - RecordBake never calls TryLoadCache, so every RecordBake re-runs the
+    //     dispatches instead of restoring a Probes/ file. This is what makes a
+    //     bake-shader edit take effect without deleting a stale cache file.
+    //   - Renderer::BakeGIProbes skips RecordCacheReadback and WriteCacheFile,
+    //     so no new Probes/ file is written either.
+    // Existing Probes/ files are left untouched on disk and are simply
+    // ignored. Set to true to restore the previous behaviour exactly.
+    static constexpr bool kProbeCacheEnabled = false;
+
     // Disk cache (Probes/ — the ShaderCache pattern). After a bake, the bake
     // outputs (final response table, meta bits, visibility moments) are read
     // back on the same list (RecordCacheReadback, before executing) and

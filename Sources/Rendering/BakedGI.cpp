@@ -219,9 +219,13 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     // --- Probes/ disk cache: on a hit (file exists + grid header matches),
     // restore the outputs with plain buffer copies and skip the dispatches
-    // entirely. ---
-    if (TryLoadCache(device, cmdList, model->GetSourcePath()))
-        return true;
+    // entirely. Gated off right now (BakedGI::kProbeCacheEnabled) so the bake
+    // always runs; the load path itself is unchanged. ---
+    if constexpr (kProbeCacheEnabled)
+    {
+        if (TryLoadCache(device, cmdList, model->GetSourcePath()))
+            return true;
+    }
 
     if (!CreateProbeBuffers())
         return false;

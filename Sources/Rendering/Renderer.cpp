@@ -979,15 +979,23 @@ bool Renderer::BakeGIProbes(Model* model, float spacing)
                                     spacing);
     if (ok)
     {
-        if (!m_BakedGI.LoadedFromCache())
-            m_BakedGI.RecordCacheReadback(m_Device.Get(), m_CommandList.Get()); // serialize readback rides the same list
+        // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.
+        // Nothing is serialized, so nothing is written back either.
+        if constexpr (BakedGI::kProbeCacheEnabled)
+        {
+            if (!m_BakedGI.LoadedFromCache())
+                m_BakedGI.RecordCacheReadback(m_Device.Get(), m_CommandList.Get()); // serialize readback rides the same list
+        }
         m_BakedGI.RecordMetaReadback(m_Device.Get(), m_CommandList.Get()); // stats readback (also on cache load)
     }
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
     {
-        if (!m_BakedGI.LoadedFromCache())
-            m_BakedGI.WriteCacheFile(model->GetSourcePath());
+        if constexpr (BakedGI::kProbeCacheEnabled)
+        {
+            if (!m_BakedGI.LoadedFromCache())
+                m_BakedGI.WriteCacheFile(model->GetSourcePath());
+        }
         m_BakedGI.LogBakeStats();
     }
     return ok;

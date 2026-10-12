@@ -175,6 +175,24 @@ struct FrameConstants {
     uint   ddgiMaxRaysPerProbe;     // ray hit buffer stride for each probe
     uint   ddgiDebugView;           // 0 off, 1 irradiance spheres, 2 probe states, 3 depth spheres
     float  ddgiDebugScale;          // irradiance sphere gain
+
+    // Indirect-only scene view (Lighting.hlsl early-out). 1 = the shaded image
+    // is replaced by the indirect-GI term alone: direct sun, local lights,
+    // ReSTIR composition and indirect specular are all skipped, so the bounced
+    // light can be inspected on its own. Sky pixels render black, because the
+    // sky is direct environment light and would mask the signal.
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint   giIndirectOnly;          // 1 = render the indirect contribution only
+    uint   giIndirectOnlySource;    // 0 = full (sky + sun), 1 = sky only, 2 = sun only
+                                    // (honoured only by the baked probe system, which
+                                    //  is the only source carrying a sun/sky split;
+                                    //  DDGI stores one unsplit indirect field)
+    uint   giIndirectOnlyAlbedo;    // 0 = the surface albedo, 1 = all-white albedo.
+                                    // Removes the albedo texture as a variable, so
+                                    // the indirect term can be read as a pure
+                                    // lighting field. The Lambert 1/PI is kept, so
+                                    // the white view stays directly comparable with
+                                    // the normal-albedo one.
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
