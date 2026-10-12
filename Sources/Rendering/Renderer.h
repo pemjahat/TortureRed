@@ -20,6 +20,7 @@
 #include "Transparency.h"
 #include "Sky.h"
 #include "BakedGI.h"
+#include "DDGI.h"
 
 // Forward declarations to avoid circular dependencies
 struct GLTFVertex;
@@ -54,6 +55,15 @@ public:
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }
+
+    // DDGI (indirect method 3) — a runtime octahedral irradiance probe volume.
+    // Exclusive with BakedGI and ReSTIR GI; ddgiMode in FrameConstants
+    // arbitrates. See docs/task023-ddgi-implementation-plan.md.
+    void CreateDDGIPipelines();
+    bool SetupDDGI(class Model* model, float spacing);
+    void RecordDDGIFrame(class Model* model, const FrameConstants& frame, const LightConstants& sun);
+    void DrawDDGIDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
+    DDGI& GetDDGI() { return m_DDGI; }
     void CopyTextureToBackBuffer(const GPUTexture& texture);
     void DrawPathVizLines(const FrameConstants& frame);
 
@@ -276,6 +286,9 @@ private:
 
     // ------- Baked GI probe system -------
     BakedGI m_BakedGI;
+
+    // ------- DDGI probe volume (indirect method 3) -------
+    DDGI m_DDGI;
 
     GPUTexture m_RasterHdrOutputTex;          // Internal-res HDR output for rasterizer TAA
     // ---- NRD/Denoise textures/state: moved to Rendering/Denoise.h/.cpp ----

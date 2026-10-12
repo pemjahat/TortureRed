@@ -31,8 +31,10 @@ StructuredBuffer<LightConstants> g_Lights : register(t0, space2);
 //Texture3D<float4> g_IrCacheTex : register(t1, space3);
 
 // BakedGI.hlsli's SampleBakedGIProbe references FrameCB — include AFTER its
-// declaration above.
+// declaration above. DDGI.hlsli includes BakedGI.hlsli for the shared
+// octahedral mapping and the ray direction set.
 #include "BakedGI.hlsli"
+#include "DDGI.hlsli"
 
 float4 PSMain(PSInput input) : SV_Target {
     float4 albedo = GetTexture2D(FrameCB.albedoIndex).Sample(g_LinearSampler, input.texCoord);
@@ -160,6 +162,15 @@ float4 PSMain(PSInput input) : SV_Target {
     // self-shadow bias, validity-renormalized with a fallback ladder.
     if (bakedGIActive)
         finalColor += albedo.rgb / PI * SampleBakedGIProbe(worldPos.xyz, N, V);
+
+    // DDGI indirect diffuse (indirect method 3) — the runtime octahedral
+    // irradiance atlas. Exclusive with the baked grid above and with ReSTIR GI:
+    // the UI sets exactly one of the three engine flags. The fetch applies the
+    // DDGI self-shadow bias, the backface weight and the Chebyshev bound from
+    // the depth-moment atlas, so the wall/floor leak the trilinear cage shows
+    // is rejected there for this receiver only.
+    if ((FrameCB.ddgiMode != 0) && (FrameCB.ddgiValid != 0))
+        finalColor += albedo.rgb / PI * DDGISampleIrradiance(worldPos.xyz, N, V);
     
     // When TAA is active, output raw HDR — the TAA resolve shader handles
     // exposure and tonemapping. Otherwise, apply them here for direct display.

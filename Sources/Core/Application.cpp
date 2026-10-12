@@ -138,6 +138,26 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDebugScale = 1.0f;
     m_FrameConstants.bakedGILeakDebug = 0;
     m_FrameConstants.bakedGIVisCheck = 1; // step-3 weights on by default (A/B off = plain step-1 fetch)
+    // DDGI defaults: off until the ImGui method selector picks it. The atlas and
+    // the probe buffers do not exist until SetupDDGI runs, so ddgiValid stays 0.
+    m_FrameConstants.ddgiMode = 0;
+    m_FrameConstants.ddgiValid = 0;
+    m_FrameConstants.ddgiIrradianceSRVIndex = 0;
+    m_FrameConstants.ddgiDepthSRVIndex = 0;
+    m_FrameConstants.ddgiProbeStateSRVIndex = 0;
+    m_FrameConstants.ddgiProbeOffsetSRVIndex = 0;
+    m_FrameConstants.ddgiGridMinX = 0.0f;
+    m_FrameConstants.ddgiGridMinY = 0.0f;
+    m_FrameConstants.ddgiGridMinZ = 0.0f;
+    m_FrameConstants.ddgiSpacing = 2.0f;
+    m_FrameConstants.ddgiDimX = 0;
+    m_FrameConstants.ddgiDimY = 0;
+    m_FrameConstants.ddgiDimZ = 0;
+    m_FrameConstants.ddgiProbesPerRow = 0;
+    m_FrameConstants.ddgiNumRaysPerProbe = 0;
+    m_FrameConstants.ddgiMaxRaysPerProbe = 0;
+    m_FrameConstants.ddgiDebugView = 0;
+    m_FrameConstants.ddgiDebugScale = 1.0f;
     m_FrameConstants.enableRestirDI = 0;
     m_FrameConstants.restirDIDebugMode = RESTIR_DI_DEBUG_OFF;
 
@@ -192,6 +212,12 @@ void Application::Initialize()
     m_Renderer.CreateBakedGIPipelines();
     if (m_IndirectGIEnabled && m_IndirectGIMethod == 0)
         m_PendingGIProbeBake = true; // auto-bake the default probe method
+
+    // DDGI probe system : pipelines + grid setup. The grid fits the loaded model
+    // bounds, so the setup runs at the start of the first Render.
+    m_Renderer.CreateDDGIPipelines();
+    if (m_IndirectGIEnabled && m_IndirectGIMethod == 2)
+        m_PendingDDGISetup = true; // auto-fit the grid when DDGI is the default method
 
     // Initialize TAA / Temporal Super-Resolution
     // Output is always 1920x1080 (WINDOW_WIDTH x WINDOW_HEIGHT).
@@ -535,6 +561,37 @@ void Application::Update(float deltaTime)
             m_FrameConstants.enableRestirGI = 0; // exclusive modes
     }
 
+    // DDGI probe system state. The getters and RecordDDGIFrame both derive the
+    // atlas parity from the same serial, so the indices published here always
+    // match the pair that the next DDGI record writes.
+    {
+        DDGI& ddgi = m_Renderer.GetDDGI();
+        m_FrameConstants.ddgiValid                = ddgi.IsValid() ? 1u : 0u;
+        m_FrameConstants.ddgiIrradianceSRVIndex    = ddgi.IsValid() ? ddgi.GetIrradianceSRVIndex() : 0u;
+        m_FrameConstants.ddgiDepthSRVIndex         = ddgi.IsValid() ? ddgi.GetDepthSRVIndex() : 0u;
+        m_FrameConstants.ddgiProbeStateSRVIndex    = ddgi.IsValid() ? ddgi.GetProbeStateSRVIndex() : 0u;
+        m_FrameConstants.ddgiProbeOffsetSRVIndex   = ddgi.IsValid() ? ddgi.GetProbeOffsetSRVIndex() : 0u;
+        m_FrameConstants.ddgiDebugView             = (uint32_t)m_DDGIDebugView;
+        m_FrameConstants.ddgiDebugScale            = m_DDGIDebugScale;
+        const DirectX::XMFLOAT3 gmin = ddgi.GetGridMin();
+        m_FrameConstants.ddgiGridMinX = gmin.x;
+        m_FrameConstants.ddgiGridMinY = gmin.y;
+        m_FrameConstants.ddgiGridMinZ = gmin.z;
+        m_FrameConstants.ddgiSpacing        = ddgi.GetSpacing();
+        m_FrameConstants.ddgiDimX           = ddgi.GetDimX();
+        m_FrameConstants.ddgiDimY           = ddgi.GetDimY();
+        m_FrameConstants.ddgiDimZ           = ddgi.GetDimZ();
+        m_FrameConstants.ddgiProbesPerRow   = ddgi.GetProbesPerRow();
+        m_FrameConstants.ddgiNumRaysPerProbe = DDGI::kRaysPerProbe;
+        m_FrameConstants.ddgiMaxRaysPerProbe = DDGI::kRaysPerProbe;
+        if (m_FrameConstants.ddgiMode != 0)
+        {
+            // Exclusive modes: DDGI replaces the other two indirect sources.
+            m_FrameConstants.bakedGIMode   = 0;
+            m_FrameConstants.enableRestirGI = 0;
+        }
+    }
+
     // Update Light in scene and then sync
     if (!m_Scene.GetLights().empty())
     {
@@ -583,6 +640,15 @@ void Application::Render()
     {
         m_PendingGIProbeBake = false;
         m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
+    }
+
+    // DDGI grid setup — same pattern: a synced command list of its own before
+    // the frame starts recording. Triggered by the scene-load auto-fit or the
+    // "Rebuild DDGI Grid" button.
+    if (m_PendingDDGISetup)
+    {
+        m_PendingDDGISetup = false;
+        m_Renderer.SetupDDGI(&m_Model, m_DDGISpacing);
     }
 
     // Begin frame rendering
@@ -650,6 +716,17 @@ void Application::Render()
         {
             GPU_MARKER(cmdList, L"BakedGI Update");
             m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0]);
+        }
+
+        // DDGI — trace the probe rays and resolve the two atlases. It runs after
+        // the sky bake (a miss samples the cubemap) and the sun-colour replacement
+        // above, so the probe rays see the live sun. The deferred pass consumes
+        // the atlas later in the frame.
+        if (m_FrameConstants.ddgiMode != 0 && m_FrameConstants.ddgiValid != 0
+            && !m_Scene.GetLights().empty())
+        {
+            GPU_MARKER(cmdList, L"DDGI Update");
+            m_Renderer.RecordDDGIFrame(&m_Model, m_FrameConstants, m_Scene.GetLights()[0]);
         }
     }
 
@@ -1126,6 +1203,11 @@ void Application::Render()
         (m_BakedGIDebugView != 0 || m_FrameConstants.bakedGILeakDebug != 0))
         m_Renderer.DrawBakedGIProbeDebug(m_FrameConstants, m_OutputWidth, m_OutputHeight);
 
+    // DDGI debug overlay — same post-composite slot as the probe overlay above.
+    if (!usePathTracingFrame && m_FrameConstants.ddgiMode != 0 &&
+        m_FrameConstants.ddgiValid != 0 && m_DDGIDebugView != 0)
+        m_Renderer.DrawDDGIDebug(m_FrameConstants, m_OutputWidth, m_OutputHeight);
+
     // GPU on-screen debug text/lines — draw on top of the final image, under ImGui
     if (m_DebugScreenText)
     {
@@ -1326,14 +1408,15 @@ void Application::RenderImGui()
         {
             ImGui::Indent();
 
-            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI" };
+            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI", "DDGI" };
             const bool methodChanged = ImGui::Combo("Indirect GI Method", &m_IndirectGIMethod, giMethods, IM_ARRAYSIZE(giMethods));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.");
+                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.\nDDGI: a runtime ray-traced octahedral irradiance probe volume. Re-traces every frame (no bake, no sun gating); sun light enters the probes through frontface hits only, so the probes store indirect light.");
 
-            // Exactly one of the two engine flags is ever set.
+            // Exactly one of the three engine flags is ever set.
             m_FrameConstants.bakedGIMode            = (m_IndirectGIMethod == 0) ? 1u : 0u;
             m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == 1) ? 1u : 0u;
+            m_FrameConstants.ddgiMode      = (m_IndirectGIMethod == 2) ? 1u : 0u;
 
             if (m_IndirectGIMethod == 0)
             {
@@ -1401,6 +1484,51 @@ void Application::RenderImGui()
                         m_PendingGIProbeBake = true;
                 }
             }
+            else if (m_IndirectGIMethod == 2)
+            {
+                ImGui::SliderFloat("Probe Spacing", &m_DDGISpacing, 0.5f, 8.0f, "%.1f m");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Grid spacing used by the next \"Rebuild DDGI Grid\" (auto-grows to fit the probe cap).");
+
+                if (ImGui::Button("Rebuild DDGI Grid"))
+                    m_PendingDDGISetup = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Re-fit the probe grid to the scene bounds and clear the atlas.\n"
+
+                                      "The next frame starts a fresh temporal history.");
+
+                const char* ddgiViews[] = { "Off", "Irradiance", "Probe States", "Depth" };
+                ImGui::SetNextItemWidth(180.f);
+                ImGui::Combo("DDGI Debug View", &m_DDGIDebugView, ddgiViews, IM_ARRAYSIZE(ddgiViews));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Post-composite overlay, depth-tested against the GBuffer.\n"
+                                      "Irradiance: one sphere per probe — each point samples the atlas at its own\n"
+                                      "normal, so the directional structure of the field is visible.\n"
+                                      "Probe States: sphere per probe; magenta marks an inactive (relocated out) probe.\n"
+                                      "Depth: sphere per probe, shaded by the mean hit distance.");
+
+                if (m_DDGIDebugView != 0)
+                {
+                    ImGui::SliderFloat("Debug Gain", &m_DDGIDebugScale, 0.1f, 10.0f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Gain on the debug spheres. The irradiance view removes the stored gamma\n"
+                                          "and divides by 2*PI before this gain is applied.");
+                }
+
+                const DDGI& ddgi = m_Renderer.GetDDGI();
+                if (ddgi.IsValid())
+                    ImGui::Text("Grid %ux%ux%u @ %.2fm  (%u probes, %u rays)",
+                                ddgi.GetDimX(), ddgi.GetDimY(), ddgi.GetDimZ(), ddgi.GetSpacing(),
+                                ddgi.GetProbeCount(), (uint32_t)DDGI::kRaysPerProbe);
+                else
+                {
+                    ImGui::TextDisabled("No grid yet");
+                    // DDGI just became active without a grid — fit one now
+                    // (parity with the probe-method auto-bake above).
+                    if ((methodChanged || !wasGIEnabled) && !m_PendingDDGISetup)
+                        m_PendingDDGISetup = true;
+                }
+            }
             else
             {
                 ImGui::TextDisabled("SHaRC + reservoir debug: see sections below");
@@ -1412,6 +1540,7 @@ void Application::RenderImGui()
         {
             m_FrameConstants.bakedGIMode            = 0u;
             m_FrameConstants.enableRestirGI = 0u;
+            m_FrameConstants.ddgiMode      = 0u;
         }
 
         bool enableRestirDI = (m_FrameConstants.enableRestirDI != 0);

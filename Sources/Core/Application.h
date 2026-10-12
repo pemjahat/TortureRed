@@ -54,8 +54,12 @@ private:
     int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays
     float m_BakedGIDebugScale   = 1.0f;  // Lit-ball gain (DC-normalized shading multiplier)
     bool  m_BakedGIVisCheck     = true;  // A/B: step-3 fetch weights (bias + backface + Chebyshev) vs plain step-1 trilinear
+    float m_DDGISpacing         = 2.0f;  // DDGI probe grid spacing (m) — used at the next rebuild
+    bool  m_PendingDDGISetup    = false; // DDGI grid setup request (auto-set after scene load / Rebuild button)
+    int   m_DDGIDebugView       = 0;     // DDGI debug overlay: 0 off, 1 irradiance, 2 probe states, 3 depth
+    float m_DDGIDebugScale      = 1.0f;  // DDGI debug gain
     bool  m_IndirectGIEnabled   = true;  // Indirect GI master switch (raster path)
-    int   m_IndirectGIMethod    = 0;     // Indirect GI method: 0 = Probe (Baked), 1 = ReSTIR GI
+    int   m_IndirectGIMethod    = 0;     // Indirect GI method: 0 = Probe (Baked), 1 = ReSTIR GI, 2 = DDGI
     float m_Exposure = -14.0f;
     SDL_Window* m_Window;
 

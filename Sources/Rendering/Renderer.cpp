@@ -659,10 +659,12 @@ void Renderer::CreateRootSignature()
     rootParameters[11].InitAsConstants(static_cast<UINT>(kParam11MaxA / 4), 1, 0); // b1: max of all shared-slot params (see note above)
     // Root param 12 (b2) is shared the same way: IrCacheBindlessIndices, MeshletDebugParams
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
-    // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams.
+    // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
+    // DDGIParams (30 DWORDs — the largest consumer of this slot).
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
         std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
-        std::max(sizeof(BakedGIUpdateParams), sizeof(BakedGIVisParams)))));
+        std::max(sizeof(BakedGIUpdateParams), std::max(sizeof(BakedGIVisParams),
+        sizeof(DDGIParams))))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
@@ -1064,6 +1066,85 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
         cmdList->SetPipelineState(pso);
         cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
     }
+}
+
+// =============================================================================
+// DDGI probe volume (indirect method 3) — exclusive indirect source
+// =============================================================================
+
+void Renderer::CreateDDGIPipelines()
+{
+    m_DDGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
+}
+
+bool Renderer::SetupDDGI(Model* model, float spacing)
+{
+    if (!m_RayTracingSupported || !model)
+        return false;
+
+    // Reset for setup recording (the BakeGIProbes pattern). The caller invokes
+    // this on a synced GPU, so releasing and recreating the DDGI resources
+    // inside RecordSetup is safe.
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    const bool ok = m_DDGI.RecordSetup(m_Device.Get(), m_CommandList.Get(), m_RootSignature.Get(),
+                                        model, spacing, m_FrameCB.gpuAddress);
+    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
+    return ok;
+}
+
+void Renderer::RecordDDGIFrame(Model* model, const FrameConstants& frame, const LightConstants& sun)
+{
+    if (!m_DDGI.IsValid() || frame.ddgiValid == 0 || !model)
+        return;
+
+    // sun.direction stores the direction the light TRAVELS; the trace pass
+    // evaluates the sun at each hit with a TO-SUN direction.
+    const DirectX::XMFLOAT3 sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
+
+    m_DDGI.RecordFrame(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
+                        m_AccelStructure.GetTLASGPUAddress(),
+                        model->GetMaterialBufferAddress(),
+                        model->GetDrawNodeBufferAddress(),
+                        model->GetGlobalIndexBufferAddress(),
+                        model->GetGlobalVertexBufferAddress(),
+                        m_Sky.GetSunIrradiance(), sunToDir);
+}
+
+void Renderer::DrawDDGIDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight)
+{
+    if (!m_DDGI.IsValid() || frame.ddgiDebugView == 0)
+        return;
+
+    auto* cmdList = m_CommandList.Get();
+    GPU_MARKER(cmdList, L"DDGI Probe Debug");
+
+    // Post-composite LDR overlay at output resolution. Occlusion is a manual
+    // reverse-Z compare in the pixel shader (the internal-res GBuffer DSV
+    // cannot be bound at output resolution under TAAU), so bind the depth as
+    // an SRV instead — the BakedGI debug overlay does the same.
+    GBuffer& gbuffer = m_GBufferPass.GetGBuffer();
+    GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = GetCurrentBackBufferRTV();
+    cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    D3D12_VIEWPORT viewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(outputWidth), static_cast<float>(outputHeight));
+    D3D12_RECT scissor = CD3DX12_RECT(0, 0, outputWidth, outputHeight);
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
+    cmdList->SetGraphicsRootConstantBufferView(0, m_FrameCB.gpuAddress);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D12PipelineState* pso = m_DDGI.GetDebugPSO();
+    if (!pso)
+        return;
+
+    // One UV sphere for each probe: 8 x 8 quads x 6 vertices.
+    cmdList->SetPipelineState(pso);
+    cmdList->DrawInstanced(384, m_DDGI.GetProbeCount(), 0, 0);
 }
 
 void Renderer::ExecuteLightingPass(Model* model, const FrameConstants& frame, bool rasterTaaActive,

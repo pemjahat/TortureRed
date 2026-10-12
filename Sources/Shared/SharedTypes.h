@@ -148,6 +148,33 @@ struct FrameConstants {
     // the receiver's tangent plane.
     uint   bakedGILeakDebug;        // 1 = active (draws over the tonemapped scene)
     uint   bakedGIVisCheck;         // 1 = step-3 weighted fetch (bias + backface + Chebyshev), 0 = plain step-1 trilinear (A/B)
+
+    // DDGI probe system. 
+    // a runtime octahedral irradiance atlas, re-traced every frame. EXCLUSIVE
+    // with bakedGIMode and enableRestirGI; the UI arbitrates the three.
+    //
+    // The atlas indices below point at the CURRENT frame's targets, so the
+    // deferred fetch reads the atlas the resolves wrote this frame. The
+    // renderer transitions both atlases to a pixel-read state at the end of
+    // the DDGI record.
+    uint   ddgiMode;                // 1 = DDGI is the indirect source
+    uint   ddgiValid;               // 1 = the atlas and the probe buffers are live
+    uint   ddgiIrradianceSRVIndex;  // Texture2D<float4> irradiance atlas (tone-curved, gamma 5)
+    uint   ddgiDepthSRVIndex;       // Texture2D<float2> depth-moment atlas (M1, M2)
+    uint   ddgiProbeStateSRVIndex;  // StructuredBuffer<uint> 0 = active, 1 = inactive
+    uint   ddgiProbeOffsetSRVIndex; // StructuredBuffer<float4> relocation offsets (xyz)
+    float  ddgiGridMinX;            // grid AABB min (world)
+    float  ddgiGridMinY;
+    float  ddgiGridMinZ;
+    float  ddgiSpacing;             // probe spacing (world units)
+    uint   ddgiDimX;                // grid dims (probes per axis)
+    uint   ddgiDimY;
+    uint   ddgiDimZ;
+    uint   ddgiProbesPerRow;        // atlas row length in probe tiles (linear packing)
+    uint   ddgiNumRaysPerProbe;     // rays cast for each probe (32 stable + rotating)
+    uint   ddgiMaxRaysPerProbe;     // ray hit buffer stride for each probe
+    uint   ddgiDebugView;           // 0 off, 1 irradiance spheres, 2 probe states, 3 depth spheres
+    float  ddgiDebugScale;          // irradiance sphere gain
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -191,6 +218,68 @@ struct BakedGIVisParams {
     uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
     uint  metaUAVIdx;       // RW output: per-probe validity bits (DDGI classification
                             // + old-criteria diagnostic bit — see BakedGI.hlsli)
+};
+
+// -----------------------------------------------------------------------------
+// DDGI — root constants (compute slot 12 / b2) for
+// the trace dispatch and the three resolve dispatches. Every field is a 4-byte
+// scalar, so the C++ and the HLSL layouts agree with no padding.
+//
+// One block serves all four entry points; each entry point reads the fields it
+// needs and ignores the rest. The bindless heap indices therefore change role
+// between passes — see the note on each field.
+//
+// REQUIRES in shader scope: nothing. The shaders read the volume geometry from
+// this block, not from FrameConstants, so the trace and the resolves stay
+// independent of the consumer's fetch state.
+// -----------------------------------------------------------------------------
+struct DDGIParams {
+    // Random rotation applied to the ROTATING ray subset (index >= 32). The 32
+    // stable rays are unrotated so probe-state classification cannot flicker.
+    float randomVectorX, randomVectorY, randomVectorZ;
+    float randomAngle;
+    // Temporal blend of the new sample into the atlas history. The value is the
+    // HISTORY weight, so 0.98 keeps 98% of the previous frame. Frame 0 sends 0,
+    // which makes the new sample replace the cleared history exactly.
+    float historyBlendWeight;
+    // Live sun — trace pass only. A frontface hit evaluates the sun at the hit
+    // with a shadow ray (the BakedGI retrace-sun discipline), so the probe
+    // stores indirect light only and the receiver's direct sun stays with the
+    // runtime-exact path.
+    float sunIrradianceX, sunIrradianceY, sunIrradianceZ; // perpendicular irradiance (RGB)
+    float sunDirX, sunDirY, sunDirZ;                      // TO-SUN unit direction
+    // Probe grid. The atlases pack the FLATTENED probe index (see
+    // DDGI.hlsli), and the row length follows from probeCount alone.
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;         // probes per axis
+    uint  numRaysPerProbe;          // rays cast for each probe
+    uint  maxRaysPerProbe;          // ray hit buffer stride for each probe
+    // Bindless heap indices. A resource that one pass reads and another pass
+    // writes needs TWO indices: CreateStructuredBuffer / CreateTexture allocate
+    // a separate descriptor for the SRV role and for the UAV role, and a
+    // descriptor can only serve the role it was created for. (BakedGI splits
+    // metaUAVIdx / metaSRVIdx the same way.)
+    //   rayHitUAVIdx            trace: RWStructuredBuffer write
+    //   rayHitSRVIdx            irradiance / depth resolve: read
+    //   irradianceHistorySRVIdx trace feedback + irradiance resolve history: read
+    //   irradianceTargetUAVIdx  irradiance resolve: RWTexture2D write
+    //   depthHistorySRVIdx      depth resolve history: read
+    //   depthTargetUAVIdx       depth resolve: RWTexture2D write
+    //   probeOffsetSRVIdx       trace: read
+    //   probeOffsetUAVIdx       probe-state resolve: RWStructuredBuffer write
+    //   probeStateSRVIdx        trace + irradiance / depth resolve: read
+    //   probeStateUAVIdx        probe-state resolve: RWStructuredBuffer write
+    uint  rayHitUAVIdx;
+    uint  rayHitSRVIdx;
+    uint  irradianceHistorySRVIdx;
+    uint  irradianceTargetUAVIdx;
+    uint  depthHistorySRVIdx;
+    uint  depthTargetUAVIdx;
+    uint  probeOffsetSRVIdx;
+    uint  probeOffsetUAVIdx;
+    uint  probeStateSRVIdx;
+    uint  probeStateUAVIdx;
 };
 
 struct BindlessIndices {
