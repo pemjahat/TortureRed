@@ -52,6 +52,13 @@ public:
     // ReSTIR GI (bakedGIMode in FrameConstants arbitrates).
     void CreateBakedGIPipelines();
     bool BakeGIProbes(class Model* model, float spacing);
+    // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
+    // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
+    // sunToDir is required. Pass the to-sun direction to name the sun-dominant
+    // direction in the readout. Pass nullptr for a scene with no sun. Do not add
+    // a default value, for the reason in BakedGI.h.
+    bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
+                         const DirectX::XMFLOAT3* sunToDir);
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }

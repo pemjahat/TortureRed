@@ -221,10 +221,18 @@ float BakedGIChebyshev(float2 m, float d)
 //               self-shadow bias (n*0.2 + wo*0.8) * (0.75*D)*B, B = 0.3:
 //               slides the query off the receiver's own surface so the
 //               probe's stored geometry (which includes that surface) does
-//               not occlude the receiver itself.
+//               not occlude the receiver itself. x' drives the trilinear CELL
+//               and the Chebyshev DISTANCE. It does NOT drive the backface
+//               plane — see below.
 //   backface  — saturate(dot(N, dir to probe)): cage members behind the
 //               receiver's tangent plane (through-floor / through-wall)
-//               contribute zero.
+//               contribute zero. Measured from the UNPUSHED receiver: the
+//               tangent plane is a property of the surface. Taking it from x'
+//               deletes every member inside the bias of the surface, which on
+//               Sponza (0.0601 m wall-to-layer gap, 0.225 m bias) is the
+//               whole adjacent layer — the one holding ~94% of the trilinear
+//               weight — and renormalises the receiver onto the layer 1 m
+//               behind it, through the wall. Measured r/g 3.16 vs 1.04.
 //   chebyshev — one-sided bound from the probe's baked octahedral depth
 //               moments along the probe->receiver direction: geometry
 //               stored between the probe and the receiver rejects the probe.
@@ -257,7 +265,9 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
     const bool visOn = (FrameCB.bakedGIVisCheck != 0u);
 
     // Unified self-shadow bias (DDGI 2021, B = 0.3). The biased point also
-    // drives the trilinear cell lookup — up to ~0.23*D of cage drift, by design.
+    // drives the trilinear cell lookup — up to ~0.23*D of cage drift, by
+    // design — but it does NOT drive the backface plane below, which is
+    // measured from the unpushed receiver. Do not merge the two again.
     float3 xq = visOn
         ? worldPos + (N * 0.2f + V * 0.8f) * (0.75f * spacing * 0.3f)
         : worldPos; // A/B off: unbiased cage — exactly the step-1 fetch
@@ -291,7 +301,8 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         if (!visOn)
             continue; // A/B off: plain step-1 fetch — wBF/wFull stay 0 -> tier 0
 
-        float3 toProbe = gridMin + float3(base + off) * spacing - xq;
+        float3 p       = gridMin + float3(base + off) * spacing;
+        float3 toProbe = p - xq;
         float  dist    = length(toProbe);
         if (dist < 1e-4f)
         {
@@ -301,8 +312,19 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
             continue;
         }
 
-        float3 dir  = toProbe / dist;
-        float  back = saturate(dot(N, dir));
+        float3 dir = toProbe / dist;
+
+        // Backface origin: the UNPUSHED receiver. The question this weight
+        // answers is "is this cage member in front of the surface", and the
+        // surface is at worldPos; xq only exists to keep the Chebyshev
+        // distance off the cliff. Taken from xq, the test deleted the whole
+        // adjacent probe layer on any surface closer than the bias to it, and
+        // the renormalisation handed the receiver the light behind that
+        // surface. Measured on Sponza: the adjacent probe held 90.2% of the
+        // fetch weight with an unbiased read and 0% with this one.
+        float3 toSurf = p - worldPos;
+        float  dSurf  = length(toSurf);
+        float  back   = (dSurf < 1e-4f) ? 1.0f : saturate(dot(N, toSurf / dSurf));
         wBF[k] = w * back;
         if (back > 0.0f)
         {

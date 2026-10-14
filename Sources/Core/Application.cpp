@@ -136,6 +136,31 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDebugView = 0;
     m_FrameConstants.bakedGIResponseSRVIndex = 0;
     m_FrameConstants.bakedGIDebugScale = 1.0f;
+    // Ray-debug constants: the SRV index starts at the "no buffer" sentinel
+    // (0xFFFFFFFF), not 0, because 0 is a legal descriptor index. The Ray Fan
+    // shader early-outs on the sentinel. Application::FillRayDebugConstants
+    // overwrites these every frame.
+    m_FrameConstants.bakedGIRayDebugSRVIndex = 0xFFFFFFFFu;
+    m_FrameConstants.bakedGIRayDebugProbe = 0;
+    m_FrameConstants.bakedGIRayDebugChannel = 1;   // albedo
+    m_FrameConstants.bakedGIRayDebugLength = 8.0f; // probe spacings
+    m_FrameConstants.bakedGIRayDebugDir = 0;       // sun-dominant direction, set each frame
+    // Cage Trace (view 9) ray override: the "no override" sentinel, so the first
+    // frame traces the shader's own argmax. Application::FillRayDebugConstants
+    // overwrites it every frame from m_BakedGIRayDebugRay.
+    m_FrameConstants.bakedGIRayDebugRay = BakedGI::kNoRayPick;
+    // Efb-contribution balls (view 8): the sentinel until a bake folds the
+    // terms, exactly like the ray-debug buffer above. Application::Update
+    // overwrites both every frame from the live BakedGI getters.
+    m_FrameConstants.bakedGIEfbIterSRVIndex = 0xFFFFFFFFu;
+    m_FrameConstants.bakedGIEfbBaseSRVIndex = 0xFFFFFFFFu;
+    // Sun-fold weights (the Ray Fan's DeltaDirections channel). Zero until the
+    // first Application::Update fills them, so that channel enabled on frame 0
+    // paints all 16 boxes black rather than reading whatever the allocation held.
+    // The weight lives in .x: the field is a float4 array so that the CPU and the
+    // GPU agree on its stride (SharedTypes.h).
+    for (uint32_t sunDir = 0; sunDir < BakedGI::kDirections; ++sunDir)
+        m_FrameConstants.bakedGISunWeight[sunDir].x = 0.0f;
     m_FrameConstants.bakedGILeakDebug = 0;
     m_FrameConstants.bakedGIVisCheck = 1; // step-3 weights on by default (A/B off = plain step-1 fetch)
     // DDGI defaults: off until the ImGui method selector picks it. The atlas and
@@ -553,6 +578,17 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
+        FillEfbBallConstants();
+        // Ray Fan (view 7) constants. The pending dump runs later, in
+        // Application::Render, so the dump-derived values here (SRV index, probe,
+        // validity) belong to the PREVIOUS dump. Application::Render calls the
+        // same fill again right after the dump, so the frame that binds the
+        // constants for the fan carries the new buffer, probe and verdict.
+        FillRayDebugConstants();
+        // The sun fold for THIS frame: the Ray Fan's direction and the Sun
+        // Directions view's 16 weights. Refilled every frame because the sun
+        // moves; a dump does not change it, so Render does not call it again.
+        FillSunFoldConstants();
         m_FrameConstants.bakedGIVisCheck           = m_BakedGIVisCheck ? 1u : 0u;
         // Indirect-only view state. Lives here because the BakedGI block always
         // runs, whatever indirect method is selected, and the view covers DDGI
@@ -642,6 +678,126 @@ void Application::Update(float deltaTime)
     m_Renderer.SetOccludedRectDebug(m_OccludedRectDebug || (m_DebugScreenText && m_DebugDepthLabels));
 }
 
+// Fills the dump-derived ray-debug FrameConstants (SRV index, probe, channel,
+// length cap, validity verdict) from the live BakedGI getters. One helper, two
+// call sites (Update and, again, Render right after the dump), so the two fills
+// cannot drift.
+//
+// The SRV index and the probe come from the DUMP, not from the UI fields. The
+// dump clamps its index into the grid and stores it, so the fan and the text
+// describe one probe even when the UI field changed after a dump.
+//
+// 0xFFFFFFFF is the "no ray-debug buffer" sentinel. 0 is a legal descriptor
+// index, so it cannot mean "none": the fan shader early-outs on the sentinel.
+//
+// It deliberately does NOT touch bakedGIRayDebugDir: that is the sun fold's
+// own output, FillSunFoldConstants owns it, and the post-dump call must not
+// re-derive a pick the dump did not change.
+void Application::FillRayDebugConstants()
+{
+    BakedGI& gi = m_Renderer.GetBakedGI();
+    const bool hasRayDebugBuffer = gi.HasRayDebugBuffer();
+    m_FrameConstants.bakedGIRayDebugSRVIndex = hasRayDebugBuffer ? gi.GetRayDebugSRVIndex() : 0xFFFFFFFFu;
+    m_FrameConstants.bakedGIRayDebugProbe    = hasRayDebugBuffer ? gi.GetRayDebugProbe() : 0u;
+    m_FrameConstants.bakedGIRayDebugChannel  = (uint32_t)m_BakedGIRayDebugChannel;
+    m_FrameConstants.bakedGIRayDebugLength   = m_BakedGIRayDebugLength;
+    // Cached by the last dump (BakedGI::GetRayDebugKnownInvalid). True is the
+    // no-claim value, so an unknown verdict does not dim the fan.
+    m_FrameConstants.bakedGIRayDebugValid    = gi.GetRayDebugKnownInvalid() ? 0u : 1u;
+    // Cage Trace ray override. The member's -1 for "shader's own argmax" is
+    // published as the sentinel, and anything outside the ray range is treated as
+    // "no override" rather than clamped: a clamp would silently trace a DIFFERENT
+    // ray than the one the panel names. The shader applies the same test, so the
+    // text and the picture agree even if this fill never ran.
+    m_FrameConstants.bakedGIRayDebugRay =
+        (m_BakedGIRayDebugRay < 0 || (uint32_t)m_BakedGIRayDebugRay >= BakedGI::kGatherRays)
+            ? BakedGI::kNoRayPick
+            : (uint32_t)m_BakedGIRayDebugRay;
+}
+
+// Publishes the two per-bake-term response balls the "Efb Contribution" view
+// (bakedGIDebugView == 8) differences — the SELECTED term's and term 1's, the
+// no-feedback baseline (see SharedTypes.h) — plus the two transport TABLES and
+// the fold direction the view's single-direction mode needs. All of it comes from
+// the bake, and every index is BakedGI::kEfbBallNoSRV until one has run, which is
+// how the view knows it has nothing to read.
+//
+// Clamped here as well as at the combo, so a stale member after a
+// kBakeIterations change can never index a ball that does not exist.
+//
+// ONE helper, TWO call sites — Update, and Render right after "Rebuild GI
+// Probes". The second is what keeps a fresh bake's indices off the frame the
+// bake ran on: Update uploaded the constants BEFORE the bake, so without it the
+// view would spend one frame on the sentinel. Same reason, and the same shape,
+// as FillRayDebugConstants' post-dump call.
+void Application::FillEfbBallConstants()
+{
+    static_assert(BakedGI::kBakeIterations == 3,
+                  "the \"Iteration\" combo has exactly three entries; "
+                  "add one when the bake term count changes");
+
+    const BakedGI& gi = m_Renderer.GetBakedGI();
+    const int sel = (m_BakedGIEfbIter < 0) ? 0
+                  : (m_BakedGIEfbIter >= (int)BakedGI::kBakeIterations
+                        ? (int)BakedGI::kBakeIterations - 1 : m_BakedGIEfbIter);
+    m_FrameConstants.bakedGIEfbIterSRVIndex = gi.GetEfbBallSRVIndex((uint32_t)sel);
+    m_FrameConstants.bakedGIEfbBaseSRVIndex = gi.GetEfbBallSRVIndex(0u);
+
+    // Single-direction mode. The shader's test is "is this a direction index?", so
+    // the member's -1 for "All" needs no translation: it publishes as 0xFFFFFFFF
+    // and the view falls through to the folded ball. Clamped like the term above,
+    // so a stale value can only ever land on a direction that exists.
+    if (m_BakedGIEfbDir < -1 || m_BakedGIEfbDir >= (int)BakedGI::kDirections)
+        m_BakedGIEfbDir = -1;
+    m_FrameConstants.bakedGIEfbTermSelSRVIndex  = gi.GetEfbTermSRVIndex((uint32_t)sel);
+    m_FrameConstants.bakedGIEfbTermBaseSRVIndex = gi.GetEfbTermSRVIndex(0u);
+    m_FrameConstants.bakedGIEfbDir = (uint32_t)m_BakedGIEfbDir;
+}
+
+// Publishes the sun fold for this frame, in both forms its two consumers need:
+//   - the 16 normalised cos^8 weights, for the Ray Fan's DeltaDirections
+//     channel (FrameConstants::bakedGISunWeight), and
+//   - the argmax and its weight, for the Ray Fan's direction
+//     (FrameConstants::bakedGIRayDebugDir) and for the UI text.
+//
+// Both come from ONE call to BakedGI::SunFoldWeights, the only owner of the
+// kernel, the normalisation and the argmax. That is what keeps the white box,
+// the fan's drawn direction and the printed weight ranking in agreement.
+//
+// The transport table is indexed by TO-SUN directions and the light stores the
+// direction it TRAVELS, so negate it — the same negation the update pass and the
+// pending-dump block use. With no sun every weight is 0 and the argmax is 0
+// with weight 0, which is the "no sun" report, not a winner.
+void Application::FillSunFoldConstants()
+{
+    float w[BakedGI::kDirections];
+    float wMax = 0.0f;
+    uint32_t dominant = 0u;
+
+    const auto& lights = m_Scene.GetLights();
+    if (!lights.empty())
+    {
+        const DirectX::XMFLOAT3 sunToDir = { -lights[0].direction.x,
+                                             -lights[0].direction.y,
+                                             -lights[0].direction.z };
+        dominant = BakedGI::SunFoldWeights(sunToDir, w, &wMax);
+    }
+    else
+    {
+        // No light at all: no fold, so every weight is 0. SunFoldWeights zeroes
+        // its array itself, but this path never calls it, so clear here too.
+        for (uint32_t j = 0; j < BakedGI::kDirections; ++j)
+            w[j] = 0.0f;
+    }
+
+    for (uint32_t j = 0; j < BakedGI::kDirections; ++j)
+        m_FrameConstants.bakedGISunWeight[j].x = w[j]; // .x: the field is a float4 array
+
+    m_BakedGISunDir    = (int)dominant;
+    m_BakedGISunWeight = wMax; // 0.0 when there is no sun
+    m_FrameConstants.bakedGIRayDebugDir = dominant;
+}
+
 void Application::Render()
 {
     // Baked GI probe bake — runs on a synced command list of
@@ -651,6 +807,11 @@ void Application::Render()
     {
         m_PendingGIProbeBake = false;
         m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
+        // The bake replaced the per-term capture, so the SRV indices the "Efb
+        // Contribution" view reads changed. Update published the PRE-bake ones,
+        // and Render uploads the constants again after these pending blocks, so
+        // refresh them here or that upload would carry the sentinel for one frame.
+        FillEfbBallConstants();
     }
 
     // DDGI grid setup — same pattern: a synced command list of its own before
@@ -660,6 +821,34 @@ void Application::Render()
     {
         m_PendingDDGISetup = false;
         m_Renderer.SetupDDGI(&m_Model, m_DDGISpacing);
+    }
+
+    // Ray-debug dump — same synced-list pattern, debug only. Runs after the
+    // bake so it reads a complete table. Logs the direction ranking, the ray
+    // ranking, the self-check, and the CPU kernel-weight mirror.
+    if (m_PendingRayDebug)
+    {
+        m_PendingRayDebug = false;
+        // The table is indexed by TO-SUN directions; the light stores the travel
+        // direction. Same negation the update pass uses. Both the ray-debug
+        // readout and the kernel-weight log use this one direction.
+        DirectX::XMFLOAT3 sunToDir = {};
+        const bool haveSunToDir = !m_Scene.GetLights().empty();
+        if (haveSunToDir)
+        {
+            const LightConstants& sun = m_Scene.GetLights()[0];
+            sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
+        }
+        m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
+                                   haveSunToDir ? &sunToDir : nullptr);
+        if (haveSunToDir)
+            BakedGI::LogKernelWeights(sunToDir);
+        // The dump replaced the ray-debug buffer and cached a new verdict. Fill
+        // the dump-derived constants again so the fan reads the new buffer, probe
+        // and verdict on THIS frame. Without this the fan would read the pre-dump
+        // SRV index, whose first value is 0 — a descriptor that is not the
+        // ray-debug buffer.
+        FillRayDebugConstants();
     }
 
     // Begin frame rendering
@@ -1479,8 +1668,152 @@ void Application::RenderImGui()
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
+                // Ray-debug tool: re-trace ONE probe and print the evidence.
+                ImGui::InputInt("Ray Debug Probe", &m_RayDebugProbeIndex);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Probe index for the ray-debug dump.\n"
+                                      "Index = x + y*dimX + z*dimX*dimY, clamped to the grid.\n"
+                                      "Do not derive this by hand: read it off \"Probes Near Camera\"\n"
+                                      "below, whose rows set this field and dump in one click.\n"
+                                      "The dump re-traces the 64 gather rays of this probe and prints:\n"
+                                      "the 16-direction ranking, the 64-ray ranking, and a self-check\n"
+                                      "that compares the re-trace with the stored table.\n"
+                                      "The Ray Fan debug view draws the same probe, so the picture and\n"
+                                      "the text always describe one probe.");
+                if (ImGui::Button("Dump Probe Ray Debug"))
+                    m_PendingRayDebug = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Re-traces one probe's gather rays and prints the readout to the console.\n"
+                                      "Debug only, on demand — no per-frame cost. See the log section\n"
+                                      "[BakedGI RayDebug].");
+
+                // --- Probes near the camera ---
+                // The answer to "which probe index am I standing in?". The index
+                // is read off a list instead of being derived from coordinates,
+                // and a row click selects AND dumps in one step.
+                ImGui::Separator();
+                ImGui::Text("Probes Near Camera");
+                {
+                    BakedGI& nearGI = m_Renderer.GetBakedGI();
+                    const DirectX::XMFLOAT3 camPos = m_Camera.GetPosition();
+                    const float spacing = nearGI.GetSpacing();
+
+                    // A re-bake changes the grid under the list. The revision is a
+                    // counter, so this test cannot miss a rebuild the way a float
+                    // compare can.
+                    if (nearGI.GetGridRevision() != m_NearestProbesGridRev)
+                    {
+                        m_NearestProbesValid   = false;
+                        m_NearestProbesGridRev = nearGI.GetGridRevision();
+                    }
+
+                    ImGui::SetNextItemWidth(60.f);
+                    if (ImGui::InputInt("Rows", &m_NearestProbeRows, 1, 4))
+                        m_NearestProbesValid = false; // the row count changed the query
+                    if (m_NearestProbeRows < 1)  m_NearestProbeRows = 1;
+                    if (m_NearestProbeRows > 32) m_NearestProbeRows = 32;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How many of the nearest VALID probes to list.\n"
+                                          "Only probes whose bake meta bit says valid are candidates,\n"
+                                          "so an invalid (dead) probe is never offered.");
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("Refresh"))
+                        m_NearestProbesValid = false;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Recompute now. The list also recomputes itself, but only\n"
+                                          "after the camera has moved about one probe spacing: a list\n"
+                                          "that re-sorts every frame cannot be clicked.");
+
+                    // Rebuild only when stale. The trigger is the plain distance
+                    // the camera has moved since the build, not a per-frame
+                    // recompute, so the rows hold still long enough to click.
+                    const float rebuildDist = (spacing > 0.0f) ? spacing : 1.0f;
+                    const float mdx = camPos.x - m_NearestProbesOrigin.x;
+                    const float mdy = camPos.y - m_NearestProbesOrigin.y;
+                    const float mdz = camPos.z - m_NearestProbesOrigin.z;
+                    const float moved2 = mdx * mdx + mdy * mdy + mdz * mdz;
+                    if (!m_NearestProbesValid || moved2 > rebuildDist * rebuildDist)
+                    {
+                        nearGI.FindNearestValidProbes(camPos, (uint32_t)m_NearestProbeRows, m_NearestProbes);
+                        m_NearestProbesOrigin = camPos;
+                        m_NearestProbesValid  = true;
+                    }
+
+                    if (m_NearestProbes.empty())
+                    {
+                        ImGui::TextDisabled("No valid probe to list: the bake has not run, or no "
+                                            "probe is valid.");
+                    }
+                    else
+                    {
+                        // Stretch sizing, four columns: the panel is often narrow, and a
+                        // six-column fixed table would clip the numbers off the right edge.
+                        // The detail that does not fit (centre position, spacings) moves to
+                        // the per-row tooltip instead of being dropped.
+                        const ImGuiTableFlags nearFlags = ImGuiTableFlags_BordersInnerV |
+                                                          ImGuiTableFlags_RowBg |
+                                                          ImGuiTableFlags_SizingStretchProp;
+                        if (ImGui::BeginTable("##nearestProbes", 4, nearFlags))
+                        {
+                            ImGui::TableSetupColumn("#",       ImGuiTableColumnFlags_WidthFixed, 24.f);
+                            ImGui::TableSetupColumn("Index",   ImGuiTableColumnFlags_WidthFixed, 48.f);
+                            ImGui::TableSetupColumn("Cell (x,y,z)");
+                            ImGui::TableSetupColumn("Dist (m)", ImGuiTableColumnFlags_WidthFixed, 60.f);
+                            ImGui::TableHeadersRow();
+
+                            for (size_t i = 0; i < m_NearestProbes.size(); ++i)
+                            {
+                                const BakedGI::NearestProbe& np = m_NearestProbes[i];
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0);
+                                const std::string rowId = std::to_string(i + 1u);
+                                // The row matching the current dump index reads as selected, so
+                                // the list and the "Ray Debug Probe" field above agree.
+                                const bool isCurrent =
+                                    (np.index == (uint32_t)std::max(0, m_RayDebugProbeIndex));
+                                if (ImGui::Selectable(rowId.c_str(), isCurrent,
+                                                      ImGuiSelectableFlags_SpanAllColumns))
+                                {
+                                    m_RayDebugProbeIndex = (int)np.index;
+                                    m_PendingRayDebug    = true; // pick and dump in one step
+                                }
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Click to set \"Ray Debug Probe\" to %u and dump it now —\n"
+                                                      "the same dump the button above runs, in one step.\n"
+                                                      "Cell (%u,%u,%u), centre (%.2f, %.2f, %.2f) m.\n"
+                                                      "Distance %.2f m = %.2f probe spacings.\n"
+                                                      "Index = x + y*dimX + z*dimX*dimY, the same convention as\n"
+                                                      "the field above and the probe the Ray Fan draws.",
+                                                      np.index, np.cellX, np.cellY, np.cellZ,
+                                                      np.center.x, np.center.y, np.center.z,
+                                                      np.distance,
+                                                      (spacing > 1e-6f) ? np.distance / spacing : 0.0f);
+                                ImGui::TableSetColumnIndex(1);
+                                ImGui::Text("%u", np.index);
+                                ImGui::TableSetColumnIndex(2);
+                                ImGui::Text("%u,%u,%u", np.cellX, np.cellY, np.cellZ);
+                                ImGui::TableSetColumnIndex(3);
+                                ImGui::Text("%.2f", np.distance);
+                            }
+                            ImGui::EndTable();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("The nearest valid probes to the camera, ascending by distance.\n"
+                                              "Only probes the bake meta marks valid are listed.\n"
+                                              "Distances are from the camera position at the last rebuild:\n"
+                                              "fly, then press Refresh (or move a full spacing) to re-sort.");
+                    }
+                }
+                ImGui::Separator();
+
+                // "Sun Directions" was folded into the Ray Fan's DeltaDirections
+                // channel: the same 16 boxes and the same weight ramp, but at the
+                // one cell the fan is already at instead of repeating 16 identical
+                // colours at every probe in the window.
                 const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays",
-                                             "Lit Sky Source", "Lit Sun Source" };
+                                             "Lit Sky Source", "Lit Sun Source", "Ray Fan", "Efb Contribution",
+                                             "Cage Trace" };
                 ImGui::SetNextItemWidth(180.f);
                 ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
                 if (ImGui::IsItemHovered())
@@ -1495,15 +1828,307 @@ void Application::RenderImGui()
                                       "sky = sky bounces + occluded sky direct (V_i-gated), sun = sun bounces only (direct sun never enters probes).\n"
                                       "The three lit views always sum: total = sky + sun.\n"
                                       "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
-                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).");
+                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).\n"
+                                      "Ray Fan: the 64 gather rays of the SUN-DOMINANT direction of ONE probe (the Ray Debug Probe above), as thin boxes.\n"
+                                      "It draws the records of the LAST dump, so press \"Dump Probe Ray Debug\" first and again after a rebuild.\n"
+                                      "Its DeltaDirections channel swaps the geometry: the 16 delta directions of that same probe,\n"
+                                      "grayscale by the weight in the sun fold, white = the direction the fan itself draws. That\n"
+                                      "channel reads no record, so it works before any dump.\n"
+                                      "Efb Contribution: SH ball per probe of the SERIES-FEEDBACK contribution — the selected\n"
+                                      "bake term's response ball minus term 1's (the no-feedback baseline), so it is exactly what\n"
+                                      "the Efb term added, and where. The ball's DC reads as the feedback's share of that term's\n"
+                                      "transport. Term 1 is black by construction: the bake gates feedback off there. Needs a bake\n"
+                                      "from the dispatch path; a Probes/ cache load has no per-term tables and draws nothing.\n"
+                                      "Cage Trace: ONE probe (the Ray Debug Probe above). It derives the chain — the sun-dominant\n"
+                                      "direction, that direction's largest FEEDBACK-DOMINATED ray (a shaded ray whose Efb term\n"
+                                      "beats its NdotD*Vhit term), a line from the probe to that ray's hit, and the 8 trilinear\n"
+                                      "cage probes the bake's feedback gather actually sampled at that hit. GREEN = the largest\n"
+                                      "share of the gather, AMBER = middle, RED = smallest or a member the backface test culled.\n"
+                                      "The dim wireframe is the trilinear cell of the PUSHED read point (hit + n*0.1*spacing);\n"
+                                      "a cage face swapped for another cell means the push crossed that box. X-RAY: this view\n"
+                                      "skips the depth test. Needs a bake AND a dump — press \"Dump Probe Ray Debug\" first.");
 
-                if (m_BakedGIDebugView == 2 || m_BakedGIDebugView == 5 || m_BakedGIDebugView == 6)
+                if (m_BakedGIDebugView == 2 || m_BakedGIDebugView == 5 || m_BakedGIDebugView == 6 ||
+                    m_BakedGIDebugView == 8)
                 {
                     ImGui::SliderFloat("Lit Gain", &m_BakedGIDebugScale, 0.1f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Gain on the DC-normalized ball shading: the probe's mean irradiance\n"
                                           "maps to ~1.0 x gain, band structure swings around it. Same normalization\n"
-                                          "reference (the total buffer's DC) for the Irradiance / Sky / Sun views.");
+                                          "reference (the total buffer's DC) for the Irradiance / Sky / Sun views.\n"
+                                          "The Efb Contribution view normalizes by the SELECTED term's own ball DC\n"
+                                          "instead, so its DC reads as the feedback's share of that term's transport.");
+                }
+
+                if (m_BakedGIDebugView == 8)
+                {
+                    // Efb Contribution: which bake term to show. The bake runs
+                    // exactly kBakeIterations terms and the capture stores a ball
+                    // for each, so the combo's entry count is that constant — the
+                    // static_assert in the constants block above is what keeps the
+                    // two in step. The label is 1-based and the member 0-based:
+                    // the field is called "iteration" in the bake (0 = no
+                    // feedback, BakedGI_Bake.hlsl:236), and a "Term 0" label on a
+                    // view that cannot draw anything would invite the reader to
+                    // think it is broken.
+                    const char* efbIters[] = { "1", "2", "3" };
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::Combo("Iteration", &m_BakedGIEfbIter, efbIters, IM_ARRAYSIZE(efbIters));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Which bake term's series-feedback (Efb) contribution to show.\n"
+                                          "The bake runs 3 terms (%u = kBakeIterations, 3 series bounces).\n"
+                                          "1: feedback is GATED OFF, so this view is black by construction —\n"
+                                          "   a check that the gate works, not an empty view.\n"
+                                          "2: the first feedback term, and 3: the last (the converged one).\n"
+                                          "The baseline is always term 1, so the ball is what the feedback added.",
+                                          (unsigned)BakedGI::kBakeIterations);
+
+                    // Which delta direction the ball covers. Entry 0 is "All" and
+                    // maps to the member's -1, so the combo index IS the direction
+                    // + 1 — one binding, no translation table. The list is
+                    // BakedGI::kDirections + 1 entries; the fill helper clamps, so
+                    // a mismatch can never publish a direction that does not exist.
+                    const char* efbDirs[] = { "All (16-dir fold)", "0", "1", "2", "3", "4", "5", "6", "7",
+                                              "8", "9", "10", "11", "12", "13", "14", "15" };
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::Combo("Direction", &m_BakedGIEfbDir, efbDirs, IM_ARRAYSIZE(efbDirs));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Which delta direction the ball covers.\n"
+                                          "\"All\" folds all 16 into the ball — the summed view.\n"
+                                          "A single direction reads that ONE direction of the two transport\n"
+                                          "tables instead, so its own colour is not averaged against 15\n"
+                                          "others. Use it when a per-direction tint (a red bounce, say) is\n"
+                                          "swamped by the fold: red on 1 of 16 directions stays invisible.\n"
+                                          "Both modes normalise by the selected term's own DC (that\n"
+                                          "direction's DC in single mode), so the ball keeps one reading:\n"
+                                          "DC(diff)/DC(term) cannot exceed 1, the contribution being\n"
+                                          "non-negative and additive.");
+
+                    const BakedGI& efbGI = m_Renderer.GetBakedGI();
+                    if (!efbGI.HasEfbBalls())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                        ImGui::TextWrapped("No per-term capture. Press \"Rebuild GI Probes\": the response "
+                                           "balls are folded on the bake's dispatch path, and a Probes/ cache "
+                                           "load restores only the final table.");
+                        ImGui::PopStyleColor();
+                    }
+                    else if (m_BakedGIEfbIter == 0)
+                    {
+                        ImGui::TextDisabled("Term 1 has no feedback term (the bake gates it off), so every ball "
+                                            "here is black by construction.");
+                    }
+                }
+
+                if (m_BakedGIDebugView == 7)
+                {
+                    // Ray Fan: same probe as the text dump, so the two reads agree.
+                    // The last entry must stay last and must stay at index
+                    // BakedGI::kRayFanChannelDeltaDirs: the renderer reads the
+                    // channel to choose the instance count, and the shader reads
+                    // it to choose the geometry. Three places, one value.
+                    const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Radiance L", "Efb",
+                                                     "Hit Distance", "Direct vs Efb", "DeltaDirections" };
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::Combo("Ray Fan Channel", &m_BakedGIRayDebugChannel, rayFanChannels, IM_ARRAYSIZE(rayFanChannels));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Colour of each box. Channels 0..7 colour the 64 gather rays of the\n"
+                                          "sun-dominant direction (see below).\n"
+                                          "Status: grey = sky miss, blue = backface reject, orange = shaded.\n"
+                                          "NdotD: cos(hit normal, the sun-dominant direction) drawn straight — 1 is white, 0 is black.\n"
+                                          "Albedo / Vhit / Radiance L / Efb: the record fields.\n"
+                                          "Hit Distance: log ramp, sky miss near black.\n"
+                                          "Direct vs Efb: green = NdotD*Vhit dominates, red = Efb dominates.\n"
+                                          "DeltaDirections: swaps the geometry — the 16 delta directions of the\n"
+                                          "same probe, one box each, drawn with the NdotD channel's straight\n"
+                                          "grayscale on the sun-fold weight divided by the largest of the 16.\n"
+                                          "WHITE is 1.0 = the most weighted direction, which is the direction\n"
+                                          "the fan draws. It reads no record, so it needs no dump.");
+
+                    const bool deltaDirs =
+                        ((uint32_t)m_BakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs);
+
+                    // Which direction the fan draws, and how strongly the sun
+                    // fold weights it. A weight of 0 means no sun (the sun is
+                    // below the horizon, or the direction is zero), so direction
+                    // 0 is then not a real winner — say so, do not imply a pick.
+                    if (m_BakedGISunWeight > 0.0f)
+                        ImGui::Text("Ray Fan: sun-dominant direction %d of 16, share %.3f of the fold",
+                                    m_BakedGISunDir, m_BakedGISunWeight);
+                    else
+                        ImGui::Text("Ray Fan: no sun. Direction %d of 16, weight 0.000",
+                                    m_BakedGISunDir);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("The sun fold weights each of the 16 delta directions by\n"
+                                          "pow(max(0, dot(direction, toSun)), 8), then normalises.\n"
+                                          "The fan draws the 64 gather rays of the largest one, so every\n"
+                                          "drawn ray is one the sun actually weights. The dump's kernel\n"
+                                          "weight line marks the same direction with an arrow.");
+
+                    // Both widgets below describe the RECORD channels only.
+                    // DeltaDirections reads no record and draws a fixed-length box,
+                    // so neither applies. Offering a ray-length slider that changes
+                    // nothing is the kind of dead control this panel has been
+                    // shedding, and it would also suggest the 16 boxes are rays.
+                    if (!deltaDirs)
+                    {
+                        // The dump zeroes an invalid probe's stored table, so the
+                        // channels that read that table are degenerate. The fan dims
+                        // them (BAKED_GI_RAYFAN_INVALID_DIM). Say which ones here too.
+                        const BakedGI& fanGI = m_Renderer.GetBakedGI();
+                        if (fanGI.HasRayDebugBuffer() && fanGI.GetRayDebugKnownInvalid())
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                            ImGui::TextWrapped("Warning: the dumped probe is INVALID. Channels 4 "
+                                               "(Radiance L), 5 (Efb) and 7 (Direct vs Efb) are "
+                                               "degenerate and drawn dimmed.");
+                            ImGui::PopStyleColor();
+                        }
+
+                        ImGui::SliderFloat("Ray Length (spacings)", &m_BakedGIRayDebugLength, 0.5f, 32.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Ray length cap in probe spacings. A hit shorter than the cap draws\n"
+                                              "at its true distance; a longer hit and a sky miss draw at the cap.\n"
+                                              "The leak the fan is chasing spans about 6 spacings.");
+                    }
+                }
+
+                if (m_BakedGIDebugView == 9)
+                {
+                    // Cage Trace. The panel says WHICH probe and WHICH ray will be
+                    // traced. The probe is the dump's; the ray is either the
+                    // shader's own argmax or a row of the pool below.
+                    //
+                    // The pool is the dump's OWN readback (BakedGI::GetRayCandidates),
+                    // so its numbers are the trace's numbers rather than a second
+                    // computation, and it is kept for all 16 directions — hence the
+                    // lookup by the CURRENT sun-dominant direction: a sun move after
+                    // the dump re-lists instead of describing another direction.
+                    const BakedGI& cageGI = m_Renderer.GetBakedGI();
+                    if (!cageGI.IsValid())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                        ImGui::TextWrapped("No bake. The trace reads the baked depth moments for the "
+                                           "Chebyshev weight — press \"Rebuild GI Probes\".");
+                        ImGui::PopStyleColor();
+                    }
+                    else if (!cageGI.HasRayDebugBuffer())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                        ImGui::TextWrapped("No ray dump. Press \"Dump Probe Ray Debug\" above — the trace "
+                                           "follows the dumped probe's records.");
+                        ImGui::PopStyleColor();
+                    }
+                    else
+                    {
+                        ImGui::Text("Cage Trace: probe %u, sun-dominant direction %d of 16",
+                                    cageGI.GetRayDebugProbe(), m_BakedGISunDir);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("The probe is the dumped one. The direction is the sun fold's argmax,\n"
+                                              "the same pick the Ray Fan draws. What the trace draws:\n"
+                                              "  the probe -> hit segment, then the 8 trilinear cage probes the\n"
+                                              "  bake's feedback gather actually sampled at that hit, then the\n"
+                                              "  trilinear CELL of the pushed read point (hit + n*0.1*spacing) as a\n"
+                                              "  dim wireframe — a cage face falling into another cell means that\n"
+                                              "  push crossed the box.\n"
+                                              "GREEN = the largest share of the 8-probe gather, AMBER = the middle,\n"
+                                              "RED = the smallest or a backface-culled member (share 0). The ramp\n"
+                                              "is scaled by the LARGEST share, so a collapsed cage still reads —\n"
+                                              "the absolute level is the dump's readout, not this colour.\n"
+                                              "X-RAY: the view skips the depth test.");
+
+                        if (cageGI.GetRayCandidateDirs() == 0u)
+                        {
+                            // A ray-debug buffer exists, so a dump happened. The pool is
+                            // filled by that dump's readout, so an empty one means the
+                            // readout did not complete — not that the rule found nothing.
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                            ImGui::TextWrapped("No picker pool: the last dump's readout did not complete "
+                                               "(the readback could not be mapped), so the ray cannot be "
+                                               "steered and the trace is the shader's own pick.");
+                            ImGui::PopStyleColor();
+                        }
+                        else
+                        {
+                            const uint32_t dir =
+                                (m_BakedGISunDir >= 0 && m_BakedGISunDir < (int)BakedGI::kDirections)
+                                    ? (uint32_t)m_BakedGISunDir : 0u;
+                            const auto& pool = cageGI.GetRayCandidates(dir);
+
+                            const BakedGI::RayCandidate* sel = nullptr;
+                            for (const BakedGI::RayCandidate& c : pool)
+                            {
+                                if ((int)c.ray == m_BakedGIRayDebugRay) { sel = &c; break; }
+                            }
+
+                            char preview[192];
+                            if (m_BakedGIRayDebugRay < 0)
+                                snprintf(preview, sizeof(preview),
+                                         "Auto - largest carried Efb (%zu in pool)", pool.size());
+                            else if (sel)
+                                snprintf(preview, sizeof(preview), "ray %u  efb %.3f  direct %.3f",
+                                         sel->ray, sel->efbLum, sel->directLum);
+                            else
+                                snprintf(preview, sizeof(preview), "ray %d  (not in this pool)",
+                                         m_BakedGIRayDebugRay);
+
+                            ImGui::SetNextItemWidth(300.f);
+                            if (ImGui::BeginCombo("Cage Ray", preview))
+                            {
+                                if (ImGui::Selectable("Auto - largest carried Efb", m_BakedGIRayDebugRay < 0))
+                                    m_BakedGIRayDebugRay = -1;
+                                for (const BakedGI::RayCandidate& c : pool)
+                                {
+                                    char label[192];
+                                    snprintf(label, sizeof(label),
+                                             "ray %2u   score %.3f   efb %.3f   direct %.3f   alb %.3f",
+                                             c.ray, c.score, c.efbLum, c.directLum, c.albedoLum);
+                                    if (ImGui::Selectable(label, (int)c.ray == m_BakedGIRayDebugRay))
+                                        m_BakedGIRayDebugRay = (int)c.ray;
+                                }
+                                if (pool.empty())
+                                    ImGui::TextDisabled("(no feedback-dominated ray here)");
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Which gather ray of direction %u to trace. The pool is every SHADED\n"
+                                                  "ray of that direction whose Efb term beats its NdotD*Vhit term —\n"
+                                                  "\"direct < Efb\" — enumerated from the dump's own readback, so these\n"
+                                                  "numbers ARE the record's.\n"
+                                                  "score = luminance(diffAlbedo * Efb), the trace's ranking key: the\n"
+                                                  "bake's band-0 coefficient is one constant times the ray's radiance,\n"
+                                                  "and diffAlbedo stays inside the product because a ray onto a dark or\n"
+                                                  "blue surface carries a large Efb and contributes almost nothing.\n"
+                                                  "Auto leaves the pick to the shader's argmax, which is this list's\n"
+                                                  "largest score. The rows are in RAY order; the printed step-2c table\n"
+                                                  "is the score order of the same list.\n"
+                                                  "The pick survives a dump on purpose (it keeps tracking one ray index\n"
+                                                  "while the probe changes). A pick that is not in the current\n"
+                                                  "direction's pool is drawn MAGENTA.", dir);
+                        }
+
+                        if (m_BakedGIRayDebugRay >= 0)
+                        {
+                            const auto& check = cageGI.GetRayCandidates(
+                                (m_BakedGISunDir >= 0 && m_BakedGISunDir < (int)BakedGI::kDirections)
+                                    ? (uint32_t)m_BakedGISunDir : 0u);
+                            bool inPool = false;
+                            for (const BakedGI::RayCandidate& c : check)
+                                if ((int)c.ray == m_BakedGIRayDebugRay) { inPool = true; break; }
+
+                            if (!inPool)
+                            {
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.87f, 0.18f, 0.87f, 1.0f));
+                                ImGui::TextWrapped("ray %d is not in this direction's pool. The shader still "
+                                                   "traces it when it is a shaded ray — the probe->hit segment "
+                                                   "is then MAGENTA, marking that its hit is not an Efb "
+                                                   "borrow. A sky miss or a backface reject draws nothing.",
+                                                   m_BakedGIRayDebugRay);
+                                ImGui::PopStyleColor();
+                            }
+                        }
+                    }
                 }
 
                 bool leakMap = (m_FrameConstants.bakedGILeakDebug != 0);

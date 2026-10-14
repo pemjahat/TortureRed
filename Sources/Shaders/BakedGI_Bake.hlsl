@@ -62,6 +62,15 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
     // the hit's own recorded surface does not sit exactly on the Chebyshev
     // cliff (d == mu with near-zero variance flips per texel — the failure
     // the runtime fetch's self-shadow bias exists to avoid, in miniature).
+    //
+    // xq drives the trilinear CELL and the Chebyshev DISTANCE only. It must
+    // NOT move the backface plane: that plane is the hit surface's own tangent
+    // plane, a property of the surface, not of the pushed read point. It did
+    // move it, and a 0.0601 m wall-to-probe-layer gap against a 0.1 m push
+    // culled the entire adjacent layer — the probes holding ~94% of the
+    // trilinear weight — in favour of the layer 1 m behind it, whose radiance
+    // then arrived through the wall. Measured on Sponza: the wall read
+    // r/g 3.16 through the far layer and r/g 1.04 through its own.
     float3 xq = worldPos + n * (0.1f * spacing);
 
     float3 t = clamp((xq - gridMin) / spacing,
@@ -79,11 +88,12 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
         float w = w3.x * w3.y * w3.z;
 
         uint flat = BakedGIFlatten(base + off, dims);
+        float3 p  = gridMin + float3(base + off) * spacing;
 
         // No meta read here: invalid probes carry zeroed responses AND
         // near-geometry moments that Chebyshev self-rejects — and skipping
         // meta avoids reading a buffer this same dispatch is writing.
-        float3 toProbe = gridMin + float3(base + off) * spacing - xq;
+        float3 toProbe = p - xq;
         float  dist    = length(toProbe);
         float  wFull;
         if (dist < 1e-4f)
@@ -93,7 +103,11 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
         else
         {
             float3 dirv = toProbe / dist;
-            float  back = saturate(dot(n, dirv));
+
+            // Backface from the HIT, not from the pushed point (see above).
+            float3 toHit = p - worldPos;
+            float  dHit  = length(toHit);
+            float  back  = (dHit < 1e-4f) ? 1.0f : saturate(dot(n, toHit / dHit));
             if (back <= 0.0f)
                 continue; // behind the hit surface's tangent plane
             float2 m = BakedGISampleMoments(vis, flat, -dirv); // probe -> read point

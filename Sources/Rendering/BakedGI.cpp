@@ -10,6 +10,9 @@
 #include <filesystem>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
+#include <utility>
+#include <vector>
 
 // =============================================================================
 // Probes/ disk cache — the ShaderCache pattern applied to the bake outputs.
@@ -155,6 +158,36 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
             device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_DebugPSO));
         }
     }
+
+    // --- Ray-debug re-trace (compute, on demand — debug only) ---
+    {
+        std::cout << "[BakedGI] compiling ray-debug shader..." << std::endl;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+        computeDesc.pRootSignature = rootSignature;
+        auto cs = GraphicsHelper::CompileShader("Shaders/BakedGI_RayDebug.hlsl", "main", "cs_6_6");
+        std::cout << "[BakedGI] ray-debug shader: " << (cs.empty() ? "FAILED" : "ok") << std::endl;
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_RayDebugPSO));
+        }
+    }
+
+    // --- Per-term response-ball fold (compute, debug view 8) ---
+    // Rides the bake list, so it is compiled here with the bake: a shader error
+    // then shows up in this log line rather than only in a missing view.
+    {
+        std::cout << "[BakedGI] compiling iteration-fold shader..." << std::endl;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+        computeDesc.pRootSignature = rootSignature;
+        auto cs = GraphicsHelper::CompileShader("Shaders/BakedGI_IterFold.hlsl", "main", "cs_6_6");
+        std::cout << "[BakedGI] iteration-fold shader: " << (cs.empty() ? "FAILED" : "ok") << std::endl;
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_IterFoldPSO));
+        }
+    }
 }
 
 bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
@@ -176,6 +209,10 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     m_CacheUpload.Reset();
     m_CacheReadback.Reset();
     m_LoadedFromCache = false;
+    // The per-term capture is produced by the dispatch path below. Cleared here
+    // so the cache-load early return cannot leave a previous bake's balls
+    // standing as if they described this grid.
+    m_EfbBallsValid   = false;
 
     // --- Grid from the scene bounds (auto-grow spacing to fit the caps) ---
     const DirectX::BoundingBox bounds = model->GetSceneWorldBounds();
@@ -207,6 +244,12 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     m_GridMin = mn;
     m_Valid = false; // set at the end; the buffers below are the source of truth
 
+    // The grid identity is now (re)established. Bumped here rather than on the
+    // success path so the cache-load early return below is covered too: both
+    // paths end up with this grid. A bump on a bake that later fails only costs
+    // the UI one rebuild.
+    ++m_GridRevision;
+
     if (m_Spacing != spacing)
         std::cout << "[BakedGI] Spacing auto-grew " << spacing << "m -> " << m_Spacing
                   << "m to fit the probe cap (" << kMaxProbeCount << " probes / "
@@ -229,6 +272,13 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     if (!CreateProbeBuffers())
         return false;
+
+    // Debug-only capture buffers (term snapshots + folded balls). A failure here
+    // does not void the bake: the capture is a debug aid, so record without it
+    // and let the "Efb Contribution" view report that it has nothing to read.
+    const bool iterCapture = CreateIterationBuffers();
+    if (!iterCapture)
+        std::cerr << "[BakedGI] iteration capture unavailable — the Efb Contribution view will be empty" << std::endl;
 
     // --- Record the series-expansion iterations (ping-pong) ---
     cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
@@ -298,14 +348,62 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
         cmdList->ResourceBarrier(1, &barrier);
 
+        // Snapshot this term's table for the debug view. The LAST term needs no
+        // copy: it is m_Response[m_FinalResponse] once the loop ends, so
+        // snapshot[kBakeIterations - 1] is deliberately absent.
+        if (iterCapture && it + 1u < kBakeIterations)
+            SnapshotResponseTable(cmdList, cur, it);
+
         m_FinalResponse = cur;
         cur = 1 - cur;
     }
 
     m_Valid = true;
+
+    // --- Per-term response balls (debug view 8: the Efb contribution) ---
+    // One fold for each term. The view differences ball[k] and ball[0]; by the
+    // bake's own identity R^k = R^0 + G(Efb_k) that difference IS the series-
+    // feedback contribution of term k. Uses the bindings already on this list
+    // (descriptor heap, root signature, b0, b2) — only the PSO and the b2 block
+    // change, the same way the visibility bake rides the transport dispatches.
+    if (iterCapture && m_IterFoldPSO)
+    {
+        // The snapshots were written by CopyBufferRegion, so they are COPY_DEST;
+        // the fold reads them as an SRV. The final table needs no transition here
+        // because the transport iterations already read their tables the same
+        // way (a UAV barrier, no state change).
+        for (uint32_t s = 0; s < kIterSnapshotCount; ++s)
+            m_ResponseIter[s].Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        for (uint32_t t = 0; t < kBakeIterations; ++t)
+        {
+            BakedGIIterFoldParams fp = {};
+            fp.probeCount  = m_ProbeCount;
+            fp.tableSRVIdx = (t + 1u < kBakeIterations)
+                           ? (uint32_t)m_ResponseIter[t].srvIndex
+                           : (uint32_t)m_Response[m_FinalResponse].srvIndex;
+            fp.ballUAVIdx  = (uint32_t)m_EfbBall[t].uavIndex;
+
+            cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIIterFoldParams) / 4, &fp, 0);
+            cmdList->SetPipelineState(m_IterFoldPSO.Get());
+            cmdList->Dispatch((m_ProbeCount + 63u) / 64u, 1, 1);
+        }
+
+        // One barrier for all three outputs: the debug view transitions them for
+        // read anyway, but the bake must not end with unordered writes.
+        D3D12_RESOURCE_BARRIER ballBarriers[kBakeIterations];
+        for (uint32_t t = 0; t < kBakeIterations; ++t)
+            ballBarriers[t] = CD3DX12_RESOURCE_BARRIER::UAV(m_EfbBall[t].resource.Get());
+        cmdList->ResourceBarrier(kBakeIterations, ballBarriers);
+
+        m_EfbBallsValid = true;
+    }
+
     std::cout << "[BakedGI] Bake recorded (" << m_ProbeCount << " probes, "
-              << "visibility: 16x16 depth moments x" << kVisStride << " texels/probe)"
-              << std::endl;
+              << "visibility: 16x16 depth moments x" << kVisStride << " texels/probe, "
+              << (m_EfbBallsValid ? "per-term response balls captured"
+                                  : "no per-term capture")
+              << ")" << std::endl;
     return true;
 }
 
@@ -377,6 +475,747 @@ void BakedGI::LogBakeStats() const
 }
 
 // -----------------------------------------------------------------------------
+// Ray-debug tool — debug only, on demand
+// -----------------------------------------------------------------------------
+
+namespace
+{
+
+// The shader's luminance weights (CommonTracing.hlsl Luminance). Kept local so
+// this debug path shares no symbol with the renderer.
+inline float RayDebugLuminance(float r, float g, float b)
+{
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+// One float4 of the response table for a direction and an SH term.
+inline const float* RayDebugTable(const uint8_t* base, uint32_t dir, uint32_t lm)
+{
+    return reinterpret_cast<const float*>(base) + ((size_t)dir * 10u + lm) * 4u;
+}
+
+} // namespace
+
+bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                             ID3D12RootSignature* rootSignature,
+                             D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
+                             D3D12_GPU_VIRTUAL_ADDRESS tlasAddress,
+                             D3D12_GPU_VIRTUAL_ADDRESS materialsAddress,
+                             D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
+                             D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
+                             D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
+                             uint32_t probeIndex)
+{
+    if (!device || !cmdList || !rootSignature || !m_RayDebugPSO)
+        return false;
+    if (!m_Valid || m_ProbeCount == 0)
+        return false;
+
+    // Clamp into the grid: a stale UI value must not read outside the table.
+    if (probeIndex >= m_ProbeCount)
+        probeIndex = m_ProbeCount - 1u;
+    m_RayDebugProbe = probeIndex;
+    // Clear the verdict for this dump. A skipped assignment then yields no
+    // verdict, whatever the index value is. The pairing check alone cannot catch
+    // a re-bake that flips the verdict at the SAME index.
+    m_RayDebugValidProbe = UINT32_MAX;
+
+    // The Cage Trace pool describes the OLD records. Clear it here, not in the
+    // readout: a dump whose readout never runs — no readback, or a failed Map —
+    // must leave an EMPTY pool, so the UI cannot offer a ray index that belongs
+    // to a buffer which no longer exists.
+    for (auto& list : m_RayCandidates)
+        list.clear();
+    m_RayCandidateDirs = 0u;
+
+    // The caller synced the GPU before recording, so releasing the previous
+    // readback here is safe (the meta-readback pattern). m_RayDebugBuf is NOT
+    // cleared: CreateStructuredBuffer reuses the existing srvIndex/uavIndex, so
+    // a repeated dump does not leak descriptor slots (the heap has no free).
+    m_RayDebugReadback.Reset();
+
+    // --- GPU output: records, then the re-accumulated table (one UAV). ---
+    // CreateStructuredBuffer allocates the SRV and UAV role descriptors, so the
+    // shader reads the UAV through ResourceDescriptorHeap[m_RayDebugBuf.uavIndex].
+    if (!CreateStructuredBuffer(m_RayDebugBuf, 16u, kRayDebugBufF4s,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                "SB_BakedGIRayDebug"))
+    {
+        std::cerr << "[BakedGI] Failed to create the ray-debug buffer" << std::endl;
+        return false;
+    }
+
+    // --- CPU readback: debug buffer | stored table. ---
+    {
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(kRayDebugReadbackBytes);
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&m_RayDebugReadback))))
+        {
+            std::cerr << "[BakedGI] Failed to create the ray-debug readback buffer" << std::endl;
+            return false;
+        }
+        GraphicsHelper::SetObjectName(m_RayDebugReadback.Get(), "RB_BakedGIRayDebug");
+    }
+
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetComputeRootSignature(rootSignature);
+    cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
+    cmdList->SetComputeRootShaderResourceView(1, materialsAddress);
+    cmdList->SetComputeRootShaderResourceView(2, drawNodesAddress);
+    cmdList->SetComputeRootShaderResourceView(3, tlasAddress);
+    cmdList->SetComputeRootShaderResourceView(4, indicesAddress);
+    cmdList->SetComputeRootShaderResourceView(5, verticesAddress);
+
+    BakedGIRayDebugParams p = {};
+    p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
+    p.spacing  = m_Spacing;
+    p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
+    p.probeIndex         = m_RayDebugProbe;
+    p.rayRecUAVIdx       = (uint32_t)m_RayDebugBuf.uavIndex;
+    // The final iteration (kBakeIterations - 1 = 2) reads the previous
+    // iteration's table for its feedback term. With the 3-iteration odd
+    // ping-pong, that buffer is 1 - m_FinalResponse.
+    p.responsePrevSRVIdx = (uint32_t)m_Response[1 - m_FinalResponse].srvIndex;
+    p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
+
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIRayDebugParams) / 4, &p, 0);
+    cmdList->SetPipelineState(m_RayDebugPSO.Get());
+    cmdList->Dispatch(1, kDirections, 1);
+
+    {
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_RayDebugBuf.resource.Get());
+        cmdList->ResourceBarrier(1, &barrier);
+    }
+
+    // Debug buffer -> readback.
+    {
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
+            m_RayDebugBuf.resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmdList->ResourceBarrier(1, &b);
+        cmdList->CopyBufferRegion(m_RayDebugReadback.Get(), 0, m_RayDebugBuf.resource.Get(), 0, kRayDebugBufBytes);
+        D3D12_RESOURCE_BARRIER b2 = CD3DX12_RESOURCE_BARRIER::Transition(
+            m_RayDebugBuf.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdList->ResourceBarrier(1, &b2);
+    }
+
+    // The probe's slice of the stored table -> readback, for the self-check.
+    {
+        ID3D12Resource* stored = m_Response[m_FinalResponse].resource.Get();
+        const UINT64 srcOffset = (UINT64)m_RayDebugProbe * kDirections * kResponseFloat4s * 16u;
+        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
+            stored, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmdList->ResourceBarrier(1, &b);
+        cmdList->CopyBufferRegion(m_RayDebugReadback.Get(), kRayDebugStoredOff, stored,
+                                  srcOffset, kRayDebugTableBytes);
+        D3D12_RESOURCE_BARRIER b2 = CD3DX12_RESOURCE_BARRIER::Transition(
+            stored, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdList->ResourceBarrier(1, &b2);
+    }
+
+    return true;
+}
+
+void BakedGI::TransitionRayDebugForRead(ID3D12GraphicsCommandList* cmdList)
+{
+    if (!cmdList || !m_RayDebugBuf.resource)
+        return;
+    // PLACEMENT. The transition lives at the read site, not inside
+    // RecordRayDebug. Two reasons:
+    //   1. CreateStructuredBuffer calls CreateCommittedResource on every dump,
+    //      so each dump builds a NEW resource with state = UNORDERED_ACCESS.
+    //      The tracker therefore cannot go stale between dumps, and the next
+    //      dispatch needs no repair.
+    //   2. The read site owns its own read barrier, the way
+    //      Renderer::DrawBakedGIProbeDebug transitions the GBuffer depth.
+    // GPUResource::Transition guards on a state change, so drawing the fan on
+    // two frames in a row emits one barrier, not two.
+    m_RayDebugBuf.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+BakedGI::ProbeMetaStatus BakedGI::ReadProbeMeta(uint32_t probe, uint32_t& metaWord) const
+{
+    // The meta readback is created by RecordMetaReadback on both the cold-bake
+    // and the cache-load path, and it persists for the life of the bake. Map it
+    // again here: the buffer is CPU-readable and nothing writes it after the
+    // bake, so a second Map is safe (LogBakeStats uses the same buffer).
+    if (!m_MetaReadback)
+        return ProbeMetaStatus::NoReadback;
+    if (probe >= m_ProbeCount)
+        return ProbeMetaStatus::ProbeOutOfRange;
+
+    uint32_t* meta = nullptr;
+    if (FAILED(m_MetaReadback->Map(0, nullptr, reinterpret_cast<void**>(&meta))))
+        return ProbeMetaStatus::MapFailed;
+    metaWord = meta[probe];
+    m_MetaReadback->Unmap(0, nullptr);
+    return ProbeMetaStatus::Ok;
+}
+
+const std::vector<BakedGI::RayCandidate>& BakedGI::GetRayCandidates(uint32_t dir) const
+{
+    // An out-of-range direction gets an empty list rather than a clamp: the
+    // caller asked about a direction that does not exist, and answering with
+    // direction 0's pool would put another direction's rays under that label.
+    static const std::vector<RayCandidate> kEmpty;
+    return (dir < kDirections) ? m_RayCandidates[dir] : kEmpty;
+}
+
+void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
+{
+    if (!m_RayDebugReadback)
+    {
+        std::cerr << "[BakedGI RayDebug] no readback buffer — run RecordRayDebug first" << std::endl;
+        return;
+    }
+
+    uint8_t* mapped = nullptr;
+    if (FAILED(m_RayDebugReadback->Map(0, nullptr, reinterpret_cast<void**>(&mapped))))
+    {
+        std::cerr << "[BakedGI RayDebug] failed to map the readback buffer" << std::endl;
+        return;
+    }
+
+    const uint8_t* tableReacc  = mapped + (UINT64)kRayDebugTableBase * 16u;
+    const uint8_t* tableStored = mapped + kRayDebugStoredOff;
+
+    std::cout << "[BakedGI RayDebug] probe " << m_RayDebugProbe
+              << " (grid " << m_DimX << "x" << m_DimY << "x" << m_DimZ
+              << " @ " << m_Spacing << "m)" << std::endl;
+
+    // --- Validity gate. Read the probe's meta bit up front, so the reader has
+    // the verdict before step 1. Do NOT infer invalidity from an all-zero
+    // stored row. That inference is false in two cases:
+    //   1. METAL. A fully metallic surface has diffAlbedo = albedo *
+    //      (1 - metallic) = 0 (BakedGI_Bake.hlsl:241), so a probe in a closed
+    //      cavity lined with metal stores an exactly zero row. That probe is
+    //      still VALID under the DDGI backface rule. The re-trace reproduces
+    //      the zero, so the row prints MATCH. A row test would stamp "invalid"
+    //      on a MATCH, which is a false claim.
+    //   2. SEALED VOLUME. A valid probe inside a sealed volume stores zero too,
+    //      because a sky miss contributes nothing under a delta environment.
+    // The bake zeroes EVERY stored value of a genuinely invalid probe
+    // (BakedGI_Bake.hlsl:147-155), so for such a probe the step-1 ranking
+    // describes nothing and the step-3 comparison must fail. That failure is
+    // not a drifted RNG stream, and a debug tool must not invent a defect. ---
+    uint32_t   probeMeta  = 0;
+    const ProbeMetaStatus metaStatus = ReadProbeMeta(m_RayDebugProbe, probeMeta);
+    const bool haveMeta   = (metaStatus == ProbeMetaStatus::Ok);
+    const bool probeValid = haveMeta && (probeMeta & 0x1u) != 0u; // BAKED_GI_META_VALID
+    // Complete the verdict for the Ray Fan through GetRayDebugKnownInvalid.
+    // RecordRayDebug already cleared the pairing for this dump, so writing both
+    // here is what makes the verdict exist. An early return above (no buffer, or
+    // a failed map on the debug readback) leaves the pairing cleared, and the
+    // getter then reports no verdict.
+    // Unknown validity means "do NOT dim". Dimming states that the probe is
+    // degenerate, and that claim needs the meta bit. The text readout assumes a
+    // valid probe for this same case, so the picture agrees with the text.
+    m_RayDebugValid      = !haveMeta || probeValid;
+    m_RayDebugValidProbe = m_RayDebugProbe;
+    if (haveMeta && !probeValid)
+    {
+        std::cout << "[BakedGI RayDebug] WARNING — probe " << m_RayDebugProbe
+                  << " is INVALID under the DDGI criteria (meta 0x" << std::hex << probeMeta
+                  << std::dec << ")." << std::endl;
+        std::cout << "    The bake zeroed this probe's stored table, so step 1 and step 3 describe"
+                  << " nothing." << std::endl;
+        std::cout << "    The re-traced rays themselves are live, so step 2 and the Ray Fan view"
+                  << " still show the geometry." << std::endl;
+    }
+
+    // --- Step 1: rank the 16 directions by the luminance of the DC term. ---
+    std::vector<std::pair<float, uint32_t>> dirRank;
+    dirRank.reserve(kDirections);
+    for (uint32_t h = 0; h < kDirections; ++h)
+    {
+        const float* dc = RayDebugTable(tableStored, h, 0u);
+        dirRank.emplace_back(RayDebugLuminance(dc[0], dc[1], dc[2]), h);
+    }
+    std::sort(dirRank.begin(), dirRank.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::cout << "[BakedGI RayDebug] step 1 — 16 directions, stored DC luminance (high to low):" << std::endl;
+    for (size_t i = 0; i < dirRank.size(); ++i)
+    {
+        const uint32_t h = dirRank[i].second;
+        const float* v = RayDebugTable(tableStored, h, 9u); // slot 9 = V_i
+        std::cout << "    dir " << (h < 10u ? " " : "") << h
+                  << "  dcLum " << dirRank[i].first
+                  << "  V_i " << v[0] << std::endl;
+    }
+
+    // Name the direction the Ray Fan draws in THIS readout, next to the DC
+    // ranking. The two picks differ on purpose, see the step-2 comment: step 1
+    // ranks by baked DC luminance, and the fan follows the sun fold's argmax.
+    // The kernel-weight log names the same direction again, as a second check.
+    if (sunToDir)
+    {
+        float sunWeight = 0.0f;
+        const uint32_t sunDominant = DominantSunDirection(*sunToDir, &sunWeight);
+        if (sunWeight > 0.0f)
+        {
+            std::cout << "    the Ray Fan draws direction " << sunDominant
+                      << " (sun weight " << sunWeight << ")" << std::endl;
+        }
+        else
+        {
+            // Weight 0 means no sun, or a sun below the horizon. The fan then
+            // falls back to direction 0, so do not present it as a winner.
+            std::cout << "    the Ray Fan has no sun. It falls back to direction "
+                      << sunDominant << "." << std::endl;
+        }
+    }
+
+    // --- Step 2: rank the 64 rays of the highest-DC-luminance direction, step
+    // 1's winner, by the luminance of L (record component 2). ---
+    // This winner is a DC-luminance pick. It is NOT the sun-dominant direction
+    // the Ray Fan draws (BakedGI::DominantSunDirection, the sun fold's argmax).
+    // The two are different picks on purpose; do not join them.
+    const uint32_t dcDir = dirRank.empty() ? 0u : dirRank.front().second;
+    std::vector<std::pair<float, uint32_t>> rayRank;
+    rayRank.reserve(kGatherRays);
+    for (uint32_t r = 0; r < kGatherRays; ++r)
+    {
+        // The record index is in float4 units, so multiply by 4 for the float
+        // offset (the same conversion RayDebugTable applies).
+        const float* rec = reinterpret_cast<const float*>(mapped)
+                         + ((size_t)dcDir * kGatherRays + r) * kRayRecordF4 * 4u;
+        const float* L = rec + 8; // rec2 = (L.rgb, Vhit)
+        rayRank.emplace_back(RayDebugLuminance(L[0], L[1], L[2]), r);
+    }
+    std::sort(rayRank.begin(), rayRank.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::cout << "[BakedGI RayDebug] step 2 — highest-DC-luminance direction " << dcDir
+              << ", 64 rays by L luminance (high to low), top 16:" << std::endl;
+    for (size_t i = 0; i < rayRank.size() && i < 16u; ++i)
+    {
+        const uint32_t r = rayRank[i].second;
+        const float* rec = reinterpret_cast<const float*>(mapped)
+                         + ((size_t)dcDir * kGatherRays + r) * kRayRecordF4 * 4u;
+        const float* gdir = rec + 0;
+        const float* alb  = rec + 4;
+        const float* L    = rec + 8;
+        const float* stat = rec + 12;
+        // rec4 = (hit normal.xyz, instance index), rec5 = (hit world pos.xyz,
+        // primitive index). -1 in w means the ray carried no surface.
+        const float* idn  = rec + 16;
+        const float* idp  = rec + 20;
+        std::cout << "    ray " << (r < 10u ? " " : "") << r
+                  << "  L " << rayRank[i].first
+                  << "  dist " << gdir[3]
+                  << "  NdotD " << alb[3]
+                  << "  Vhit " << L[3]
+                  << "  status " << stat[3]
+                  << "  inst " << (int)idn[3]
+                  << "  prim " << (int)idp[3]
+                  << "  Lrgb(" << L[0] << ", " << L[1] << ", " << L[2] << ")"
+                  << std::endl;
+    }
+
+    // --- Step 2b: the hit-surface census. ---
+    // Group every HIT of the probe's 16 x 64 re-traced rays by the instance it
+    // landed on, and print that group's ray count, mean diffuse albedo, mean hit
+    // position and mean hit normal. This is what rec4/rec5 exist for: a record
+    // used to carry no surface identity, so naming the mesh behind a coloured ray
+    // meant reproducing EvalResponseIndirect offline and inferring the normal from
+    // NdotD. It also makes a tinted surface visible as a NUMBER — the instance
+    // whose mean albedo is red is the one to go looking for.
+    //
+    // The count covers every non-miss ray (status >= 0.5), backface rejects
+    // included: a reject names a real surface too, and it is often the one being
+    // hunted. The albedo mean is valid for a reject as well, because the record
+    // fills rec1 BEFORE the backface test.
+    // CAUTION: rec1 carries diffAlbedo = albedo * (1 - metallic), so a METAL
+    // reads as black here. A black albedo is not a missing surface.
+    struct HitGroup
+    {
+        uint32_t count = 0;
+        float    albedo[3] = { 0.0f, 0.0f, 0.0f };
+        float    pos[3]    = { 0.0f, 0.0f, 0.0f };
+        float    nrm[3]    = { 0.0f, 0.0f, 0.0f };
+    };
+    std::vector<std::pair<uint32_t, HitGroup>> groups; // (instance index, group)
+    for (uint32_t h = 0; h < kDirections; ++h)
+    {
+        for (uint32_t r = 0; r < kGatherRays; ++r)
+        {
+            const float* rec = reinterpret_cast<const float*>(mapped)
+                             + ((size_t)h * kGatherRays + r) * kRayRecordF4 * 4u;
+            if (rec[12 + 3] < 0.5f) // rec3.w = status; 0 = sky miss
+                continue;
+            const float* alb = rec + 4;
+            const float* nrm = rec + 16;
+            const float* pos = rec + 20;
+            const uint32_t inst = (uint32_t)std::max(0.0f, nrm[3]);
+            HitGroup* g = nullptr;
+            for (auto& e : groups)
+            {
+                if (e.first == inst) { g = &e.second; break; }
+            }
+            if (!g)
+            {
+                groups.emplace_back(inst, HitGroup{});
+                g = &groups.back().second;
+            }
+            ++g->count;
+            for (uint32_t c = 0; c < 3u; ++c)
+            {
+                g->albedo[c] += alb[c];
+                g->nrm[c]    += nrm[c];
+                g->pos[c]    += pos[c];
+            }
+        }
+    }
+    std::sort(groups.begin(), groups.end(),
+              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+
+    std::cout << "[BakedGI RayDebug] step 2b — hit surfaces, all " << kDirections
+              << " x " << kGatherRays << " re-traced rays, grouped by instance:" << std::endl;
+    if (groups.empty())
+        std::cout << "    no hit rays — this probe sees sky only" << std::endl;
+    for (size_t i = 0; i < groups.size() && i < 12u; ++i)
+    {
+        const uint32_t inst = groups[i].first;
+        const HitGroup& g   = groups[i].second;
+        const float    inv  = 1.0f / (float)g.count;
+        std::cout << "    inst " << inst
+                  << "  rays " << g.count
+                  << "  albedo(" << g.albedo[0] * inv << ", " << g.albedo[1] * inv
+                                 << ", " << g.albedo[2] * inv << ")"
+                  << "  pos(" << g.pos[0] * inv << ", " << g.pos[1] * inv << ", " << g.pos[2] * inv << ")"
+                  << "  normal(" << g.nrm[0] * inv << ", " << g.nrm[1] * inv << ", " << g.nrm[2] * inv << ")"
+                  << std::endl;
+    }
+    if (groups.size() > 12u)
+        std::cout << "    ... " << (groups.size() - 12u) << " more instance(s)" << std::endl;
+
+    // --- Step 2c: the Cage Trace pool — the CPU side of the ray picker (view
+    // 9). One entry for each shaded ray whose feedback term beats its direct term
+    // at the hit ("direct < Efb"), for EVERY direction. ---
+    //
+    // The view's direction is the sun fold's argmax, so building all 16 is what
+    // stops a sun change after the dump from leaving the combo on another
+    // direction's rays. The cost is 16 x 64 records, read once per dump.
+    //
+    // The score is luminance(diffAlbedo * Efb) — the shader's own key. The bake's
+    // band-0 coefficient is one constant times the ray's radiance (all 64 rays
+    // share the solid angle 4*PI/64), so ranking by carried radiance IS ranking by
+    // contribution to the stored response; diffAlbedo stays INSIDE the product,
+    // because a ray onto a dark or blue surface carries a large Efb and
+    // contributes almost nothing.
+    {
+        for (uint32_t h = 0; h < kDirections; ++h)
+        {
+            m_RayCandidates[h].clear();
+            for (uint32_t r = 0; r < kGatherRays; ++r)
+            {
+                const float* rec = reinterpret_cast<const float*>(mapped)
+                                 + ((size_t)h * kGatherRays + r) * kRayRecordF4 * 4u;
+                // rec3.w = status. The shader's test is |status - 2| <= 0.5.
+                const float status = rec[12 + 3];
+                if (status < 1.5f || status > 2.5f)
+                    continue; // a sky miss or a backface reject carries no L and no Efb
+
+                const float* alb  = rec + 4;  // (diffAlbedo.rgb, NdotD)
+                const float* L    = rec + 8;  // (L.rgb, Vhit)
+                const float* efb  = rec + 12; // (Efb.rgb, status)
+                const float  ndotd = alb[3] * L[3]; // NdotD * Vhit, the direct term's weight
+
+                RayCandidate c;
+                c.ray       = r;
+                c.albedoLum = RayDebugLuminance(alb[0], alb[1], alb[2]);
+                c.directLum = RayDebugLuminance(alb[0] * ndotd, alb[1] * ndotd, alb[2] * ndotd);
+                c.efbLum    = RayDebugLuminance(alb[0] * efb[0], alb[1] * efb[1], alb[2] * efb[2]);
+                c.score     = c.efbLum; // identical on purpose: the key IS the carried feedback
+                if (c.efbLum <= c.directLum)
+                    continue; // the direct delta at the hit wins: this ray is not a borrow
+                m_RayCandidates[h].push_back(c);
+            }
+        }
+        m_RayCandidateDirs = kDirections;
+    }
+
+    if (sunToDir)
+    {
+        const uint32_t sunDominant = DominantSunDirection(*sunToDir);
+        // Sorted HERE only, on a copy: the stored list keeps ray order, so the
+        // UI combo's rows do not re-sort under the user's cursor.
+        std::vector<RayCandidate> rows = m_RayCandidates[sunDominant];
+        std::sort(rows.begin(), rows.end(),
+                  [](const RayCandidate& a, const RayCandidate& b) { return a.score > b.score; });
+
+        std::cout << "[BakedGI RayDebug] step 2c — Cage Trace pool, direction " << sunDominant
+                  << ": " << rows.size() << " of " << kGatherRays
+                  << " rays carry Efb > NdotD*Vhit (the picker's list, by score):" << std::endl;
+        for (const RayCandidate& c : rows)
+            std::cout << "    ray " << (c.ray < 10u ? " " : "") << c.ray
+                      << "  score " << c.score
+                      << "  efb " << c.efbLum
+                      << "  direct " << c.directLum
+                      << "  alb " << c.albedoLum << std::endl;
+        if (rows.empty())
+            std::cout << "    none — the trace draws nothing in this direction" << std::endl;
+    }
+
+    // --- Step 3: the self-check. Compare the re-accumulated table with the
+    // stored table, element by element. ---
+    float maxAbs = 0.0f, maxStored = 0.0f;
+    uint32_t worstDir = 0, worstLm = 0;
+    for (uint32_t h = 0; h < kDirections; ++h)
+    {
+        for (uint32_t lm = 0; lm < kResponseFloat4s; ++lm)
+        {
+            const float* a = RayDebugTable(tableReacc,  h, lm);
+            const float* b = RayDebugTable(tableStored, h, lm);
+            for (uint32_t c = 0; c < 3u; ++c) // xyz carry the data; w is always zero
+            {
+                const float d = std::fabs(a[c] - b[c]);
+                if (d > maxAbs) { maxAbs = d; worstDir = h; worstLm = lm; }
+                maxStored = std::max(maxStored, std::fabs(b[c]));
+            }
+        }
+    }
+    const float tol = 1e-4f * std::max(1.0f, maxStored);
+    const bool  pass = (maxAbs <= tol);
+
+    std::cout << "[BakedGI RayDebug] step 3 — self-check: re-accumulated table vs stored table"
+              << std::endl;
+    std::cout << "    max |diff| " << maxAbs << "  (worst at dir " << worstDir
+              << ", lm " << worstLm << ")   max |stored| " << maxStored
+              << "   tol " << tol << std::endl;
+    if (haveMeta && !probeValid)
+        std::cout << "    NOT A VERDICT — the probe is invalid, so its stored table is all zero."
+                  << " The mismatch above is expected." << std::endl;
+    else
+    {
+        std::cout << "    " << (pass ? "MATCH — the re-trace reproduced the bake"
+                                     : "MISMATCH — the RNG stream drifted; read the rays with care")
+                  << std::endl;
+        if (!haveMeta)
+        {
+            // Name the cause. The two causes need different fixes, so one
+            // shared "no meta readback" line would name the wrong reason after
+            // a rebuild with a smaller grid.
+            if (metaStatus == ProbeMetaStatus::NoReadback)
+                std::cout << "    note: no meta readback buffer (the bake has not run), so the verdict"
+                             " assumes a valid probe" << std::endl;
+            else if (metaStatus == ProbeMetaStatus::ProbeOutOfRange)
+                std::cout << "    note: probe " << m_RayDebugProbe << " is at or past the probe count "
+                          << m_ProbeCount << " (the grid changed), so the verdict assumes a valid probe"
+                          << std::endl;
+            else
+                std::cout << "    note: the meta readback could not be mapped, so the verdict assumes"
+                             " a valid probe" << std::endl;
+        }
+    }
+
+    m_RayDebugReadback->Unmap(0, nullptr);
+}
+
+// CPU mirror of the update pass's sun fold: bw[j] = pow(max(0, dot(dir_j,
+// sunDir)), 8), normalised by the caller (BakedGI_Update.hlsl:71-78). The
+// direction set is BakedGIDeltaDirection (BakedGI.hlsli:27-33), reproduced here.
+//
+// ONE mirror, and the shader is the authority. ONE caller: SunFoldWeights adds
+// the normalisation and the argmax on top, and every other reader goes through
+// SunFoldWeights. A second copy of the kernel — or of the normalisation, or of
+// the argmax — would drift, and the weight log, the Ray Fan and the Sun
+// Directions view would then describe three different folds. That is the same
+// one-value-two-places defect that produced the stale validity flag, the
+// probe/fan divergence and the frame-order fault.
+bool BakedGI::ComputeSunKernelWeights(const DirectX::XMFLOAT3& sunToDir,
+                                      float (&bw)[kDirections], float& wsum)
+{
+    wsum = 0.0f;
+    const DirectX::XMFLOAT3 s = sunToDir;
+    const float len = std::sqrt(s.x * s.x + s.y * s.y + s.z * s.z);
+    if (len < 1e-6f)
+        return false; // zero sun direction: the kernel has no meaning
+    const float sx = s.x / len, sy = s.y / len, sz = s.z / len;
+
+    for (uint32_t j = 0; j < kDirections; ++j)
+    {
+        const float y   = ((float)j + 0.5f) / (float)kDirections;
+        const float phi = (float)j * 2.39996323f;
+        const float r   = std::sqrt(std::max(0.0f, 1.0f - y * y));
+        float dx = r * std::cos(phi), dy = y, dz = r * std::sin(phi);
+        const float l = std::sqrt(dx * dx + dy * dy + dz * dz);
+        dx /= l; dy /= l; dz /= l;
+        const float d = dx * sx + dy * sy + dz * sz;
+        bw[j] = std::pow(std::max(0.0f, d), 8.0f);
+        wsum += bw[j];
+    }
+    return true;
+}
+
+uint32_t BakedGI::SunFoldWeights(const DirectX::XMFLOAT3& sunToDir,
+                                 float (&w)[kDirections], float* outMax)
+{
+    if (outMax)
+        *outMax = 0.0f;
+    // Clear first: ComputeSunKernelWeights returns false BEFORE it fills bw, so
+    // without this a no-sun frame would carry the previous frame's weights into
+    // the caller's array — and the debug view would paint a stale fold.
+    for (uint32_t j = 0; j < kDirections; ++j)
+        w[j] = 0.0f;
+
+    float bw[kDirections];
+    float wsum = 0.0f;
+    if (!ComputeSunKernelWeights(sunToDir, bw, wsum))
+        return 0u; // zero sun direction: no fold, so no sun-dominant direction
+
+    // Sun below the horizon: every weight is 0, so every direction ties. Report
+    // direction 0 with weight 0.0. A caller must print "no sun" then, and must
+    // not present direction 0 as a winner.
+    if (wsum <= 1e-6f)
+        return 0u;
+
+    for (uint32_t j = 0; j < kDirections; ++j)
+        w[j] = bw[j] / wsum;
+
+    // The strict compare keeps the LOWEST index on a tie. A tie is rare above
+    // the horizon, and a stable pick keeps the fan still across frames. The Sun
+    // Directions view ramps on the weights, so a tie paints more than one
+    // direction green: that is the weights being reported, not a conflict with
+    // this single index.
+    uint32_t best = 0u;
+    for (uint32_t j = 1; j < kDirections; ++j)
+        if (w[j] > w[best])
+            best = j;
+    if (outMax)
+        *outMax = w[best];
+    return best;
+}
+
+uint32_t BakedGI::DominantSunDirection(const DirectX::XMFLOAT3& sunToDir, float* outWeight)
+{
+    // The weight array is discarded: the argmax rule lives in SunFoldWeights, so
+    // the fan's direction and the debug view's green direction are one pick.
+    float w[kDirections];
+    return SunFoldWeights(sunToDir, w, outWeight);
+}
+
+uint32_t BakedGI::FindNearestValidProbes(const DirectX::XMFLOAT3& point, uint32_t k,
+                                         std::vector<NearestProbe>& out) const
+{
+    out.clear();
+    if (k == 0u || !m_Valid || m_ProbeCount == 0u || m_DimX == 0u || m_DimY == 0u)
+        return 0u;
+    // The meta readback is the validity source. Without it (the bake has not
+    // run) there is no verified probe to report, and an unverified probe must
+    // not be offered as valid.
+    if (!m_MetaReadback)
+        return 0u;
+
+    // The grid is regular, so the cell of a probe index is a pure function of
+    // the index. ONE definition, used by both the scan and the output pass, so
+    // the two cannot disagree about which cell a row describes.
+    const uint32_t layerSize = m_DimX * m_DimY; // probes in one z slice
+    const auto cellOf = [this, layerSize](uint32_t p, uint32_t& cx, uint32_t& cy, uint32_t& cz)
+    {
+        cx = p % m_DimX;
+        cy = (p / m_DimX) % m_DimY;
+        cz = p / layerSize;
+    };
+
+    uint32_t* meta = nullptr;
+    if (FAILED(m_MetaReadback->Map(0, nullptr, reinterpret_cast<void**>(&meta))))
+        return 0u;
+
+    // Keep the k smallest distances WITHOUT sorting the grid. A bounded max-heap
+    // keyed on SQUARED distance: the front is the farthest survivor, so a closer
+    // probe replaces it. k is a UI count (a handful); the grid is up to 128K.
+    // Comparing d2 avoids a sqrt on every probe — the sqrt happens once per
+    // surviving row, in the output pass below.
+    std::vector<std::pair<float, uint32_t>> heap; // (distance^2, probe index)
+    heap.reserve(k + 1u);
+
+    for (uint32_t p = 0; p < m_ProbeCount; ++p)
+    {
+        if ((meta[p] & 0x1u) == 0u) // BAKED_GI_META_VALID
+            continue;
+
+        uint32_t cx = 0, cy = 0, cz = 0;
+        cellOf(p, cx, cy, cz);
+        const float dx = m_GridMin.x + (float)cx * m_Spacing - point.x;
+        const float dy = m_GridMin.y + (float)cy * m_Spacing - point.y;
+        const float dz = m_GridMin.z + (float)cz * m_Spacing - point.z;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+
+        if (heap.size() < k)
+        {
+            heap.emplace_back(d2, p);
+            std::push_heap(heap.begin(), heap.end());
+        }
+        else if (d2 < heap.front().first)
+        {
+            std::pop_heap(heap.begin(), heap.end()); // farthest lands at the back
+            heap.back() = { d2, p };
+            std::push_heap(heap.begin(), heap.end());
+        }
+    }
+
+    m_MetaReadback->Unmap(0, nullptr);
+
+    // Heap order is not distance order. sort_heap turns the max-heap into an
+    // ascending run, which is the order the list prints.
+    std::sort_heap(heap.begin(), heap.end());
+
+    out.reserve(heap.size());
+    for (const std::pair<float, uint32_t>& e : heap)
+    {
+        NearestProbe np;
+        np.index  = e.second;
+        cellOf(np.index, np.cellX, np.cellY, np.cellZ);
+        np.center = { m_GridMin.x + (float)np.cellX * m_Spacing,
+                      m_GridMin.y + (float)np.cellY * m_Spacing,
+                      m_GridMin.z + (float)np.cellZ * m_Spacing };
+        np.distance = std::sqrt(e.first);
+        out.push_back(np);
+    }
+    return (uint32_t)out.size();
+}
+
+void BakedGI::LogKernelWeights(const DirectX::XMFLOAT3& sunToDir)
+{
+    float w[kDirections];
+    float wMax = 0.0f;
+    const uint32_t sunDominant = SunFoldWeights(sunToDir, w, &wMax);
+
+    std::vector<std::pair<float, uint32_t>> rank;
+    rank.reserve(kDirections);
+    for (uint32_t j = 0; j < kDirections; ++j)
+        rank.emplace_back(w[j], j);
+    std::sort(rank.begin(), rank.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::cout << "[BakedGI RayDebug] kernel weights — the fold's cos^8 weights, normalised"
+              << std::endl;
+    if (wMax <= 0.0f)
+    {
+        // SunFoldWeights reports one all-zero array for both no-sun causes, so
+        // name both instead of guessing which one happened.
+        std::cout << "    no sun: every weight is zero (either the light direction is zero, or"
+                     " the sun is below the horizon)" << std::endl;
+        return;
+    }
+    // Mark the direction the fan and the DeltaDirections channel both single
+    // out, so the reader does not have to find the maximum in the weight column
+    // by eye.
+    for (size_t i = 0; i < rank.size(); ++i)
+        std::cout << "    dir " << (rank[i].second < 10u ? " " : "") << rank[i].second
+                  << "  weight " << rank[i].first
+                  << (rank[i].second == sunDominant
+                          ? "   <- the Ray Fan draws this direction, and the DeltaDirections"
+                            " channel paints it white"
+                          : "")
+                  << std::endl;
+}
+
+// -----------------------------------------------------------------------------
 // Probes/ disk cache
 // -----------------------------------------------------------------------------
 
@@ -413,6 +1252,91 @@ bool BakedGI::CreateProbeBuffers()
         return false;
     }
     return true;
+}
+
+// Debug-only capture, created on the dispatch path only: the term snapshots and
+// the folded per-probe response balls that the "Efb Contribution" view reads.
+//
+// SIZING. One snapshot is a whole transport table: probeCount x 16 x 10 float4,
+// 2560 B for each probe (about 30 MB at 11,616 probes, 56 MB at 21,952). The
+// kIterSnapshotCount = kBakeIterations - 1 snapshots plus kBakeIterations balls
+// (144 B for each probe — the ball is a per-probe SH9) is the whole cost, and it
+// is what the view costs when it is never opened. It is paid on a bake, which is
+// a user action, not on the frame path.
+//
+// The GPUBuffer structs are deliberately NOT reset first. CreateStructuredBuffer
+// reuses an existing descriptor slot when it has one, so a re-bake replaces the
+// resource without consuming a fresh SRV/UAV pair from a heap that has no free —
+// the pattern the ray-debug buffer documents in RecordRayDebug.
+bool BakedGI::CreateIterationBuffers()
+{
+    const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
+
+    for (uint32_t s = 0; s < kIterSnapshotCount; ++s)
+    {
+        char name[48];
+        snprintf(name, sizeof(name), "SB_BakedGIResponseIter%u", s);
+        // COPY_DEST: these buffers only ever receive a CopyBufferRegion during
+        // the bake, and the fold pass transitions them for its SRV read.
+        if (!CreateStructuredBuffer(m_ResponseIter[s], sizeof(float) * 4, responseElems,
+                                    D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, name))
+        {
+            std::cerr << "[BakedGI] Failed to create the term snapshot " << s << std::endl;
+            return false;
+        }
+    }
+
+    for (uint32_t t = 0; t < kBakeIterations; ++t)
+    {
+        char name[48];
+        snprintf(name, sizeof(name), "SB_BakedGIEfbBall%u", t);
+        if (!CreateStructuredBuffer(m_EfbBall[t], sizeof(float) * 4, (uint64_t)m_ProbeCount * kEfbBallFloat4s,
+                                    D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, name))
+        {
+            std::cerr << "[BakedGI] Failed to create the response ball " << t << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+void BakedGI::SnapshotResponseTable(ID3D12GraphicsCommandList* cmdList, uint32_t src, uint32_t snapshot)
+{
+    GPUBuffer& source = m_Response[src];
+    GPUBuffer& dest   = m_ResponseIter[snapshot];
+    const UINT64 bytes = (UINT64)m_ProbeCount * kDirections * kResponseFloat4s * 16u;
+
+    // The source is in UNORDERED_ACCESS (the bake dispatch wrote it), the
+    // destination in COPY_DEST (CreationIterationBuffers). Round-trip the source
+    // so the next transport iteration still finds the state it expects — the same
+    // record-copy-record shape as the ray-debug dump's stored-table copy.
+    source.Transition(cmdList, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyBufferRegion(dest.resource.Get(), 0, source.resource.Get(), 0, bytes);
+    source.Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void BakedGI::TransitionEfbBallsForRead(ID3D12GraphicsCommandList* cmdList)
+{
+    if (!cmdList)
+        return;
+    // See TransitionRayDebugForRead for why this sits at the read site and not in
+    // the bake: every bake builds NEW resources (CreateIterationBuffers calls
+    // CreateCommittedResource), so the state tracker cannot go stale between
+    // bakes, and GPUResource::Transition makes the call free after the first.
+    for (uint32_t t = 0; t < kBakeIterations; ++t)
+        m_EfbBall[t].Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // The view's single-direction mode reads the TRANSPORT TABLES, not the balls:
+    // one direction cannot be recovered from a 16-direction sum. The bake leaves
+    // them tracked as UNORDERED_ACCESS and reads them as SRVs behind a UAV barrier
+    // alone — the convention RecordBake documents at :373-374, which is fine for a
+    // compute read on the bake's own list. This read happens on a LATER FRAME and
+    // from the VERTEX stage, so the read site takes the real barrier rather than
+    // inheriting that assumption. Transition guards the change, so this costs one
+    // barrier per bake, not one per frame.
+    for (uint32_t s = 0; s < kIterSnapshotCount; ++s)
+        m_ResponseIter[s].Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_Response[m_FinalResponse].Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
 bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const std::string& scenePath)

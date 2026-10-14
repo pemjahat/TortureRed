@@ -139,7 +139,9 @@ struct FrameConstants {
 
     // Probe debug overlay (BakedGI_Debug.hlsl): view enum + lit-preview scale.
     uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays,
-                                    // 5 lit sky source, 6 lit sun source
+                                    // 5 lit sky source, 6 lit sun source, 7 ray fan (one probe's gather rays),
+                                    // 8 efb contribution (per-probe SH ball of R^k - R^0 for one bake term;
+                                    //   the term is the UI's "Iteration" 1..3 — see bakedGIEfbIterSRVIndex)
     uint   bakedGIResponseSRVIndex; // response table SRV (visibility rays / mean-V views)
     float  bakedGIDebugScale;       // lit-ball gain (DC-normalized shading multiplier)
 
@@ -193,6 +195,139 @@ struct FrameConstants {
                                     // lighting field. The Lambert 1/PI is kept, so
                                     // the white view stays directly comparable with
                                     // the normal-albedo one.
+
+    // Ray Fan debug view (bakedGIDebugView == 7): the 64 gather rays of the
+    // SUN-DOMINANT direction of ONE probe, read from the ray-debug buffer.
+    // These are the same records the text dump ranks, so the fan and the dump
+    // always describe one probe. Appended last on purpose: every earlier offset
+    // is unchanged.
+    uint  bakedGIRayDebugSRVIndex;  // StructuredBuffer<float4>: the ray records, then the re-accumulated table.
+                                    // 0xFFFFFFFF = no ray-debug buffer yet. 0 is a legal descriptor index,
+                                    // so it cannot mean "none": the fan shader early-outs on the sentinel.
+    uint  bakedGIRayDebugProbe;     // the probe the fan belongs to (matches the dump)
+    uint  bakedGIRayDebugChannel;   // 0 status, 1 albedo, 2 NdotD, 3 Vhit, 4 L, 5 Efb, 6 distance,
+                                    // 7 direct-vs-Efb, 8 DeltaDirections. Channel 8 also swaps the
+                                    // GEOMETRY: the 16 fibonacci delta directions at this probe
+                                    // instead of the 64 gather rays, grayscale by the sun fold's
+                                    // weight, white = the direction the fan itself draws. It reads
+                                    // no record, so it needs no dump. See
+                                    // BakedGI::kRayFanChannelDeltaDirs.
+    float bakedGIRayDebugLength;    // ray length cap, in probe spacings
+    uint  bakedGIRayDebugValid;     // 1 = do not dim. The probe is valid, or its validity is
+                                    // unknown (the meta read failed). 0 = the probe is KNOWN
+                                    // invalid, so the fan dims the L, Efb and regime channels.
+                                    // Set on every dump and bound to its probe, so no verdict
+                                    // carries to a later probe. The Application fills this again
+                                    // right after the dump, so the bound frame has the verdict.
+    uint  bakedGIRayDebugDir;       // the SUN-DOMINANT direction the fan draws: the argmax of the
+                                    // sun fold's cos^8 kernel over the 16 directions. The fan draws
+                                    // that direction's 64 gather rays only. 0 when there is no sun,
+                                    // together with a normalised weight of 0 (see DominantSunDirection).
+
+    // Sun-fold kernel weights, read by the Ray Fan's DeltaDirections channel
+    // (bakedGIRayDebugChannel == 8). One entry for each BakedGI::kDirections /
+    // BAKED_GI_DIRECTIONS direction, in index order: the update pass's cos^8
+    // fold weights, SUMMED TO 1, so entry j is direction j's share of the fold.
+    // These are the same numbers BakedGI::LogKernelWeights ranks, from the one
+    // CPU mirror (BakedGI::SunFoldWeights) — so the channel and the printed
+    // ranking cannot describe two different folds.
+    //
+    // All 16 are 0 when there is no sun: a zero light direction, or a sun below
+    // the horizon. The channel then paints every direction black rather than
+    // falsely whitening one, and the UI says "no sun" instead of presenting
+    // direction 0 as a winner.
+    //
+    // The channel ramps on this array DIVIDED BY ITS OWN MAXIMUM, not on the
+    // share itself: the dominant direction must read exactly white whether it
+    // holds 0.99 of the fold or 0.20 of it. That divisor is a display choice and
+    // lives in BakedGI_Debug.hlsl (BakedGISunWeightMax's call site).
+    //
+    // LAYOUT — a cbuffer array of SCALARS is VECTOR-STRIDED: dxc gives each
+    // element a full 16-byte register, so `float x[16]` is 244 bytes wide in HLSL
+    // and 64 in C++. Measured on this file's own compiled blob, not assumed: the
+    // blob reflected bakedGISunWeight at 864 and the field after it at 1108 (the
+    // first free component of the last element's register). A tight C++ scalar
+    // array therefore put every following field 188 bytes early, which is why the
+    // Efb indices read zero (past the constant buffer's size) and the sun-weight
+    // ramp read two directions out. A float4 array has no such trap — its element
+    // stride is its own size, so both languages agree — and one float4 for each
+    // direction is exactly one 16-byte register each. Only .x carries the weight.
+    // Do not turn this back into a scalar array, and do not add a field between
+    // this array and the next without re-measuring both sides.
+    //
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint   _sunWeightPad0;          // 856, 860: the 8 bytes HLSL leaves before the
+    uint   _sunWeightPad1;          //           16-byte boundary the array needs
+    float4 bakedGISunWeight[16];    // 864: one entry for each direction, weight in .x
+                                    //      = BakedGI::kDirections / BAKED_GI_DIRECTIONS
+
+    // Per-bake-term response balls — the Efb contribution view (bakedGIDebugView
+    // == 8). The bake folds each term's transport table into a per-probe SH9
+    // "response ball" (BakedGI_IterFold.hlsl), so the view can show ONE term's
+    // table without reading the 16x9 table in the vertex shader.
+    //
+    // Both indices are "no ball" sentinels (0xFFFFFFFF, see
+    // BakedGI::kEfbBallNoSRV) until a bake has folded the terms, and the view
+    // early-outs on the sentinel. 0 is a legal descriptor index, so it cannot
+    // mean "none".
+    //
+    // The view shows ball[selected] - ball[term 1]: the second index is always
+    // term 1, the no-feedback baseline (the bake gates feedback off in term 1,
+    // BakedGI_Bake.hlsl:236), so the difference IS the contribution the series
+    // feedback (Efb) term added by the selected term. Selecting term 1 makes the
+    // two indices equal and the view black — by construction, not by failure.
+    //
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint bakedGIEfbIterSRVIndex;    // the ball of the SELECTED term (UI "Iteration" 1..3 -> 0..2)
+    uint bakedGIEfbBaseSRVIndex;    // the ball of term 1 — the no-feedback baseline
+
+    // Single-direction ("un-averaged") mode of the same view. The fold is a SUM
+    // over the 16 delta directions, so one tinted direction is diluted against 15
+    // neutral ones and can be invisible in the ball. bakedGIEfbDir selects ONE of
+    // the 16: the view then reads the two TRANSPORT TABLES directly and shows
+    // wq*(R^k_d - R^0_d) — the fold with its sum restricted to one direction, so
+    // that direction is shown on its own.
+    //
+    // Any value outside 0..BakedGI::kDirections-1 means "fold all 16". The default
+    // is BakedGI::kEfbDirAll (0xFFFFFFFF), deliberately NOT 0: direction 0 is a
+    // real direction and a default of 0 would silently un-average it.
+    //
+    // Both table indices carry the same "no capture" sentinel as the balls, and
+    // the view early-outs per mode on the TWO sources that mode reads. The tables
+    // are the fold pass's own input, so a bake that folded also snapshotted them.
+    //
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint bakedGIEfbTermSelSRVIndex;  // transport table of the SELECTED term
+    uint bakedGIEfbTermBaseSRVIndex; // transport table of term 1 (R^0)
+    uint bakedGIEfbDir;              // 0..15 = that direction alone; else fold all 16
+
+    // Cage Trace (bakedGIDebugView == 9) gather-ray OVERRIDE.
+    //
+    // By itself the view derives its ray from the records: the sun-dominant
+    // direction's largest carried feedback among the rays the feedback DOMINATES.
+    // That derivation is a ranking, and a ranking is the wrong tool when the ray
+    // being hunted is not the brightest one. This field lets the UI name the ray
+    // instead.
+    //
+    // 0..BakedGI::kGatherRays-1 = draw that gather-ray RECORD INDEX of the
+    // sun-dominant direction. BakedGI::kNoRayPick (0xFFFFFFFF) = no override: the
+    // shader keeps its own argmax. A ray index may be 0, so 0 cannot mean "none".
+    //
+    // The pool the UI enumerates is built on the CPU from the dump's own
+    // readback and holds exactly the rays where the feedback term beats the
+    // direct term at the hit — "direct < Efb", the same rule the shader's argmax
+    // applies (BakedGI::GetRayCandidates, BakedGI::LogRayDebugReadout step 2c).
+    //
+    // A FORCED index skips that dominance test in the shader. The user picked the
+    // ray out of a list that already passed it, so repeating the test could only
+    // disagree on the last bit of a luminance and silently draw nothing. The
+    // regime is reported in the colour instead: WHITE probe->hit segment = the
+    // feedback dominates at that hit, MAGENTA = it does not, which is what an
+    // override from another direction's pool (the sun moved since the dump)
+    // looks like.
+    //
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint bakedGIRayDebugRay;
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -226,6 +361,24 @@ struct BakedGIUpdateParams {
     uint  _pad;
 };
 
+// Root constants for the on-demand ray-debug dispatch. DEBUG ONLY — this pass
+// never runs in a normal frame. One 64-thread group for each direction of ONE
+// probe; lane 0 replays the 64 gather rays of BakedGI_Bake.hlsl and writes one
+// 64 B record for each ray. The re-accumulated table shares the same buffer,
+// after the records. See Shaders/BakedGI_RayDebug.hlsl.
+//
+// The shared root-constants slot (root parameter 12) is sized by DDGIParams.
+// This struct is 44 B, smaller, so the shipped root signature does not change.
+struct BakedGIRayDebugParams {
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;
+    uint  probeIndex;          // the probe to inspect
+    uint  rayRecUAVIdx;        // RW: ray records, then the re-accumulated table
+    uint  responsePrevSRVIdx;  // SRV: previous bake iteration's table (the Efb source)
+    uint  visSRVIdx;           // SRV: per-probe octahedral depth moments
+};
+
 // Root constants for the visibility-moment bake dispatch (step 3). One
 // 16x16-thread group per probe; see Shaders/BakedGI_Visibility.hlsl.
 struct BakedGIVisParams {
@@ -236,6 +389,19 @@ struct BakedGIVisParams {
     uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
     uint  metaUAVIdx;       // RW output: per-probe validity bits (DDGI classification
                             // + old-criteria diagnostic bit — see BakedGI.hlsli)
+};
+
+// Root constants for the per-term response-ball fold (debug view 8). One
+// 64-thread group covers 64 probes; each thread reads ONE bake term's transport
+// table and writes that probe's SH9 response ball. See Shaders/BakedGI_IterFold.hlsl.
+//
+// No grid geometry: the fold visits probes by flat index and reads the table at
+// a fixed stride, so it needs neither the origin, the spacing nor the dims. The
+// three fields below are the whole kernel input.
+struct BakedGIIterFoldParams {
+    uint probeCount;        // probes in the grid; threads at or past it return
+    uint tableSRVIdx;       // SRV: the transport table of ONE bake term (probeCount x 16 x 10 float4)
+    uint ballUAVIdx;        // RW: probeCount x 9 float4 SH9 — one response ball for each probe
 };
 
 // -----------------------------------------------------------------------------

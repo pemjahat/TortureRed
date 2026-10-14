@@ -661,10 +661,14 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
     // DDGIParams (30 DWORDs — the largest consumer of this slot).
+    // BakedGIRayDebugParams (11 DWORDs) and BakedGIIterFoldParams (3 DWORDs) are
+    // listed for completeness: both are smaller than DDGIParams, so neither
+    // changes the slot size.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
         std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
         std::max(sizeof(BakedGIUpdateParams), std::max(sizeof(BakedGIVisParams),
-        sizeof(DDGIParams))))));
+        std::max(sizeof(BakedGIRayDebugParams), std::max(sizeof(BakedGIIterFoldParams),
+        sizeof(DDGIParams))))))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
@@ -1014,6 +1018,32 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
                             m_Sky.GetSunIrradiance(), sunToDir);
 }
 
+// On-demand ray-debug re-trace. Debug only: it resets the command list and
+// waits for the GPU, exactly like BakeGIProbes, so the caller runs it on a
+// synced GPU (before BeginFrame). The readout is printed after the sync.
+bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
+                               const DirectX::XMFLOAT3* sunToDir)
+{
+    if (!m_RayTracingSupported || !model || !m_BakedGI.IsValid())
+        return false;
+
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    const bool ok = m_BakedGI.RecordRayDebug(m_Device.Get(), m_CommandList.Get(), m_RootSignature.Get(),
+                                             m_FrameCB.gpuAddress,
+                                             m_AccelStructure.GetTLASGPUAddress(),
+                                             model->GetMaterialBufferAddress(),
+                                             model->GetDrawNodeBufferAddress(),
+                                             model->GetGlobalIndexBufferAddress(),
+                                             model->GetGlobalVertexBufferAddress(),
+                                             probeIndex);
+    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
+    if (ok)
+        m_BakedGI.LogRayDebugReadout(sunToDir);
+    return ok;
+}
+
 void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight)
 {
     if (!m_BakedGI.IsValid())
@@ -1061,15 +1091,79 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
             return;
 
         // Geometry per view: cubes (36 verts) for placement / sky-visibility,
-        // UV spheres (8x8x6 = 384 verts) for the three lit views, and
-        // per-direction instances for the visibility rays (mode 4).
+        // UV spheres (8x8x6 = 384 verts) for the four lit-ball views (2 total,
+        // 5 sky, 6 sun, 8 Efb contribution), per-direction instances for the
+        // two per-direction ray views (4 visibility rays, 7 ray fan) — both draw
+        // one thin box per (probe, fibonacci direction) — and a fixed thin-box
+        // set for the Cage Trace (9), which draws one probe's trace chain.
         const uint32_t view = frame.bakedGIDebugView;
         uint32_t vertsPerInstance = 36;
         uint32_t instanceCount    = m_BakedGI.GetProbeCount();
-        if (view == 2u || view == 5u || view == 6u)
+        if (view == 2u || view == 5u || view == 6u || view == 8u)
             vertsPerInstance = 384;
         if (view == 4u)
             instanceCount *= BakedGI::kDirections;
+        if (view == 7u)
+        {
+            // Ray Fan. Two shapes, chosen by the colour channel:
+            //
+            //   DeltaDirections — 16 instances, one for each fibonacci delta
+            //   direction of the fan's own probe, grayscale by the sun fold's
+            //   weight. It reads NO record, so it is NOT gated on the ray-debug
+            //   buffer: gating it would hide the channel until a dump, and the
+            //   shader's no-buffer sentinel early-out is bypassed for channel 8
+            //   for the same reason. Without a dump the probe index is 0, so the
+            //   16 boxes sit at probe 0's cell.
+            //
+            //   Every other channel — 64 instances, one per gather ray of the
+            //   SUN-DOMINANT direction (FrameConstants::bakedGIRayDebugDir).
+            //   The records come from the ray-debug buffer, which exists only
+            //   after a dump. Without it the SRV index is unset, so do not draw.
+            if (frame.bakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs)
+            {
+                instanceCount = BakedGI::kDirections;
+            }
+            else
+            {
+                if (!m_BakedGI.HasRayDebugBuffer())
+                    return;
+                m_BakedGI.TransitionRayDebugForRead(cmdList);
+                instanceCount = BakedGI::kGatherRays;
+            }
+        }
+        if (view == 8u)
+        {
+            // Efb Contribution. One sphere for each probe, like the lit-ball
+            // views, but the shader reads two of the bake's per-term response
+            // balls — so the balls must be in a shader-read state first (the
+            // fold leaves them UNORDERED_ACCESS). Without a capture (the
+            // Probes/ cache path never folds) there is nothing to read, and the
+            // app has published the "no ball" sentinel: do not draw, rather than
+            // bind a view that would index the descriptor heap with it.
+            if (!m_BakedGI.HasEfbBalls())
+                return;
+            m_BakedGI.TransitionEfbBallsForRead(cmdList);
+        }
+        if (view == 9u)
+        {
+            // Cage Trace. ONE probe, and the shader derives the whole chain from
+            // it: the sun-dominant direction (bakedGIRayDebugDir), that
+            // direction's largest feedback-dominated ray, the 8-corner cage the
+            // bake gathered at that ray's hit point, and the cell wireframe. The
+            // geometry is a fixed set of thin boxes, so the count is the constant
+            // X: BakedGI::kCageInstances owns it and BAKED_GI_CAGE_INSTANCES
+            // (BakedGI_Debug.hlsl) mirrors it.
+            //
+            // Two hard prerequisites. The ray records, which exist only after a
+            // dump — without one there is no traced ray. And the baked octahedral
+            // depth moments the Chebyshev weight reads: the shader reads the same
+            // SRV index the runtime fetch reads, so IsValid (which is what gates
+            // that index in Application) is the right test.
+            if (!m_BakedGI.IsValid() || !m_BakedGI.HasRayDebugBuffer())
+                return;
+            m_BakedGI.TransitionRayDebugForRead(cmdList);
+            instanceCount = BakedGI::kCageInstances;
+        }
 
         cmdList->SetPipelineState(pso);
         cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
