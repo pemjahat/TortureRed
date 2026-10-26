@@ -142,9 +142,10 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 // index the descriptor heap.
 #define BAKED_GI_EFB_NO_SRV       0xFFFFFFFFu
 
-// Gather rays for each direction. Local to this file on purpose: BakedGI.hlsli
-// and BakedGI_Bake.hlsl stay untouched. The value must match GATHER_RAYS in
-// BakedGI_Bake.hlsl and BakedGI::kGatherRays.
+// RECORD slots for each direction — not the bake's gather-ray count. The bake
+// traces BakedGI::kBakeGatherRays (256) and BakedGI_RayDebug.hlsl keeps 64 of
+// them here, so a box is a RECORD and `ray` means the record index. Must match
+// DEBUG_RAYS in BakedGI_RayDebug.hlsl and BakedGI::kDebugGatherRays.
 #define BAKED_GI_RAYFAN_RAYS 64u
 
 // Float4s for each ray record — the stride this view walks. Must match
@@ -253,6 +254,9 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 #define BAKED_GI_RAYFAN_CH_DELTADIRS 8u
 
 // Record component 3 of a ray: 0 = sky miss, 1 = backface reject, 2 = shaded.
+// rec3.w PACKS the status with the source ray index (BakedGI.hlsli), so decode
+// it with BakedGIRayRecStatus before you compare. Every read of rec3.w in this
+// file goes through that helper — a direct compare reads the packed value.
 float3 RayFanStatusColor(float status)
 {
     if (status > 1.5f)
@@ -434,8 +438,8 @@ CageRay FindCageRay(StructuredBuffer<float4> dbg, uint dir, uint forcedRay)
         const float4 rec5 = dbg[b + 5u]; // (hit world pos.xyz, primitive)
 
         // Status: 0 = sky miss, 1 = backface reject, 2 = shaded. Only a shaded
-        // ray has an L and an Efb to compare.
-        if (abs(rec3.w - 2.0f) > 0.5f)
+        // ray has an L and an Efb to compare. rec3.w is packed, so decode first.
+        if (abs(BakedGIRayRecStatus(rec3.w) - 2.0f) > 0.5f)
             continue;
 
         const float directLum = dot(rec1.rgb * (rec1.w * rec2.w), kLum);
@@ -624,7 +628,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float4 rec3 = dbg[recBase + 3u]; // (Efb.rgb, status)
 
         const float t      = rec0.w;
-        const float status = rec3.w;
+        // rec3.w packs status + 4 * sourceRayIndex. Decode, then classify.
+        const float status = BakedGIRayRecStatus(rec3.w);
         const bool  miss   = (status < 0.5f);
 
         // MISSES DRAW AT THE CAP. Dropping them would be tidier, but then the

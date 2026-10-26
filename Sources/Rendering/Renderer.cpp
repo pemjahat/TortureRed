@@ -1044,6 +1044,26 @@ bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
     return ok;
 }
 
+// On-demand read-back of ONE probe's response table for the sun-bin panel.
+// Debug only. Resets the command list and waits for the GPU, exactly like
+// RayDebugBakedGI, because the copy must complete before the Map. Called from
+// Application::Render, never from inside the ImGui build: resetting the list
+// mid-frame would discard the frame being recorded.
+bool Renderer::ReadbackBakedGIProbeTable(uint32_t probeIndex)
+{
+    if (!m_BakedGI.IsValid())
+        return false;
+
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    const bool ok = m_BakedGI.RecordProbeTableReadback(m_Device.Get(), m_CommandList.Get(), probeIndex);
+    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
+    if (ok)
+        m_BakedGI.ConsumeProbeTableReadback();
+    return ok;
+}
+
 void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight)
 {
     if (!m_BakedGI.IsValid())
@@ -1128,7 +1148,9 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
                 if (!m_BakedGI.HasRayDebugBuffer())
                     return;
                 m_BakedGI.TransitionRayDebugForRead(cmdList);
-                instanceCount = BakedGI::kGatherRays;
+                // The fan draws RECORDS, not gather rays: the debug pass keeps
+                // kDebugGatherRays of them out of the kBakeGatherRays it replays.
+                instanceCount = BakedGI::kDebugGatherRays;
             }
         }
         if (view == 8u)

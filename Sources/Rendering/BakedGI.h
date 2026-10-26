@@ -54,7 +54,24 @@ public:
     static constexpr uint32_t kEfbDirAll = 0xFFFFFFFFu;
 
     // ---- Ray-debug tool (debug only, on demand) ----
-    static constexpr uint32_t kGatherRays    = 64;  // gather rays for each direction (must match the bake)
+    // Rays the BAKE traces for each direction. 64 -> 256 on 2026-10-26.
+    //
+    // Reason: at 64, one bin of probe 7669 held 74.7 percent of the sun red DC,
+    // and that bin's whole direct term was ONE gather ray. A 64-ray estimate of
+    // the full 4*PI sphere cannot resolve a distant source: the ray stands for
+    // 4*PI/64 = 0.196 sr, and the cloth subtends far less. Measured: removing
+    // that single ray dropped the probe's sun red from 148.9 to about 79.1.
+    //
+    // Cost is bake time only. The payload is the same size and the update pass
+    // reads the same bytes, so neither memory nor frame time changes.
+    // MUST match GATHER_RAYS in BakedGI_Bake.hlsl and BAKE_RAYS in
+    // BakedGI_RayDebug.hlsl.
+    static constexpr uint32_t kBakeGatherRays = 256;
+    // Ray RECORD slots written for each direction, and the Ray Fan's instance
+    // count. Deliberately NOT kBakeGatherRays: this value sizes the debug
+    // buffer, and the view cannot show 256 boxes legibly anyway. The debug pass
+    // replays all kBakeGatherRays and writes only the ones that matter.
+    static constexpr uint32_t kDebugGatherRays = 64;
     // float4s for each ray record. 4 -> 6 on 2026-10-14: rec4 and rec5 add the
     // hit's IDENTITY (normal, world position, instance index, primitive index),
     // which this layout used to discard — so naming the surface behind a coloured
@@ -66,7 +83,9 @@ public:
     static constexpr uint32_t kRayRecordF4   = 6;   // float4s for each ray record (96 B)
     // The re-accumulated table sits after the records in the same buffer, so one
     // UAV serves both outputs. Layout: [records][table], both float4.
-    static constexpr uint32_t kRayDebugTableBase = kDirections * kGatherRays * kRayRecordF4;
+    // The record stride is the DEBUG count: keeping the buffer at its old size
+    // is what stops this change from adding 302,592 B of readback.
+    static constexpr uint32_t kRayDebugTableBase = kDirections * kDebugGatherRays * kRayRecordF4;
     static constexpr uint32_t kRayDebugBufF4s    = kRayDebugTableBase + kDirections * kResponseFloat4s;
     static constexpr uint64_t kRayDebugBufBytes  = (uint64_t)kRayDebugBufF4s * 16;
     static constexpr uint64_t kRayDebugTableBytes = (uint64_t)kDirections * kResponseFloat4s * 16;
@@ -162,7 +181,8 @@ public:
     // the trace no longer draws.
     struct RayCandidate
     {
-        uint32_t ray;       // the record index inside that direction's fan (0..kGatherRays-1)
+        uint32_t ray;       // the RECORD index inside that direction's fan (0..kDebugGatherRays-1)
+        uint32_t sourceRay; // the source gather ray it was taken from (0..kBakeGatherRays-1)
         float    score;     // luminance(diffAlbedo * Efb) — the shader's own ranking key
         float    efbLum;    // the feedback term's luminance at the hit
         float    directLum; // the direct term's luminance at the hit, always < efbLum here
@@ -323,6 +343,85 @@ public:
 
     ID3D12PipelineState* GetRayDebugPSO() const { return m_RayDebugPSO.Get(); }
 
+    // ---------------------------------------------------------------------
+    // Sun-fold bin panel (debug UI only)
+    //
+    // The question it answers: "which bins actually interpolate this probe, and
+    // by how much". It shows two DIFFERENT quantities side by side, and they
+    // must never be confused:
+    //
+    //   weight      — GLOBAL. w_j depends only on the sun direction, so every
+    //                 probe shares it. Comes from SunFoldWeights, the one
+    //                 mirror the update pass and the Ray Fan also use.
+    //   contribution— PER PROBE. w_j * R_j[slot 0] luminance, where R_j is this
+    //                 probe's stored response in bin j. R_j varies up to 4x
+    //                 between bins, so a weights-only list points at the wrong
+    //                 bin. Measured on the probe we investigated: bin 14 holds
+    //                 0.451 of the weight but 0.747 of the sun red.
+    //
+    // The contribution column needs the probe's GPU-side table. It is read back
+    // ON DEMAND — a Refresh press or a probe-index change — never per frame.
+    // ---------------------------------------------------------------------
+
+    // ONE CPU mirror of BakedGIDeltaDirection (BakedGI.hlsli:27-33). Extracted
+    // from ComputeSunKernelWeights so the kernel and the panel's angle column
+    // read the same function instead of two copies of one formula. A change to
+    // the shader formula MUST change this function. Nothing can catch that at
+    // compile time — the formula is runtime float math — so the known-good
+    // reference values sit in a comment beside the definition.
+    static DirectX::XMFLOAT3 DeltaDirectionCPU(uint32_t j);
+
+    // One row of the panel. Sorted by contribution descending.
+    struct SunBinRow
+    {
+        uint32_t bin        = 0u;    // the delta-direction index 0..15
+        float    weight     = 0.0f;  // GLOBAL: this bin's share of the fold
+        float    angleDeg   = 0.0f;  // angle between W_bin and the to-sun direction
+        float    dcLum      = 0.0f;  // PER PROBE: luminance of R_bin[slot 0]
+        float    contrib    = 0.0f;  // PER PROBE: weight * dcLum
+        float    contribPct = 0.0f;  // contrib as a fraction of the 16-bin total
+        DirectX::XMFLOAT3 contribRGB = { 0.0f, 0.0f, 0.0f }; // weight * R_bin[slot 0].rgb
+    };
+
+    struct SunBinPanel
+    {
+        SunBinRow rows[kDirections];
+        float    w[kDirections] = {};   // the same weights, by bin index
+        bool     haveDirection  = false; // sunToDir was non-zero: the angles mean something
+        bool     haveSun        = false; // the fold produced non-zero weights
+        bool     haveResponse   = false; // the per-probe column is filled for this probe
+        uint32_t responseProbe  = 0u;    // which probe the filled column describes
+        uint32_t weightArgmax   = 0u;    // argmax of the WEIGHT
+        float    weightArgmaxW  = 0.0f;
+        uint32_t dcArgmax       = 0u;    // argmax of the stored DC LUMINANCE
+        float    elevationDeg   = 0.0f;
+        float    azimuthDeg     = 0.0f;
+        float    meanAngleDeg   = 0.0f;  // weight-weighted mean angle to the sun
+        float    weightBeyond15 = 0.0f;  // share of the weight further than 15 degrees
+        uint32_t nonzeroBins    = 0u;
+        float    contribTotal   = 0.0f;
+    };
+
+    // Fills the panel. `probe` selects which read-back table the contribution
+    // column describes; when the read-back belongs to another probe, the column
+    // is left empty and haveResponse is false. Pure CPU, except that the
+    // contribution column reads the table from the last read-back.
+    void BuildSunBinPanel(const DirectX::XMFLOAT3* sunToDir, uint32_t probe, SunBinPanel& out) const;
+
+    // Read back ONE probe's whole response table (16 x 10 float4 = 2560 B) into
+    // m_ProbeTableCPU. Split in two because the copy must run on a command list
+    // and the Map must wait for it: Record queues the copy, the caller executes
+    // and waits, then Consume maps and stores. Mirrors the RecordRayDebug split.
+    // Debug only, on demand. The caller MUST have synced the GPU before calling
+    // RecordProbeTableReadback: it releases the previous read-back resource.
+    bool RecordProbeTableReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                                  uint32_t probe);
+    void ConsumeProbeTableReadback();
+    bool HasProbeTable(uint32_t probe) const
+    {
+        return m_ProbeTableValid && m_ProbeTableProbe == probe;
+    }
+
     // Why a probe's meta word could not be read. Two causes are common and they
     // need different messages and different fixes: no readback buffer (the bake
     // has not run), or an index at or past the probe count (the grid shrank).
@@ -457,6 +556,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_RayDebugReadback; // CPU: debug buffer | stored table
     GPUBuffer m_RayDebugBuf;                                   // GPU: records + re-accumulated table
     uint32_t m_RayDebugProbe = 0;
+    // Sun-bin panel read-back: ONE probe's response table. 2560 B, on demand.
+    // m_ProbeTableValid is cleared whenever the bake replaces the table, so the
+    // panel cannot show a previous bake's numbers after a Rebuild.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_ProbeTableReadback;
+    DirectX::XMFLOAT4 m_ProbeTableCPU[kDirections * kResponseFloat4s] = {};
+    uint32_t m_ProbeTableProbe = 0u;
+    bool     m_ProbeTableValid = false;
     // Written by LogRayDebugReadout, which is const, so these members are
     // mutable. m_RayDebugValid is true when the meta bit was read and the probe
     // is valid, and also when there is no verdict. RecordRayDebug clears the

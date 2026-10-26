@@ -137,11 +137,6 @@ public:
     void UploadTextures(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* cmdQueue, ID3D12CommandAllocator* cmdAllocator, Renderer* renderer);
     void UploadBuffers(Renderer* renderer);
 
-    // Getters for debug counters
-    size_t GetTotalNodes() const { return m_TotalNodes; }
-    size_t GetTotalRootNodes() const { return m_TotalRootNodes; }
-    size_t GetNodesSurviveFrustum() const { return m_NodesSurviveFrustum; }
-
     // Meshlet pipeline
     bool IsMeshletReady() const { return m_MeshletReady; }
     D3D12_GPU_VIRTUAL_ADDRESS GetMeshDataBufferAddress() const { return m_MeshDataBuffer.gpuAddress; }
@@ -246,11 +241,6 @@ private:
     // Animation
     GLTFAnimation* m_CurrentAnimation = nullptr;
     float m_AnimationTime = 0.0f;
-
-    // Debug counters
-    size_t m_TotalNodes = 0;
-    size_t m_TotalRootNodes = 0;
-    size_t m_NodesSurviveFrustum = 0;
 
     // ----- Meshlet Pipeline -----
     bool m_MeshletReady = false;

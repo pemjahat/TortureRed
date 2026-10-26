@@ -59,6 +59,12 @@ public:
     // a default value, for the reason in BakedGI.h.
     bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
                          const DirectX::XMFLOAT3* sunToDir);
+
+    // Read back ONE probe's response table for the sun-bin panel, then wait.
+    // Debug only, on demand. Runs on a synced GPU like RayDebugBakedGI, so the
+    // caller must invoke it OUTSIDE the frame recording — Application::Render,
+    // not the ImGui build — or the reset discards the frame in flight.
+    bool ReadbackBakedGIProbeTable(uint32_t probeIndex);
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }

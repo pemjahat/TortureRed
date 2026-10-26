@@ -113,6 +113,18 @@ private:
     int   m_RayDebugProbeIndex  = 0;     // Probe index for the "Dump Probe Ray Debug" tool
     bool  m_PendingRayDebug     = false; // Ray-debug dump request (set by the button)
 
+    // Sun-bin panel: the per-probe contribution column needs the probe's GPU
+    // response table, so it is read back ON DEMAND and never per frame. The
+    // request rides the same synced-list path as m_PendingRayDebug: set here or
+    // in the UI, serviced in Render() before the frame is recorded. Servicing it
+    // from inside the ImGui build would reset the command list mid-frame.
+    bool     m_PendingProbeTableReadback = false;
+    // The probe the last request was for. Kept separate from the panel's own
+    // validity check on purpose: a request that FAILED (no bake yet) must not
+    // re-fire every frame, because each attempt costs a full GPU wait. The
+    // Refresh button is the way to retry.
+    uint32_t m_ProbeTableRequestedProbe  = 0xFFFFFFFFu;
+
     // "Probes Near Camera" list — the answer to "which probe index am I standing
     // in?". Filled by BakedGI::FindNearestValidProbes from the live camera
     // position, ascending by distance. A row click sets m_RayDebugProbeIndex and

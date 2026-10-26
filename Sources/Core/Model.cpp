@@ -777,10 +777,6 @@ void Model::BuildNodeHierarchy()
             m_GltfModel.rootNodes[i] = &m_GltfModel.nodes[nodeIndex];
         }
     }
-
-    // Set debug counters
-    m_TotalNodes = m_GltfModel.nodes.size();
-    m_TotalRootNodes = m_GltfModel.rootNodes.size();
 }
 
 void Model::UpdateNodeBuffer()
@@ -1218,9 +1214,6 @@ void Model::UploadBuffers(Renderer* renderer)
 
 void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode)
 {
-    // Reset debug counter
-    m_NodesSurviveFrustum = 0;
-
     // Bind material buffer to root parameter 1
     if (m_MaterialBuffer.resource)
     {
@@ -1282,9 +1275,6 @@ void Model::Render(ID3D12GraphicsCommandList* commandList, Renderer* renderer, c
 // RenderNode recursively (Keep it for debugging or future culling, but not used by ExecuteIndirect right now)
 void Model::RenderNode(ID3D12GraphicsCommandList* commandList, GLTFNode* node, DirectX::XMMATRIX parentTransform, Renderer* renderer, const DirectX::BoundingFrustum& frustum, AlphaMode mode)
 {
-    // Increment debug counter
-    ++m_NodesSurviveFrustum;
-
     DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&node->transform) * parentTransform;
 
     if (node->mesh)

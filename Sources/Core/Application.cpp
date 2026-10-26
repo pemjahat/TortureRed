@@ -710,7 +710,7 @@ void Application::FillRayDebugConstants()
     // ray than the one the panel names. The shader applies the same test, so the
     // text and the picture agree even if this fill never ran.
     m_FrameConstants.bakedGIRayDebugRay =
-        (m_BakedGIRayDebugRay < 0 || (uint32_t)m_BakedGIRayDebugRay >= BakedGI::kGatherRays)
+        (m_BakedGIRayDebugRay < 0 || (uint32_t)m_BakedGIRayDebugRay >= BakedGI::kDebugGatherRays)
             ? BakedGI::kNoRayPick
             : (uint32_t)m_BakedGIRayDebugRay;
 }
@@ -849,6 +849,16 @@ void Application::Render()
         // SRV index, whose first value is 0 — a descriptor that is not the
         // ray-debug buffer.
         FillRayDebugConstants();
+    }
+
+    // Sun-bin panel read-back — the same synced-list pattern, and for the same
+    // reason: the copy must finish before the Map, and resetting the command
+    // list mid-frame would discard the frame in flight.
+    if (m_PendingProbeTableReadback)
+    {
+        m_PendingProbeTableReadback = false;
+        const uint32_t want = (uint32_t)std::max(0, m_RayDebugProbeIndex);
+        m_Renderer.ReadbackBakedGIProbeTable(want); // no bake, no data; the panel says so
     }
 
     // Begin frame rendering
@@ -1594,6 +1604,132 @@ void Application::RenderImGui()
         ImGui::TextDisabled("Path Tracer (DXR not supported)");
     }
 
+    ImGui::Separator();
+    ImGui::Text("Light Editor");
+    
+    std::vector<LightConstants>& lights = m_Scene.GetLights();
+    if (!lights.empty())
+    {
+        std::vector<std::string> lightNames;
+        for (size_t i = 0; i < lights.size(); ++i) {
+            std::string type = (lights[i].direction.w < 0.5f) ? "Dir" : "Spot";
+            lightNames.push_back("Light " + std::to_string(i) + " (" + type + ")");
+        }
+
+        if (ImGui::BeginCombo("Select Light", lightNames[m_SelectedLightIndex].c_str()))
+        {
+            for (int i = 0; i < (int)lights.size(); ++i)
+            {
+                bool isSelected = (m_SelectedLightIndex == i);
+                if (ImGui::Selectable(lightNames[i].c_str(), isSelected))
+                {
+                    m_SelectedLightIndex = i;
+                }
+                if (isSelected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        LightConstants& selectedLight = lights[m_SelectedLightIndex];
+        bool changed = false;
+
+        if (selectedLight.direction.w < 0.5f) // Directional
+        {
+            // Directional-light colour/intensity are now driven by the Hosek-Wilkie
+            // solar irradiance (Sky::ComputeSunIrradiance).  The values shown here
+            // are read-only and updated each frame.
+            DirectX::XMFLOAT3 si = m_Renderer.GetSunIrradiance();
+            float irradianceRGB[3] = { si.x, si.y, si.z };
+            ImGui::Text("Sun Irradiance (auto)");
+            ImGui::InputFloat3("##irradiance", irradianceRGB, "%.3f", ImGuiInputTextFlags_ReadOnly);
+
+            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
+            {
+                // Normalize direction
+                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
+                lightDir = DirectX::XMVector3Normalize(lightDir);
+                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
+                changed = true;
+            }
+        }
+        else // Point/Spot
+        {
+            if (ImGui::DragFloat3("Position", &selectedLight.position.x, 0.1f))
+            {
+                changed = true;
+            }
+            
+            // If it's a spot light (direction is used)
+            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
+            {
+                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
+                lightDir = DirectX::XMVector3Normalize(lightDir);
+                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
+                changed = true;
+            }
+
+            // Draw wireframe sphere around selected light
+            ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+            
+            auto Project = [&](const DirectX::XMVECTOR& pos3D) -> ImVec2 {
+                DirectX::XMVECTOR pos2D = DirectX::XMVector3Project(pos3D, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0.0f, 1.0f, m_Camera.GetProjMatrix(), m_Camera.GetViewMatrix(), DirectX::XMMatrixIdentity());
+                return ImVec2(DirectX::XMVectorGetX(pos2D), DirectX::XMVectorGetY(pos2D));
+            };
+
+            float radius = 0.5f;
+            ImU32 color = IM_COL32(255, 255, 0, 255); // Yellow
+            int segments = 16;
+
+            for (int plane = 0; plane < 3; ++plane)
+            {
+                ImVec2 prevPoint;
+                bool prevValid = false;
+                for (int i = 0; i <= segments; ++i)
+                {
+                    float angle = (float)i / segments * DirectX::XM_2PI;
+                    float c = cosf(angle) * radius;
+                    float s = sinf(angle) * radius;
+                    
+                    DirectX::XMVECTOR point3D;
+                    if (plane == 0) point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y + s, selectedLight.position.z, 1.0f);
+                    else if (plane == 1) point3D = DirectX::XMVectorSet(selectedLight.position.x, selectedLight.position.y + c, selectedLight.position.z + s, 1.0f);
+                    else point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y, selectedLight.position.z + s, 1.0f);
+                    
+                    DirectX::XMVECTOR viewPos = DirectX::XMVector3Transform(point3D, m_Camera.GetViewMatrix());
+                    bool valid = DirectX::XMVectorGetZ(viewPos) >= 0.1f;
+
+                    if (valid)
+                    {
+                        ImVec2 p = Project(point3D);
+                        if (i > 0 && prevValid)
+                        {
+                            drawList->AddLine(prevPoint, p, color, 2.0f);
+                        }
+                        prevPoint = p;
+                    }
+                    prevValid = valid;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            m_FrameConstants.frameIndex = 0; // Reset path tracer if light changes
+        }
+    }
+    else
+    {
+        ImGui::Text("No lights in scene.");
+    }
+    
+    if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, -24.0f, 24.0f))
+    {
+        // exposure doesn't require reset as it's just post-process
+    }
+
     if (!m_UsePathTracer)
     {
         // Indirect GI — master checkbox, then the exclusive method enum
@@ -1686,6 +1822,167 @@ void Application::RenderImGui()
                     ImGui::SetTooltip("Re-traces one probe's gather rays and prints the readout to the console.\n"
                                       "Debug only, on demand — no per-frame cost. See the log section\n"
                                       "[BakedGI RayDebug].");
+
+                // --- Sun fold bins ---
+                // The answer to "which bins interpolate this probe, and by how
+                // much". Two DIFFERENT quantities side by side:
+                //   weight       GLOBAL     w_j, the same for every probe
+                //   contribution PER PROBE  w_j * R_j[0], this probe's table
+                // Weight alone points at the wrong bin, because R_j varies up to
+                // 4x between bins. Do not show one without the other.
+                ImGui::Separator();
+                ImGui::Text("Sun Fold Bins");
+                {
+                    BakedGI& binGI = m_Renderer.GetBakedGI();
+
+                    // The to-sun direction, negated from the light's travel
+                    // direction exactly as the update pass and FillSunFoldConstants
+                    // negate it. One negation rule, three readers.
+                    DirectX::XMFLOAT3 sunToDir = {};
+                    bool haveSun = false;
+                    if (!m_Scene.GetLights().empty())
+                    {
+                        const LightConstants& sun = m_Scene.GetLights()[0];
+                        sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
+                        haveSun = true;
+                    }
+
+                    if (ImGui::Button("Refresh Bin Contributions"))
+                    {
+                        m_PendingProbeTableReadback = true;
+                        m_ProbeTableRequestedProbe  = (uint32_t)std::max(0, m_RayDebugProbeIndex);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(reads %u's table)", (uint32_t)std::max(0, m_RayDebugProbeIndex));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Reads ONE probe's response table (2560 B) and waits for the GPU.\n"
+                                          "On demand only — never per frame. The weight and angle columns\n"
+                                          "below are pure CPU and update as you drag the sun.");
+
+                    // A probe change re-requests once. A FAILED request does not
+                    // retry every frame: each retry costs a GPU wait, so the
+                    // Refresh button is the way back.
+                    const uint32_t wantProbe = (uint32_t)std::max(0, m_RayDebugProbeIndex);
+                    if (binGI.IsValid() && !m_PendingProbeTableReadback
+                        && m_ProbeTableRequestedProbe != wantProbe)
+                    {
+                        m_PendingProbeTableReadback = true;
+                        m_ProbeTableRequestedProbe  = wantProbe;
+                    }
+
+                    BakedGI::SunBinPanel panel;
+                    binGI.BuildSunBinPanel(haveSun ? &sunToDir : nullptr, wantProbe, panel);
+
+                    if (panel.haveDirection)
+                    {
+                        ImGui::Text("Sun (to-sun)  elev %.1f deg   azim %.1f deg"
+                                    "   (%s)", panel.elevationDeg, panel.azimuthDeg,
+                                    panel.haveSun ? "fold active" : "below horizon, or no sun: all weights 0");
+                    }
+                    if (panel.haveSun)
+                    {
+                        ImGui::Text("Weighted mean angle %.2f deg", panel.meanAngleDeg);
+                        ImGui::SameLine();
+                        ImGui::TextColored((panel.weightBeyond15 > 0.5f)
+                                               ? ImVec4(0.95f, 0.55f, 0.20f, 1.0f)
+                                               : ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
+                                           "| weight beyond 15 deg %.1f%%", panel.weightBeyond15 * 100.0f);
+                        ImGui::SameLine();
+                        // Name the THRESHOLD, not "nonzero". Only 1 of the 16
+                        // weights is exactly 0 (a bin whose direction faces
+                        // away from the sun); 15 are nonzero and all 15 enter
+                        // the fold, because BakedGI_Update.hlsl:84 skips only
+                        // bw <= 0. So "nonzero" would assert 16 when the count
+                        // below is 11. The threshold is the honest label.
+                        ImGui::Text("| bins with weight > 1e-6: %u / %u",
+                                    panel.nonzeroBins, BakedGI::kDirections);
+                    }
+
+                    // Legend. The two markers are different picks and the panel
+                    // never calls either one "dominant": a bare dominant label
+                    // already caused a defect in this codebase.
+                    ImGui::TextDisabled("w*  = fold-weight argmax  = bin %u  (the Ray Fan draws this bin)",
+                                        panel.weightArgmax);
+                    if (panel.haveResponse)
+                        ImGui::TextDisabled("dc* = highest stored DC luminance = bin %u  (NOT the same pick)",
+                                            panel.dcArgmax);
+
+                    if (!panel.haveResponse)
+                    {
+                        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                                           "No table read back for probe %u, so the contribution column is empty.",
+                                           wantProbe);
+                        if (!binGI.IsValid())
+                            ImGui::TextDisabled("(no bake yet — press \"Rebuild GI Probes\")");
+                        else
+                            ImGui::TextDisabled("(press \"Refresh Bin Contributions\"; sorted by weight until then)");
+                    }
+
+                    if (ImGui::BeginTable("SunBinTable", 5,
+                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                                              | ImGuiTableFlags_SizingStretchProp))
+                    {
+                        ImGui::TableSetupColumn("Bin",  ImGuiTableColumnFlags_WidthFixed, 62.0f);
+                        ImGui::TableSetupColumn("Weight % (GLOBAL)");
+                        ImGui::TableSetupColumn("Angle deg");
+                        ImGui::TableSetupColumn("Contribution (PER PROBE)");
+                        ImGui::TableSetupColumn("% of probe");
+                        ImGui::TableHeadersRow();
+
+                        for (uint32_t r = 0; r < BakedGI::kDirections; ++r)
+                        {
+                            const BakedGI::SunBinRow& row = panel.rows[r];
+                            // A zero-weight bin contributes nothing and cannot be
+                            // the answer to "which bins interpolate". Hide it, but
+                            // keep the count honest in the header above.
+                            if (row.weight <= 1e-6f && !panel.haveResponse)
+                                continue;
+
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            {
+                                const char* mark = (row.bin == panel.weightArgmax) ? " w*"
+                                                 : (panel.haveResponse && row.bin == panel.dcArgmax) ? " dc*"
+                                                 : "";
+                                ImGui::Text("%2u%s", row.bin, mark);
+                            }
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%6.2f %%", row.weight * 100.0f);
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%6.2f", row.angleDeg);
+                            ImGui::TableSetColumnIndex(3);
+                            if (panel.haveResponse)
+                            {
+                                // Tint by the contribution's own hue, so a bin that
+                                // carries red reads red. The number is luminance;
+                                // the tooltip carries the channels.
+                                const DirectX::XMFLOAT3& c = row.contribRGB;
+                                const float mx = std::max(c.x, std::max(c.y, c.z));
+                                const ImVec4 tint = (mx > 1e-12f)
+                                    ? ImVec4(0.25f + 0.75f * (c.x / mx), 0.25f + 0.75f * (c.y / mx),
+                                             0.25f + 0.75f * (c.z / mx), 1.0f)
+                                    : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                                ImGui::TextColored(tint, "%.5f", row.contrib);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("weight x R_bin[slot 0], per channel:\n"
+                                                      "R %.5f   G %.5f   B %.5f\n"
+                                                      "R_bin[0] luminance %.5f",
+                                                      row.contribRGB.x, row.contribRGB.y, row.contribRGB.z,
+                                                      row.dcLum);
+                            }
+                            else
+                            {
+                                ImGui::TextDisabled("--");
+                            }
+                            ImGui::TableSetColumnIndex(4);
+                            if (panel.haveResponse)
+                                ImGui::Text("%6.2f %%", row.contribPct * 100.0f);
+                            else
+                                ImGui::TextDisabled("--");
+                        }
+                        ImGui::EndTable();
+                    }
+                }
 
                 // --- Probes near the camera ---
                 // The answer to "which probe index am I standing in?". The index
@@ -2444,137 +2741,6 @@ void Application::RenderImGui()
             ImGui::TreePop();
         }
     }
-
-    ImGui::Separator();
-    ImGui::Text("Light Editor");
-    
-    std::vector<LightConstants>& lights = m_Scene.GetLights();
-    if (!lights.empty())
-    {
-        std::vector<std::string> lightNames;
-        for (size_t i = 0; i < lights.size(); ++i) {
-            std::string type = (lights[i].direction.w < 0.5f) ? "Dir" : "Spot";
-            lightNames.push_back("Light " + std::to_string(i) + " (" + type + ")");
-        }
-
-        if (ImGui::BeginCombo("Select Light", lightNames[m_SelectedLightIndex].c_str()))
-        {
-            for (int i = 0; i < (int)lights.size(); ++i)
-            {
-                bool isSelected = (m_SelectedLightIndex == i);
-                if (ImGui::Selectable(lightNames[i].c_str(), isSelected))
-                {
-                    m_SelectedLightIndex = i;
-                }
-                if (isSelected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-
-        LightConstants& selectedLight = lights[m_SelectedLightIndex];
-        bool changed = false;
-
-        if (selectedLight.direction.w < 0.5f) // Directional
-        {
-            // Directional-light colour/intensity are now driven by the Hosek-Wilkie
-            // solar irradiance (Sky::ComputeSunIrradiance).  The values shown here
-            // are read-only and updated each frame.
-            DirectX::XMFLOAT3 si = m_Renderer.GetSunIrradiance();
-            float irradianceRGB[3] = { si.x, si.y, si.z };
-            ImGui::Text("Sun Irradiance (auto)");
-            ImGui::InputFloat3("##irradiance", irradianceRGB, "%.3f", ImGuiInputTextFlags_ReadOnly);
-
-            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
-            {
-                // Normalize direction
-                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
-                lightDir = DirectX::XMVector3Normalize(lightDir);
-                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
-                changed = true;
-            }
-        }
-        else // Point/Spot
-        {
-            if (ImGui::DragFloat3("Position", &selectedLight.position.x, 0.1f))
-            {
-                changed = true;
-            }
-            
-            // If it's a spot light (direction is used)
-            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
-            {
-                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
-                lightDir = DirectX::XMVector3Normalize(lightDir);
-                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
-                changed = true;
-            }
-
-            // Draw wireframe sphere around selected light
-            ImDrawList* drawList = ImGui::GetBackgroundDrawList();
-            
-            auto Project = [&](const DirectX::XMVECTOR& pos3D) -> ImVec2 {
-                DirectX::XMVECTOR pos2D = DirectX::XMVector3Project(pos3D, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0.0f, 1.0f, m_Camera.GetProjMatrix(), m_Camera.GetViewMatrix(), DirectX::XMMatrixIdentity());
-                return ImVec2(DirectX::XMVectorGetX(pos2D), DirectX::XMVectorGetY(pos2D));
-            };
-
-            float radius = 0.5f;
-            ImU32 color = IM_COL32(255, 255, 0, 255); // Yellow
-            int segments = 16;
-
-            for (int plane = 0; plane < 3; ++plane)
-            {
-                ImVec2 prevPoint;
-                bool prevValid = false;
-                for (int i = 0; i <= segments; ++i)
-                {
-                    float angle = (float)i / segments * DirectX::XM_2PI;
-                    float c = cosf(angle) * radius;
-                    float s = sinf(angle) * radius;
-                    
-                    DirectX::XMVECTOR point3D;
-                    if (plane == 0) point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y + s, selectedLight.position.z, 1.0f);
-                    else if (plane == 1) point3D = DirectX::XMVectorSet(selectedLight.position.x, selectedLight.position.y + c, selectedLight.position.z + s, 1.0f);
-                    else point3D = DirectX::XMVectorSet(selectedLight.position.x + c, selectedLight.position.y, selectedLight.position.z + s, 1.0f);
-                    
-                    DirectX::XMVECTOR viewPos = DirectX::XMVector3Transform(point3D, m_Camera.GetViewMatrix());
-                    bool valid = DirectX::XMVectorGetZ(viewPos) >= 0.1f;
-
-                    if (valid)
-                    {
-                        ImVec2 p = Project(point3D);
-                        if (i > 0 && prevValid)
-                        {
-                            drawList->AddLine(prevPoint, p, color, 2.0f);
-                        }
-                        prevPoint = p;
-                    }
-                    prevValid = valid;
-                }
-            }
-        }
-
-        if (changed)
-        {
-            m_FrameConstants.frameIndex = 0; // Reset path tracer if light changes
-        }
-    }
-    else
-    {
-        ImGui::Text("No lights in scene.");
-    }
-    
-    if (ImGui::DragFloat("Exposure", &m_Exposure, 0.01f, -24.0f, 24.0f))
-    {
-        // exposure doesn't require reset as it's just post-process
-    }
-
-    // Debug values from Model
-    ImGui::Text("Total Nodes Read: %zu", m_Model.GetTotalNodes());
-    ImGui::Text("Total Root Nodes: %zu", m_Model.GetTotalRootNodes());
-    ImGui::Text("Nodes Survive Frustum: %zu", m_Model.GetNodesSurviveFrustum());
 
     ImGui::Separator();
 

@@ -38,7 +38,20 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
-#define GATHER_RAYS 64
+// Gather rays for each direction. 64 -> 256 on 2026-10-26.
+//
+// Every gather ray carries the same solid angle, 4*PI/GATHER_RAYS, because the
+// sampler is uniform over the full sphere. So one ray onto a distant surface
+// stands for that much solid angle regardless of how small the surface is. At
+// 64 the weight is 0.196 sr, far more than a cloth across a hall subtends, and
+// one such ray decided 74.7 percent of the sun red DC of probe 7669. At 256 the
+// weight falls to 0.049 sr and the hit count for any source quadruples.
+//
+// Cost is bake time only: the payload size and the per-frame read are unchanged.
+//
+// MUST match BakedGI::kBakeGatherRays (BakedGI.h) and BAKE_RAYS
+// (BakedGI_RayDebug.hlsl).
+#define GATHER_RAYS 256
 
 // Trilinear evaluation of a previous iteration's response table at worldPos,
 // projected with the receiver normal — the series-expansion feedback term.

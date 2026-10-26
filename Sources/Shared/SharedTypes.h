@@ -309,9 +309,11 @@ struct FrameConstants {
     // being hunted is not the brightest one. This field lets the UI name the ray
     // instead.
     //
-    // 0..BakedGI::kGatherRays-1 = draw that gather-ray RECORD INDEX of the
+    // 0..BakedGI::kDebugGatherRays-1 = draw that gather-ray RECORD INDEX of the
     // sun-dominant direction. BakedGI::kNoRayPick (0xFFFFFFFF) = no override: the
     // shader keeps its own argmax. A ray index may be 0, so 0 cannot mean "none".
+    // This is a RECORD index, not a source gather-ray index: the debug pass
+    // replays BakedGI::kBakeGatherRays rays and keeps kDebugGatherRays records.
     //
     // The pool the UI enumerates is built on the CPU from the dump's own
     // readback and holds exactly the rays where the feedback term beats the
