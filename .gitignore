@@ -107,3 +107,10 @@ Thumbs.db
 *.exe
 *.out
 *.app
+# WorkBuddy generated agent-memory views. Regenerate, do not edit.
+#   python C:/Users/rtjandra/.workbuddy/agents/_sync_agent_views.py
+.workbuddy/memory/EVALUATED-*.md
+.workbuddy/memory/WATCHLIST-*.md
+.workbuddy/memory/PERFGUARD-MEMORY.md
+.workbuddy/memory/RENDERCORE-MEMORY.md
+.workbuddy/memory/VISUALCONTEXT-MEMORY.md
