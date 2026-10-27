@@ -68,7 +68,14 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // above-roof probes are Chebyshev-rejected (the slab is between) and the
 // feedback is zero — the physically correct value for a surface that cannot
 // see any lit region.
-float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis, uint dir,
+// stride: the records per probe. BAKED_GI_DIRECTIONS for the 16-bin table,
+//         1 for the method-3 sun table (one record for each probe).
+// idx:    the bin index, or 0 for the sun table.
+// ONE function, two callers: the only difference between the binned feedback and
+// the sun feedback is the stride and the index, so a second copy would be a
+// second thing to get wrong.
+float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
+                            uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
 {
     // Slide the read point slightly along n (toward the probe hemisphere) so
@@ -127,7 +134,7 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
             wFull = w * back * BakedGIChebyshev(m, dist);
         }
 
-        uint slot = (flat * BAKED_GI_DIRECTIONS + dir) * BAKED_GI_RESPONSE_F4;
+        uint slot = (flat * stride + idx) * BAKED_GI_RESPONSE_F4;
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
             e[lm] += resp[slot + lm].rgb * wFull;
@@ -152,17 +159,47 @@ void main(uint3 dtid : SV_DispatchThreadID)
     uint probeCount = dims.x * dims.y * dims.z;
     uint probe = dtid.x; // flattened probe cell
     uint dir   = dtid.y; // delta direction index
-    if (probe >= probeCount || dir >= BAKED_GI_DIRECTIONS)
+    // sunMode: the delta light IS the real sun (method 3). One dispatch covers it,
+    // so only row 0 works. The record has no bin index — one per probe.
+    const bool sunMode = BakeParams.sunMode != 0u;
+    if (probe >= probeCount)
+        return;
+    if (sunMode)
+    {
+        if (dir != 0u)
+            return;
+    }
+    else if (dir >= BAKED_GI_DIRECTIONS)
         return;
 
     uint3 cell = uint3(probe % dims.x, (probe / dims.x) % dims.y, probe / (dims.x * dims.y));
     float3 gridMin = float3(BakeParams.gridMinX, BakeParams.gridMinY, BakeParams.gridMinZ);
     float3 probePos = gridMin + float3(cell) * BakeParams.spacing;
-    float3 wDelta = BakedGIDeltaDirection(dir);
+
+    // Record addressing: 16 bins for the binned transport, ONE record for the sun.
+    const uint kRespStride = sunMode ? 1u : BAKED_GI_DIRECTIONS;
+    const uint kRespIdx    = sunMode ? 0u : dir;
+
+    // The delta direction. sunMode uses the real sun, so the visibility test and
+    // the cosine below finally ask the right question: this is the whole point of
+    // the method, and it is why the fold no longer has an angular error.
+    float3 sunDir = float3(BakeParams.sunDirX, BakeParams.sunDirY, BakeParams.sunDirZ);
+    float3 wDelta;
+    if (sunMode)
+    {
+        const float sunLen = length(sunDir);
+        // A zero sun cannot be a delta light. Fall back to +Y rather than emit
+        // NaN: a NaN would poison the stored table and the whole probe cell.
+        wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
+    }
+    else
+    {
+        wDelta = BakedGIDeltaDirection(dir);
+    }
 
     RWStructuredBuffer<float4> response = ResourceDescriptorHeap[BakeParams.responseUAVIdx];
     RWStructuredBuffer<uint>    meta     = ResourceDescriptorHeap[BakeParams.metaUAVIdx];
-    uint slot = (probe * BAKED_GI_DIRECTIONS + dir) * BAKED_GI_RESPONSE_F4;
+    uint slot = (probe * kRespStride + kRespIdx) * BAKED_GI_RESPONSE_F4;
 
     // --- Validity: classified by the visibility pass (dispatched BEFORE the
     // transport iterations — its UAV barrier orders the write). DDGI
@@ -261,7 +298,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         // Feedback: previous iteration's indirect response at the hit,
         // visibility-weighted so it cannot cross walls/roofs.
         float3 Efb = (BakeParams.iteration > 0u)
-            ? EvalResponseIndirect(responsePrev, visMoments, dir, surf.worldPos, surf.normal, dims, gridMin, BakeParams.spacing)
+            ? EvalResponseIndirect(responsePrev, visMoments, kRespStride, kRespIdx, surf.worldPos, surf.normal, dims, gridMin, BakeParams.spacing)
             : float3(0.0f, 0.0f, 0.0f);
 
         // Lambertian outgoing radiance under the delta light.

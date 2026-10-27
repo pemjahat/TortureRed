@@ -240,7 +240,7 @@ void Application::Initialize()
     // Baked GI probe system : pipelines + runtime bake after
     // the scene is fully loaded (consumed at the start of the first Render).
     m_Renderer.CreateBakedGIPipelines();
-    if (m_IndirectGIEnabled && m_IndirectGIMethod == 0)
+    if (m_IndirectGIEnabled && ProbeMethodActive())
         m_PendingGIProbeBake = true; // auto-bake the default probe method
 
     // DDGI probe system : pipelines + grid setup. The grid fits the loaded model
@@ -806,7 +806,17 @@ void Application::Render()
     if (m_PendingGIProbeBake)
     {
         m_PendingGIProbeBake = false;
-        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
+        // Method 3 additionally bakes the sun's own response toward the REAL sun,
+        // so the transport needs the to-sun direction at bake time. Everything
+        // else about the bake is unchanged.
+        const DirectX::XMFLOAT3 bakeSunToDir = SunToDirNow();
+        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing, SingleDirectionSun(), bakeSunToDir);
+        // The fold is baked under method 3, so it must run once. It CANNOT run
+        // here: the sky cubemap it samples is baked later in this same frame, so
+        // folding now would use the previous frame's sky. Mark it pending and
+        // service it right after ExecuteSky below.
+        if (SingleDirectionSun())
+            m_PendingProbeFold = true;
         // The bake replaced the per-term capture, so the SRV indices the "Efb
         // Contribution" view reads changed. Update published the PRE-bake ones,
         // and Render uploads the constants again after these pending blocks, so
@@ -832,13 +842,8 @@ void Application::Render()
         // The table is indexed by TO-SUN directions; the light stores the travel
         // direction. Same negation the update pass uses. Both the ray-debug
         // readout and the kernel-weight log use this one direction.
-        DirectX::XMFLOAT3 sunToDir = {};
-        const bool haveSunToDir = !m_Scene.GetLights().empty();
-        if (haveSunToDir)
-        {
-            const LightConstants& sun = m_Scene.GetLights()[0];
-            sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
-        }
+        const bool haveSunToDir = HasSunLight();
+        const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
                                    haveSunToDir ? &sunToDir : nullptr);
         if (haveSunToDir)
@@ -921,11 +926,28 @@ void Application::Render()
         // Baked GI — fold the live sun/sky state into the lit probe grid
         // (probe mode only; ReSTIR GI is the exclusive alternative and its
         // dispatch early-outs via enableRestirGI = 0).
+        // Under method 3 the fold is BAKED: it runs once per bake, not per frame.
+        // It is serviced here, after ExecuteSky and after the sun-irradiance
+        // replacement above, so sunE and the cubemap are both current. Running it
+        // inside BakeGIProbes instead would read the previous frame's sky.
+        const bool foldWanted = SingleDirectionSun() ? m_PendingProbeFold : true;
         if (m_FrameConstants.bakedGIMode != 0 && m_FrameConstants.bakedGIValid != 0
-            && !m_Scene.GetLights().empty())
+            && !m_Scene.GetLights().empty() && foldWanted)
         {
             GPU_MARKER(cmdList, L"BakedGI Update");
-            m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0]);
+            m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0],
+                                             SingleDirectionSun());
+            m_PendingProbeFold = false;
+            // ONE line, once per bake, never per frame. This is the observation
+            // that the method-3 update pass is idle: if this prints again on the
+            // next frame, the gate is broken and the 17.95 -> 0 GB/s claim is
+            // wrong. Gated on SingleDirectionSun() so the binned method, which
+            // folds every frame by design, does not spam the log.
+            if (SingleDirectionSun())
+                std::cout << "[BakedGI] fold baked once for "
+                          << m_Renderer.GetBakedGI().GetProbeCount()
+                          << " probes (single-direction sun); the update pass is idle"
+                          << std::endl;
         }
 
         // DDGI — trace the probe rays and resolve the two atlases. It runs after
@@ -1455,6 +1477,19 @@ void Application::Render()
     MicroProfileFlip(nullptr);
 }
 
+// The to-sun direction, negated from the light's travel direction exactly as the
+// update pass does. One definition for every reader: the bake, the fold, the
+// ray-debug readout, the kernel-weight log and the bin panel all used to negate
+// it inline, and the mode-swap check below compares directions, so a divergence
+// between two copies would silently disable that check.
+DirectX::XMFLOAT3 Application::SunToDirNow()
+{
+    if (!HasSunLight())
+        return DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
+    const LightConstants& sun = m_Scene.GetLights()[0];
+    return DirectX::XMFLOAT3(-sun.direction.x, -sun.direction.y, -sun.direction.z);
+}
+
 void Application::RenderImGui()
 {
     // Create a simple debug window
@@ -1744,15 +1779,66 @@ void Application::RenderImGui()
         {
             ImGui::Indent();
 
-            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI", "DDGI" };
+            // Index 3 is APPENDED, not inserted: 0/1/2 keep their meaning so no
+            // stored setting or external reference is reinterpreted, and Probe
+            // stays reachable at index 0 as the fallback.
+            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI", "DDGI",
+                                        "Probe (Baked Sun)" };
             const bool methodChanged = ImGui::Combo("Indirect GI Method", &m_IndirectGIMethod, giMethods, IM_ARRAYSIZE(giMethods));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.\nDDGI: a runtime ray-traced octahedral irradiance probe volume. Re-traces every frame (no bake, no sun gating); sun light enters the probes through frontface hits only, so the probes store indirect light.");
+                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.\nDDGI: a runtime ray-traced octahedral irradiance probe volume. Re-traces every frame (no bake, no sun gating); sun light enters the probes through frontface hits only, so the probes store indirect light.\nProbe (Baked Sun): the sun is baked as a single response toward the real sun direction instead of being reconstructed from the 16 bins, and the whole fold is baked, so a sun or sky change needs a rebake. Direct sun stays runtime-exact.");
 
             // Exactly one of the three engine flags is ever set.
-            m_FrameConstants.bakedGIMode            = (m_IndirectGIMethod == 0) ? 1u : 0u;
+            m_FrameConstants.bakedGIMode            = ProbeMethodActive() ? 1u : 0u;
             m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == 1) ? 1u : 0u;
             m_FrameConstants.ddgiMode      = (m_IndirectGIMethod == 2) ? 1u : 0u;
+
+            // -----------------------------------------------------------------
+            // A METHOD CHANGE IS AN EVENT, NOT A STATE. Service it here, once,
+            // unconditionally.
+            //
+            // The old code requested work from inside "if (!gi.IsValid())", two
+            // blocks further down. That is why the swap back into the
+            // single-direction method left the image stuck: a bake already
+            // existed, so the branch never ran, nothing armed m_PendingProbeFold,
+            // the fold's gate evaluated false, and Lit kept whatever the previous
+            // method had written. It also gated the request on
+            // "!m_PendingGIProbeBake", which can swallow an event outright. A
+            // pending request is idempotent, so that guard bought nothing and
+            // risked losing the only retry.
+            // -----------------------------------------------------------------
+            if (methodChanged || !wasGIEnabled)
+            {
+                if (SingleDirectionSun())
+                {
+                    const bool haveSun = HasSunLight();
+                    const DirectX::XMFLOAT3 sun = SunToDirNow();
+                    BakedGI& giRef = m_Renderer.GetBakedGI();
+                    // Arming the fold is free. A bake is 1.6 to 97 s on a UI
+                    // action. So reuse the resident sun table when it already
+                    // describes THIS sun, and rebake only when the table is
+                    // missing or was baked for a different direction. The second
+                    // case matters: a stale table would multiply a live sunE by a
+                    // response for the wrong direction and look plausible.
+                    if (haveSun && giRef.HasSunResponseFor(sun))
+                        m_PendingProbeFold = true;
+                    else if (haveSun)
+                        m_PendingGIProbeBake = true;
+                    // No sun: nothing to fold, and the fold gate requires a light.
+                }
+                else if (m_IndirectGIMethod == kIndirectMethodProbe)
+                {
+                    // Probe folds every frame from a sun-independent table, so an
+                    // existing bake needs nothing at all.
+                    if (!m_Renderer.GetBakedGI().IsValid())
+                        m_PendingGIProbeBake = true;
+                }
+                // DDGI is deliberately NOT re-fitted here. Its grid depends on the
+                // scene bounds, not on the method, so a valid grid is already
+                // correct and re-fitting would cost a rebuild on every swap. Its
+                // guard further down is structurally identical to the probe one
+                // but cannot leave method-dependent stale data behind.
+            }
 
             ImGui::Checkbox("Indirect Only View", &m_GIIndirectOnly);
             if (ImGui::IsItemHovered())
@@ -1767,7 +1853,8 @@ void Application::RenderImGui()
             if (m_GIIndirectOnly)
             {
                 ImGui::Indent();
-                const bool splitAvailable = (m_IndirectGIMethod == 0);
+                // Both probe methods write the sky/sun split buffers.
+                const bool splitAvailable = ProbeMethodActive();
                 ImGui::BeginDisabled(!splitAvailable);
                 const char* indirectSources[] = { "Full (Sky + Sun)", "Sky Only", "Sun Only" };
                 ImGui::SetNextItemWidth(180.f);
@@ -1795,7 +1882,7 @@ void Application::RenderImGui()
                 ImGui::Unindent();
             }
 
-            if (m_IndirectGIMethod == 0)
+            if (ProbeMethodActive())
             {
                 ImGui::SliderFloat("Probe Spacing", &m_BakedGISpacing, 0.5f, 8.0f, "%.1f m");
                 if (ImGui::IsItemHovered())
@@ -1832,20 +1919,30 @@ void Application::RenderImGui()
                 // 4x between bins. Do not show one without the other.
                 ImGui::Separator();
                 ImGui::Text("Sun Fold Bins");
+                // Method 3 does not run this fold. The weights below are still the
+                // RIGHT weights for the sun direction, but nothing consumes them:
+                // the sun column comes from one baked term instead. Say so here,
+                // because a panel that silently shows live weights for a fold that
+                // is not running is worse than no panel.
+                if (SingleDirectionSun())
+                {
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                                       "FOLD IS BAKED under \"Probe (Baked Sun)\".");
+                    ImGui::TextWrapped("The weights and angles below are the kernel's, "
+                                       "but this method does not use the kernel: the sun "
+                                       "column is one response baked toward the real sun. "
+                                       "The contribution column reads the 16-bin table, "
+                                       "which is still baked for the sky quadrature and "
+                                       "for these debug views.");
+                }
                 {
                     BakedGI& binGI = m_Renderer.GetBakedGI();
 
                     // The to-sun direction, negated from the light's travel
                     // direction exactly as the update pass and FillSunFoldConstants
                     // negate it. One negation rule, three readers.
-                    DirectX::XMFLOAT3 sunToDir = {};
-                    bool haveSun = false;
-                    if (!m_Scene.GetLights().empty())
-                    {
-                        const LightConstants& sun = m_Scene.GetLights()[0];
-                        sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
-                        haveSun = true;
-                    }
+                    const bool haveSun = HasSunLight();
+                    const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
 
                     if (ImGui::Button("Refresh Bin Contributions"))
                     {
@@ -2454,7 +2551,11 @@ void Application::RenderImGui()
                     ImGui::TextDisabled("No bake yet");
                     // Probe method just became active without data — request
                     // the bake automatically (parity with scene-load auto-bake).
-                    if ((methodChanged || !wasGIEnabled) && !m_PendingGIProbeBake)
+                    // The method-change half of this moved to the event handler
+                    // right after the combo. What is left is the per-frame "no
+                    // bake yet" net, and a pending request needs no guard because
+                    // setting it twice is idempotent.
+                    if (!wasGIEnabled)
                         m_PendingGIProbeBake = true;
                 }
             }
@@ -2499,7 +2600,7 @@ void Application::RenderImGui()
                     ImGui::TextDisabled("No grid yet");
                     // DDGI just became active without a grid — fit one now
                     // (parity with the probe-method auto-bake above).
-                    if ((methodChanged || !wasGIEnabled) && !m_PendingDDGISetup)
+                    if (!wasGIEnabled)
                         m_PendingDDGISetup = true;
                 }
             }

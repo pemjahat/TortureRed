@@ -144,7 +144,47 @@ private:
     int   m_DDGIDebugView       = 0;     // DDGI debug overlay: 0 off, 1 irradiance, 2 probe states, 3 depth
     float m_DDGIDebugScale      = 1.0f;  // DDGI debug gain
     bool  m_IndirectGIEnabled   = true;  // Indirect GI master switch (raster path)
-    int   m_IndirectGIMethod    = 0;     // Indirect GI method: 0 = Probe (Baked), 1 = ReSTIR GI, 2 = DDGI
+    // Method enum for m_IndirectGIMethod. Declared BEFORE it, because the default
+    // initialiser below names one of these constants.
+    //
+    // Index 3 is APPENDED, not inserted: 0/1/2 keep their meaning so nothing that
+    // stores or compares the method is reinterpreted, and Probe stays at index 0
+    // as the fallback.
+    //
+    // Both probe methods share the bake, the grid, the payload and the deferred
+    // fetch. They differ in ONE thing: whether the sun's visibility was tested
+    // toward a fibonacci bin or toward the real sun. Gate every "is this the probe
+    // method" check on ProbeMethodActive(), never on a literal, or the fourth
+    // method silently loses a control or the auto-bake.
+    static constexpr int kIndirectMethodProbe                = 0;
+    static constexpr int kIndirectMethodRestirGI             = 1;
+    static constexpr int kIndirectMethodDDGI                 = 2;
+    static constexpr int kIndirectMethodProbeSingleDirection = 3; // default
+    int   m_IndirectGIMethod    = kIndirectMethodProbeSingleDirection;
+    bool ProbeMethodActive() const
+    {
+        return m_IndirectGIMethod == kIndirectMethodProbe
+            || m_IndirectGIMethod == kIndirectMethodProbeSingleDirection;
+    }
+    // True when the fold is baked: sun visibility toward the real sun, one term,
+    // no 16-bin kernel, fold dispatched once per bake instead of every frame.
+    bool SingleDirectionSun() const
+    {
+        return m_IndirectGIMethod == kIndirectMethodProbeSingleDirection;
+    }
+    // Set by a bake under SingleDirectionSun and cleared when the fold runs. The
+    // fold cannot run inside BakeGIProbes: the sky cubemap it samples is baked
+    // later in the same frame, so it is serviced right after ExecuteSky.
+    bool  m_PendingProbeFold    = false;
+
+    // ONE definition of the to-sun direction: the light's travel direction,
+    // negated, exactly as BakedGI_Update.hlsl negates it. Four inline copies had
+    // accumulated, and the mode-swap check compares DIRECTIONS, so a divergence
+    // between two of them would silently disable that check.
+    // SunToDirNow returns +Y when the scene has no light, so a caller that cares
+    // must ask HasSunLight() as well.
+    bool HasSunLight() { return !m_Scene.GetLights().empty(); }
+    DirectX::XMFLOAT3 SunToDirNow();
     bool  m_GIIndirectOnly      = false; // Indirect-only scene view: draw just the indirect GI term
     int   m_GIIndirectOnlySource = 0;    // Indirect source split: 0 = full (sky + sun), 1 = sky only, 2 = sun only
     int   m_GIIndirectOnlyAlbedo = 0;    // Indirect-only albedo override: 0 = surface albedo, 1 = all white

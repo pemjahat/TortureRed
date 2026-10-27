@@ -51,7 +51,10 @@ public:
     // Baked GI probe system (task017 step 1) — EXCLUSIVE indirect source with
     // ReSTIR GI (bakedGIMode in FrameConstants arbitrates).
     void CreateBakedGIPipelines();
-    bool BakeGIProbes(class Model* model, float spacing);
+    // singleDirectionSun: method 3. Also bakes the sun's response toward sunToDir
+    // (the TO-SUN unit direction) so the runtime fold has a single sun term.
+    bool BakeGIProbes(class Model* model, float spacing, bool singleDirectionSun = false,
+                      const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f));
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
     // sunToDir is required. Pass the to-sun direction to name the sun-dominant
@@ -65,7 +68,9 @@ public:
     // caller must invoke it OUTSIDE the frame recording — Application::Render,
     // not the ImGui build — or the reset discards the frame in flight.
     bool ReadbackBakedGIProbeTable(uint32_t probeIndex);
-    void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun);
+    // singleDirectionSun: method 3's sun branch — one baked term, no 16-bin kernel.
+    void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
+                               bool singleDirectionSun = false);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }
 

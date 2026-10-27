@@ -116,12 +116,21 @@ public:
                     D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                    float spacing);
+                    float spacing,
+                    // Method 3: also bake the sun's response toward the REAL sun
+                    // direction, into the per-probe sun table. sunToDir is the
+                    // TO-SUN unit direction and is read only when this is true.
+                    bool singleDirectionSun = false,
+                    const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f));
 
     // Per-frame: fold the live sun/sky state into the lit-probe buffer.
+    // singleDirectionSun selects the sun branch: instead of the 16-bin cos^8
+    // kernel it takes the one baked sun term. Under method 3 this runs ONCE per
+    // bake (the fold is baked), not every frame.
     void RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,
                       D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                      const DirectX::XMFLOAT3& sunIrradiance, const DirectX::XMFLOAT3& sunToDir);
+                      const DirectX::XMFLOAT3& sunIrradiance, const DirectX::XMFLOAT3& sunToDir,
+                      bool singleDirectionSun = false);
 
     bool              IsValid() const { return m_Valid; }
     float             GetSpacing() const { return m_Spacing; }
@@ -141,6 +150,24 @@ public:
     uint32_t          GetMetaSRVIndex() const { return (uint32_t)m_Meta.srvIndex; }
     uint32_t          GetVisibilitySRVIndex() const { return (uint32_t)m_Visibility.srvIndex; }
     uint32_t          GetResponseSRVIndex() const { return (uint32_t)m_Response[m_FinalResponse].srvIndex; }
+
+    // Per-probe SUN response table (method 3 only): kResponseFloat4s float4 for
+    // each probe, no bin index. Populated by RecordBake when singleDirectionSun
+    // is set. Separate from the 16-bin table on purpose — see
+    // BakedGIBakeParams::sunMode. Returns 0 when no sun table exists.
+    uint32_t          GetSunResponseSRVIndex() const
+    {
+        return m_SunResponseValid ? (uint32_t)m_SunResponse[m_FinalSunResponse].srvIndex : 0u;
+    }
+    bool              HasSunResponse() const { return m_SunResponseValid; }
+    // True only when the resident sun table was baked for THIS sun direction.
+    //
+    // The table is a baked response toward one direction, so a moved sun makes it
+    // stale. A stale table is worse than a missing one: the fold would multiply a
+    // live sunE by a response for the wrong direction and produce a plausible
+    // wrong image instead of failing visibly. Callers that want to reuse the
+    // table must ask this, not HasSunResponse.
+    bool              HasSunResponseFor(const DirectX::XMFLOAT3& sunToDir) const;
     // Ray-debug buffer (records + re-accumulated table). The Ray Fan view reads
     // the records. The buffer exists only after a dump.
     bool              HasRayDebugBuffer() const { return m_RayDebugBuf.resource != nullptr; }
@@ -502,7 +529,9 @@ private:
 
     // Shared by the bake and the cache-load paths: (re)creates the seven
     // probe buffers for the current grid (dims/spacing/probeCount members).
-    bool CreateProbeBuffers();
+    // wantSunTable: also create the method-3 per-probe sun response pair. Off
+   // for the Probe method, so its payload is byte-for-byte what it was.
+   bool CreateProbeBuffers(bool wantSunTable = false);
     // Debug-only outputs of the bake: the per-term transport snapshots
     // (m_ResponseIter, kIterSnapshotCount tables) and the folded per-probe
     // response balls (m_EfbBall, kBakeIterations). Created on the DISPATCH path
@@ -522,6 +551,15 @@ private:
 
     // Ping-pong transport table: probeCount x kDirections x kResponseFloat4s float4s.
     GPUBuffer m_Response[2];
+    // Method-3 sun series. Ping-pong for the same reason as m_Response: each
+    // iteration's feedback reads the previous one. Stride is kResponseFloat4s
+    // (one record per probe, no bin index), so 160 B per probe per buffer.
+    GPUBuffer m_SunResponse[2];
+    bool      m_SunResponseValid = false;
+    uint32_t  m_FinalSunResponse = 0;
+    // The to-sun direction the resident table describes. Recorded at bake time so
+    // HasSunResponseFor can reject a stale table after a sun move.
+    DirectX::XMFLOAT3 m_SunBakeDir = { 0.0f, 1.0f, 0.0f };
     GPUBuffer m_LitProbes;    // per-frame lit SH9 RGB, TOTAL (runtime fetch source)
     GPUBuffer m_LitProbesSky; // per-frame lit SH9 RGB, sky-sourced split (debug)
     GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)

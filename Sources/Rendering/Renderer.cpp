@@ -962,7 +962,8 @@ void Renderer::CreateBakedGIPipelines()
     m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 }
 
-bool Renderer::BakeGIProbes(Model* model, float spacing)
+bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun,
+                            const DirectX::XMFLOAT3& sunToDir)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -980,7 +981,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing)
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing);
+                                    spacing, singleDirectionSun, sunToDir);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.
@@ -1005,7 +1006,8 @@ bool Renderer::BakeGIProbes(Model* model, float spacing)
     return ok;
 }
 
-void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun)
+void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
+                                    bool singleDirectionSun)
 {
     if (!m_BakedGI.IsValid() || frame.bakedGIValid == 0)
         return;
@@ -1015,7 +1017,7 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
     DirectX::XMFLOAT3 sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
 
     m_BakedGI.RecordUpdate(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
-                            m_Sky.GetSunIrradiance(), sunToDir);
+                            m_Sky.GetSunIrradiance(), sunToDir, singleDirectionSun);
 }
 
 // On-demand ray-debug re-trace. Debug only: it resets the command list and

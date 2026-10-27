@@ -68,26 +68,55 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     // --- Sun: kernel-interpolated indirect response x sun irradiance ---
-    float bw[BAKED_GI_DIRECTIONS];
-    float wsum = 0.0f;
-    [unroll]
-    for (uint j = 0; j < BAKED_GI_DIRECTIONS; ++j)
+    //
+    // TWO SOURCES, chosen by the method baked into this table:
+    //
+    //   sunMode 0 (Probe)      : the 16-bin cos^8 fold. Each bin is the response
+    //                            to a delta light from W_j, and the kernel mixes
+    //                            them to approximate the response at the sun. The
+    //                            mix is sound for smooth radiance and wrong for
+    //                            visibility: the weighted answer sits 23 degrees
+    //                            from the sun on average, so a light path narrower
+    //                            than about 15 degrees reads as fully lit or fully
+    //                            shadowed with no partial credit.
+    //
+    //   sunMode 1 (SingleDir)  : ONE term, no kernel. The bake traced visibility
+    //                            toward the real sun, so the response already
+    //                            describes the sun and there is nothing to
+    //                            interpolate. This is the whole point of the method.
+    if (Upd.sunMode != 0u)
     {
-        bw[j] = pow(max(0.0f, dot(BakedGIDeltaDirection(j), sunDir)), 8.0f);
-        wsum += bw[j];
-    }
-    if (wsum > 1e-6f)
-    {
+        // One record per probe: no bin index, so the stride is kResponseFloat4s
+        // rather than BAKED_GI_DIRECTIONS * kResponseFloat4s.
+        StructuredBuffer<float4> sunResp = ResourceDescriptorHeap[Upd.sunResponseSRVIdx];
+        const uint sunSlot = probe * BAKED_GI_RESPONSE_F4;
         [unroll]
-        for (uint j2 = 0; j2 < BAKED_GI_DIRECTIONS; ++j2)
+        for (uint lms = 0; lms < 9; ++lms)
+            coefSun[lms] += sunE * sunResp[sunSlot + lms].rgb;
+    }
+    else
+    {
+        float bw[BAKED_GI_DIRECTIONS];
+        float wsum = 0.0f;
+        [unroll]
+        for (uint j = 0; j < BAKED_GI_DIRECTIONS; ++j)
         {
-            if (bw[j2] <= 0.0f)
-                continue;
-            float b = bw[j2] / wsum;
-            uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
+            bw[j] = pow(max(0.0f, dot(BakedGIDeltaDirection(j), sunDir)), 8.0f);
+            wsum += bw[j];
+        }
+        if (wsum > 1e-6f)
+        {
             [unroll]
-            for (uint lm = 0; lm < 9; ++lm)
-                coefSun[lm] += sunE * b * response[slot + lm].rgb;
+            for (uint j2 = 0; j2 < BAKED_GI_DIRECTIONS; ++j2)
+            {
+                if (bw[j2] <= 0.0f)
+                    continue;
+                float b = bw[j2] / wsum;
+                uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
+                [unroll]
+                for (uint lm = 0; lm < 9; ++lm)
+                    coefSun[lm] += sunE * b * response[slot + lm].rgb;
+            }
         }
     }
 

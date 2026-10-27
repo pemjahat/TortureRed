@@ -49,6 +49,35 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 }
 
 // ---------------------------------------------------------------------------
+// Ray-debug record, rec3.w. ONE definition, two users: BakedGI_RayDebug.hlsl
+// encodes it and BakedGI_Debug.hlsl decodes it. It lives here so the two cannot
+// drift.
+//
+// The record is a fixed 6 float4 and no field is spare, so the STATUS and the
+// SOURCE RAY INDEX share rec3.w:
+//
+//     rec3.w = status + 4 * sourceRayIndex
+//
+//   status          0 = sky miss, 1 = backface reject, 2 = shaded
+//   sourceRayIndex  0..BAKE_RAYS-1: which gather ray of the 256 this record is
+//
+// Exactness: fp32 represents every integer up to 2^24, and the largest packed
+// value is 2 + 4 * 255 = 1022, so fmod is exact and the round trip loses nothing.
+//
+// WARNING: rec3.w is NOT the status any more. Compare it to 0.5 or 2.0 direct
+// and you read the packed value. Always go through these two.
+// ---------------------------------------------------------------------------
+float BakedGIRayRecStatus(float packed)
+{
+    return fmod(packed, 4.0f);
+}
+
+uint BakedGIRayRecSourceRay(float packed)
+{
+    return (uint)((packed - fmod(packed, 4.0f)) * 0.25f + 0.5f);
+}
+
+// ---------------------------------------------------------------------------
 // Probe meta (validity) bit layout — written once per bake by the
 // classification stage in BakedGI_Visibility.hlsl, read by the transport bake,
 // the runtime fetch, the update pass, and the debug views.

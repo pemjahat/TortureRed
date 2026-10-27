@@ -346,6 +346,18 @@ struct BakedGIBakeParams {
     uint  visSRVIdx;        // SRV: per-probe octahedral depth moments — the feedback
                             // read is visibility-weighted (backface + Chebyshev) so
                             // series light cannot cross walls/roofs (ProbeGI4 leak)
+
+    // ---- Single-direction sun transport (method 3) ----
+    // sunMode 0: the thread's `dir` selects one of the 16 fibonacci bins. Unchanged.
+    // sunMode 1: the delta light IS the real sun. Only dir 0 works, `wDelta` comes
+    //            from sunToDir below, and responseUAVIdx / responsePrevSRVIdx point
+    //            at the per-probe SUN table (stride kResponseFloat4s, no bin index)
+    //            instead of the 16-bin table. ONE pair of indices, interpreted per
+    //            mode: a second pair would be two places to get wrong.
+    // The sun table is a separate buffer on purpose: a 17th fibonacci bin would
+    // change BakedGIDeltaDirection's geometry for all 16 existing bins.
+    uint  sunMode;
+    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
 };
 
 // Root constants for the per-frame lit-probe update dispatch.
@@ -360,7 +372,14 @@ struct BakedGIUpdateParams {
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
     uint  dimX, dimY, dimZ;
-    uint  _pad;
+    // Sun-source selection for the folded output.
+    //   0 = the 16-bin cos^8 fold over the response table. Unchanged.
+    //   1 = the single baked sun response, one term, no kernel. `sunResponseSRVIdx`
+    //       must be live in that case. This is the method-3 path: the sun's
+    //       visibility was tested toward the real sun at bake time, so there is
+    //       nothing left to interpolate.
+    uint  sunMode;
+    uint  sunResponseSRVIdx; // SRV: per-probe sun response, stride kResponseFloat4s
 };
 
 // Root constants for the on-demand ray-debug dispatch. DEBUG ONLY — this pass

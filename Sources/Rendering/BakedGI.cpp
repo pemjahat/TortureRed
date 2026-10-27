@@ -21,8 +21,12 @@ namespace
 {
 
 constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
-constexpr uint32_t kProbeCacheVersion = 0; // development: format/semantics not finalized — no
-                                           // compatibility across changes; freeze at 1 once stable
+constexpr uint32_t kProbeCacheVersion = 1; // 0 -> 1 (2026-10-26): the method-3 sun
+                                           // table is a second per-probe record set.
+                                           // It is NOT in the cache today because the
+                                           // cache is gated off (kProbeCacheEnabled),
+                                           // but a re-enable must not read a version-0
+                                           // file into a layout that expects it.
 
 #pragma pack(push, 4)
 struct ProbeCacheHeader
@@ -198,7 +202,8 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                          D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                          D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                          D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                         float spacing)
+                         float spacing, bool singleDirectionSun,
+                         const DirectX::XMFLOAT3& sunToDir)
 {
     if (!device || !cmdList || !rootSignature || !model || !m_BakePSO)
         return false;
@@ -209,6 +214,9 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     m_CacheUpload.Reset();
     m_CacheReadback.Reset();
     m_LoadedFromCache = false;
+    // The sun table belongs to the previous bake's sun and grid. Clear the flag
+    // first, so an early return cannot leave a stale sun table readable.
+    m_SunResponseValid = false;
     // The per-term capture is produced by the dispatch path below. Cleared here
     // so the cache-load early return cannot leave a previous bake's balls
     // standing as if they described this grid.
@@ -258,7 +266,13 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     std::cout << "[BakedGI] Baking probe grid: " << m_DimX << "x" << m_DimY << "x" << m_DimZ
               << " : " << m_Spacing << "m (" << m_ProbeCount << " probes, "
               << kBakeIterations << " series iterations, "
-              << kBakeGatherRays << " gather rays for each of " << kDirections << " directions)"
+              << kBakeGatherRays << " gather rays for each of " << kDirections << " directions";
+    // Name the sun pass when it runs. Without this the line understates the work
+    // by one whole direction and never mentions the dispatch that the method
+    // exists for, which is how a stale mental model survives a session.
+    if (singleDirectionSun)
+        std::cout << " + 1 sun pass";
+    std::cout << ")"
               << " — world " << (mx.x - mn.x) << "x" << (mx.y - mn.y) << "x" << (mx.z - mn.z) << "m" << std::endl;
 
     // --- Probes/ disk cache: on a hit (file exists + grid header matches),
@@ -271,7 +285,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             return true;
     }
 
-    if (!CreateProbeBuffers())
+    if (!CreateProbeBuffers(singleDirectionSun))
         return false;
 
     // Debug-only capture buffers (term snapshots + folded balls). A failure here
@@ -341,6 +355,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         p.metaUAVIdx         = (uint32_t)m_Meta.uavIndex;
         p.iteration          = it;
         p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
+        p.sunMode            = 0u; // 16-bin transport: unchanged
 
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
         cmdList->SetPipelineState(m_BakePSO.Get());
@@ -348,6 +363,37 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
         cmdList->ResourceBarrier(1, &barrier);
+
+        // ---- Method 3: the sun's own response, toward the REAL sun direction.
+        //
+        // This is the whole point of the method. The binned transport asks "how
+        // does the probe respond to a delta light from W_j"; the runtime fold then
+        // has to pretend R_14 describes the sun, which is 14.66 degrees away, and
+        // the fold ends up averaging visibility over a 23 degree cone. This pass
+        // asks the right question instead, so there is nothing to interpolate.
+        //
+        // ONE dispatch, not 16: there is one sun. Same PSO, same feedback cage,
+        // same visibility weighting — sunMode only redirects wDelta, the buffer
+        // and the record stride. The series still converges against its own
+        // operator, which is what a sky-fed shortcut could not do.
+        if (singleDirectionSun && m_SunResponse[0].resource)
+        {
+            BakedGIBakeParams sp = p;
+            sp.sunMode            = 1u;
+            sp.sunDirX            = sunToDir.x;
+            sp.sunDirY            = sunToDir.y;
+            sp.sunDirZ            = sunToDir.z;
+            sp.responseUAVIdx     = (uint32_t)m_SunResponse[cur].uavIndex;
+            sp.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - cur].srvIndex;
+
+            cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &sp, 0);
+            cmdList->SetPipelineState(m_BakePSO.Get());
+            cmdList->Dispatch((m_ProbeCount + 7) / 8, 1, 1);
+
+            D3D12_RESOURCE_BARRIER sunBarrier =
+                CD3DX12_RESOURCE_BARRIER::UAV(m_SunResponse[cur].resource.Get());
+            cmdList->ResourceBarrier(1, &sunBarrier);
+        }
 
         // Snapshot this term's table for the debug view. The LAST term needs no
         // copy: it is m_Response[m_FinalResponse] once the loop ends, so
@@ -360,6 +406,15 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     }
 
     m_Valid = true;
+
+    // The sun table ping-pongs on the same schedule as the binned one, so the
+    // final sun record sits in the same index the final response does.
+    m_SunResponseValid = singleDirectionSun && (m_SunResponse[0].resource != nullptr);
+    m_FinalSunResponse = m_FinalResponse;
+    // What the resident table describes. HasSunResponseFor compares against this,
+    // so a moved sun is rejected instead of reused.
+    if (m_SunResponseValid)
+        m_SunBakeDir = sunToDir;
 
     // The table just changed, so any previous probe-table read-back describes
     // the OLD bake. Clear the flag: the sun-bin panel then shows no contribution
@@ -1453,17 +1508,39 @@ void BakedGI::ConsumeProbeTableReadback()
     m_ProbeTableValid = true;
 }
 
+bool BakedGI::HasSunResponseFor(const DirectX::XMFLOAT3& sunToDir) const
+{
+    if (!m_SunResponseValid)
+        return false;
+
+    // Normalised dot, so the test is about DIRECTION and not magnitude. 1e-6 in a
+    // unit dot is about 0.08 degrees: far tighter than any real sun move, and far
+    // looser than float renormalisation noise, so a genuine move cannot slip past.
+    const float la = std::sqrt(m_SunBakeDir.x * m_SunBakeDir.x + m_SunBakeDir.y * m_SunBakeDir.y
+                               + m_SunBakeDir.z * m_SunBakeDir.z);
+    const float lb = std::sqrt(sunToDir.x * sunToDir.x + sunToDir.y * sunToDir.y
+                               + sunToDir.z * sunToDir.z);
+    if (la < 1e-6f || lb < 1e-6f)
+        return false; // a zero direction describes nothing
+
+    const float d = (m_SunBakeDir.x * sunToDir.x + m_SunBakeDir.y * sunToDir.y
+                     + m_SunBakeDir.z * sunToDir.z) / (la * lb);
+    return d >= 1.0f - 1e-6f;
+}
+
 // -----------------------------------------------------------------------------
 // Probes/ disk cache
 // -----------------------------------------------------------------------------
 
-bool BakedGI::CreateProbeBuffers()
+bool BakedGI::CreateProbeBuffers(bool wantSunTable)
 {
     // The caller synced the GPU before recording, so releasing the previous
     // bake's buffers here is safe (same pattern as
     // Renderer::BuildAccelerationStructures).
     m_Response[0]   = {};
     m_Response[1]   = {};
+    m_SunResponse[0] = {};
+    m_SunResponse[1] = {};
     m_LitProbes     = {};
     m_LitProbesSky  = {};
     m_LitProbesSun  = {};
@@ -1471,10 +1548,19 @@ bool BakedGI::CreateProbeBuffers()
     m_Visibility    = {};
 
     const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
+    // Method-3 sun table: ONE record per probe, not 16. 160 B per probe per
+    // buffer. Created only when the method asks for it, so the Probe method's
+    // VRAM is unchanged.
+    const uint64_t sunElems = (uint64_t)m_ProbeCount * kResponseFloat4s;
     if (!CreateStructuredBuffer(m_Response[0], sizeof(float) * 4, responseElems,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse0") ||
         !CreateStructuredBuffer(m_Response[1], sizeof(float) * 4, responseElems,
                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIResponse1") ||
+        (wantSunTable &&
+         (!CreateStructuredBuffer(m_SunResponse[0], sizeof(float) * 4, sunElems,
+                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGISun0") ||
+          !CreateStructuredBuffer(m_SunResponse[1], sizeof(float) * 4, sunElems,
+                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGISun1"))) ||
         !CreateStructuredBuffer(m_LitProbes, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILit") ||
         !CreateStructuredBuffer(m_LitProbesSky, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
@@ -1758,7 +1844,8 @@ void BakedGI::WriteCacheFile(const std::string& scenePath)
 
 void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,
                            D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                           const DirectX::XMFLOAT3& sunIrradiance, const DirectX::XMFLOAT3& sunToDir)
+                           const DirectX::XMFLOAT3& sunIrradiance, const DirectX::XMFLOAT3& sunToDir,
+                           bool singleDirectionSun)
 {
     if (!m_Valid || !m_UpdatePSO)
         return;
@@ -1770,6 +1857,19 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     p.sunDirX = sunToDir.x;
     p.sunDirY = sunToDir.y;
     p.sunDirZ = sunToDir.z;
+    // Method 3: the sun column comes from the one baked sun term, not from the
+    // 16-bin kernel. The sky column is untouched — it still needs the binned
+    // table for its quadrature.
+    p.sunMode            = singleDirectionSun ? 1u : 0u;
+    p.sunResponseSRVIdx  = singleDirectionSun ? GetSunResponseSRVIndex() : 0u;
+    if (singleDirectionSun && p.sunResponseSRVIdx == 0u)
+    {
+        // No sun table: the fold would read descriptor 0 through the wrong view.
+        // Report and leave the lit buffer alone rather than write garbage.
+        std::cerr << "[BakedGI] single-direction fold requested with no sun table — skipped"
+                  << std::endl;
+        return;
+    }
     p.responseSRVIdx = (uint32_t)m_Response[m_FinalResponse].srvIndex;
     p.metaSRVIdx      = (uint32_t)m_Meta.srvIndex;
     p.litUAVIdx       = (uint32_t)m_LitProbes.uavIndex;
