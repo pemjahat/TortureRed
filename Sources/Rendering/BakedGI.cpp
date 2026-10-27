@@ -1140,9 +1140,22 @@ DirectX::XMFLOAT3 BakedGI::DeltaDirectionCPU(uint32_t j)
     return DirectX::XMFLOAT3(dx / l, dy / l, dz / l);
 }
 
+// Sun kernel exponent. The weight falls to half at acos(0.5^(1/64)), about 8.4
+// degrees, against 23.5 at exponent 8. Sharper localises a narrow light path and
+// cuts the weight that leaks onto unlit bins; too sharp approaches nearest-bin
+// selection and pops at a bin boundary. Measured 2026-10-27: argmax pops by the
+// full bin-to-bin contrast 2.28 degrees from the captured sun, exponent 64 steps
+// 0.17 percent and recovers 85 percent of the gap to the exact single-direction
+// bake.
+//
+// MUST match BAKED_GI_SUN_KERNEL_EXPONENT in BakedGI_Update.hlsl, which is the
+// authority. Declared here rather than above SunFoldWeights because the first
+// user is ComputeSunKernelWeights, below this point.
+constexpr float kBakedGISunKernelExponent = 64.0f;
+
 // CPU mirror of the update pass's sun fold: bw[j] = pow(max(0, dot(dir_j,
-// sunDir)), 8), normalised by the caller (BakedGI_Update.hlsl:73-78). The
-// direction set comes from DeltaDirectionCPU above.
+// sunDir)), kBakedGISunKernelExponent), normalised by the caller
+// (BakedGI_Update.hlsl). The direction set comes from DeltaDirectionCPU above.
 //
 // ONE mirror, and the shader is the authority. ONE caller: SunFoldWeights adds
 // the normalisation and the argmax on top, and every other reader goes through
@@ -1165,7 +1178,7 @@ bool BakedGI::ComputeSunKernelWeights(const DirectX::XMFLOAT3& sunToDir,
     {
         const DirectX::XMFLOAT3 dir = DeltaDirectionCPU(j);
         const float d = dir.x * sx + dir.y * sy + dir.z * sz;
-        bw[j] = std::pow(std::max(0.0f, d), 8.0f);
+        bw[j] = std::pow(std::max(0.0f, d), kBakedGISunKernelExponent);
         wsum += bw[j];
     }
     return true;

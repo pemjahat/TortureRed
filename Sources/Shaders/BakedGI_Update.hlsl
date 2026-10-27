@@ -25,6 +25,19 @@ ConstantBuffer<BakedGIUpdateParams>  Upd     : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
+// Sun kernel exponent. The weight falls to half at acos(0.5^(1/64)), about 8.4
+// degrees, against 23.5 at exponent 8. Sharper localises a narrow light path and
+// cuts the weight that leaks onto unlit bins; too sharp approaches nearest-bin
+// selection and pops at a bin boundary. Measured 2026-10-27: argmax pops by the
+// full bin-to-bin contrast 2.28 degrees from the captured sun, exponent 64 steps
+// 0.17 percent and recovers 85 percent of the gap to the exact single-direction
+// bake.
+//
+// MUST match kBakedGISunKernelExponent in BakedGI.cpp. The CPU mirror of this
+// kernel publishes bakedGISunWeight, which the Ray Fan and the bin panel read, so
+// a mismatch would make the picture and the numbers describe different folds.
+#define BAKED_GI_SUN_KERNEL_EXPONENT 64.0f
+
 [numthreads(64, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -101,18 +114,33 @@ void main(uint3 dtid : SV_DispatchThreadID)
         [unroll]
         for (uint j = 0; j < BAKED_GI_DIRECTIONS; ++j)
         {
-            bw[j] = pow(max(0.0f, dot(BakedGIDeltaDirection(j), sunDir)), 8.0f);
+            bw[j] = pow(max(0.0f, dot(BakedGIDeltaDirection(j), sunDir)),
+                        BAKED_GI_SUN_KERNEL_EXPONENT);
             wsum += bw[j];
         }
         if (wsum > 1e-6f)
         {
+            // Kernel-interpolated response. The visibility stays INSIDE the stored
+            // table: the bake multiplied each bin by the visibility of its own
+            // delta direction, so this blend sees the occluded value, as shipped.
+            // Do not separate it here. A per-direction scalar visibility cannot be
+            // applied after the SH projection without destroying the directional
+            // structure, and a band-limited SH fit of that field overshoots by
+            // about 28 percent at a 45-60 degree light path.
+            //
+            // SAMPLING FLOOR, which no estimator fixes: a 256-ray bin integrates
+            // 4pi/256 = 0.049 sr per ray, so a light path of half-angle H holds
+            // 2pi(1-cos H)/0.049 rays. Measured: 5 degrees -> 0 rays, 10 degrees ->
+            // about 2, 15 degrees -> about 4. Under 10 degrees a bin may hold no
+            // sun-visible hit at all, so a window seen from across a hall sits in
+            // the band this CANNOT fix.
             [unroll]
             for (uint j2 = 0; j2 < BAKED_GI_DIRECTIONS; ++j2)
             {
                 if (bw[j2] <= 0.0f)
                     continue;
-                float b = bw[j2] / wsum;
-                uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
+                const float b = bw[j2] / wsum;
+                const uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
                 [unroll]
                 for (uint lm = 0; lm < 9; ++lm)
                     coefSun[lm] += sunE * b * response[slot + lm].rgb;
