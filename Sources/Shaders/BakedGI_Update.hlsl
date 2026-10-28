@@ -9,7 +9,7 @@
 //   sky: wq = 2pi/16 hemisphere quadrature; L_sky sampled from the baked
 //        Hosek-Wilkie cubemap (Tier 1); R = bounces, A_l Y V = occluded
 //        first-bounce sky (remedy for the disabled Tier-2 ambient).
-//   sun: cos^8-kernel interpolation over the 16 directions (the response is
+//   sun: kernel interpolation over the 16 directions (the response is
 //        INDIRECT-ONLY, so there is no double count with the runtime-exact
 //        direct sun; below-horizon sun fades out with the kernel weights).
 //
@@ -84,14 +84,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
     //
     // TWO SOURCES, chosen by the method baked into this table:
     //
-    //   sunMode 0 (Probe)      : the 16-bin cos^8 fold. Each bin is the response
+    //   sunMode 0 (Probe)      : the 16-bin kernel fold. Each bin is the response
     //                            to a delta light from W_j, and the kernel mixes
     //                            them to approximate the response at the sun. The
     //                            mix is sound for smooth radiance and wrong for
-    //                            visibility: the weighted answer sits 23 degrees
-    //                            from the sun on average, so a light path narrower
-    //                            than about 15 degrees reads as fully lit or fully
-    //                            shadowed with no partial credit.
+    //                            visibility: a light path narrower than the
+    //                            NEAREST bin's offset — about 15 degrees here,
+    //                            bin 14 at 14.66 — reads as fully lit or fully
+    //                            shadowed, with no partial credit. That offset
+    //                            belongs to the direction set, not the kernel,
+    //                            so only a denser set moves it. The weighted
+    //                            mean angle is 15.21 degrees at the current
+    //                            exponent, and 23.03 at exponent 8.
     //
     //   sunMode 1 (SingleDir)  : ONE term, no kernel. The bake traced visibility
     //                            toward the real sun, so the response already

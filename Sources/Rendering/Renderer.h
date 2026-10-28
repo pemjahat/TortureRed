@@ -53,15 +53,22 @@ public:
     void CreateBakedGIPipelines();
     // singleDirectionSun: method 3. Also bakes the sun's response toward sunToDir
     // (the TO-SUN unit direction) so the runtime fold has a single sun term.
+    // seedDir: BakedGI::kSunSeedOwnDir keeps the shipped RNG stream. Any bin
+    // index makes the sun pass reuse that bin's gather directions (diagnostic).
     bool BakeGIProbes(class Model* model, float spacing, bool singleDirectionSun = false,
-                      const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f));
+                      const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f),
+                      uint32_t seedDir = BakedGI::kSunSeedOwnDir);
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
     // sunToDir is required. Pass the to-sun direction to name the sun-dominant
     // direction in the readout. Pass nullptr for a scene with no sun. Do not add
     // a default value, for the reason in BakedGI.h.
+    // seedDir must be the value BakeGIProbes was given, or the method-3 self-check
+    // compares two different trace sets and reports MISMATCH.
     bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
-                         const DirectX::XMFLOAT3* sunToDir);
+                         const DirectX::XMFLOAT3* sunToDir,
+                         bool singleDirectionSun = false,
+                         uint32_t seedDir = BakedGI::kSunSeedOwnDir);
 
     // Read back ONE probe's response table for the sun-bin panel, then wait.
     // Debug only, on demand. Runs on a synced GPU like RayDebugBakedGI, so the

@@ -82,7 +82,12 @@ groupshared int   g_slot[BAKE_RAYS]; // record slot for each source ray; -1 = no
 // is the reference. This copy exists so the debug pass can reproduce the
 // feedback term (Efb) of the final iteration without a change to the bake.
 // ---------------------------------------------------------------------------
-float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis, uint dir,
+// stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: 16 bins for the
+// binned transport, stride 1 and index 0 for the method-3 sun pass. A hardcoded
+// 16 here would read the wrong record under sunMode and the self-check would
+// report a MISMATCH that is purely an addressing difference.
+float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
+                            uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
 {
     // xq drives the trilinear CELL and the Chebyshev DISTANCE only; the
@@ -125,7 +130,7 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
             wFull = w * back * BakedGIChebyshev(m, dist);
         }
 
-        uint slot = (flat * BAKED_GI_DIRECTIONS + dir) * BAKED_GI_RESPONSE_F4;
+        uint slot = (flat * stride + idx) * BAKED_GI_RESPONSE_F4;
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
             e[lm] += resp[slot + lm].rgb * wFull;
@@ -291,15 +296,44 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     const uint3 cell = uint3(probe % dims.x, (probe / dims.x) % dims.y, probe / (dims.x * dims.y));
     const float3 probePos = gridMin + float3(cell) * spacing;
-    const float3 wDelta   = BakedGIDeltaDirection(dir);
+    // Method 3 has ONE direction. Every group would otherwise trace the same sun
+    // and produce sixteen identical record sets, so only group 0 works.
+    if (RayDbg.sunMode != 0u && dir != 0u)
+        return;
+
+    const bool sunMode = RayDbg.sunMode != 0u;
+    // Record addressing per method: 16 bins, or the single sun record.
+    const uint kRespStride = sunMode ? 1u : BAKED_GI_DIRECTIONS;
+    const uint kRespIdx    = sunMode ? 0u : dir;
+
+    // wDelta. Under sunMode this is BakedGI_Bake.hlsl's sun expression VERBATIM,
+    // including the +Y fallback for a zero sun. A different fallback traces a
+    // different ray, and the self-check would then report a MISMATCH with no
+    // visible cause.
+    float3 wDelta;
+    if (sunMode)
+    {
+        const float3 sunDir = float3(RayDbg.sunDirX, RayDbg.sunDirY, RayDbg.sunDirZ);
+        const float  sunLen = length(sunDir);
+        wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
+    }
+    else
+    {
+        wDelta = BakedGIDeltaDirection(dir);
+    }
 
     RWStructuredBuffer<float4> debug    = ResourceDescriptorHeap[RayDbg.rayRecUAVIdx];
     StructuredBuffer<float4>   respPrev = ResourceDescriptorHeap[RayDbg.responsePrevSRVIdx];
     StructuredBuffer<float2>   visMom   = ResourceDescriptorHeap[RayDbg.visSRVIdx];
 
-    // The seed, twice. The bake's exact formula (BakedGI_Bake.hlsl:185). Each
-    // pass replays from it, so neither pass inherits the other's stream.
-    const uint seed = pcg_hash(probe * 131u + dir * 7919u + 0x9e3779b9u);
+    // The seed, twice. BakedGI_Bake.hlsl's exact expression, including the
+    // seedDir resolve: 0xFFFFFFFF means "this thread's own direction", any other
+    // value pairs the trace with one fibonacci bin. Each pass replays from it, so
+    // neither pass inherits the other's stream. When the bake pairs the sun with
+    // bin 14, THIS field must carry the same 14 or the self-check compares two
+    // different sets of rays and reports MISMATCH.
+    const uint seedDir = (RayDbg.seedDir == 0xFFFFFFFFu) ? dir : RayDbg.seedDir;
+    const uint seed = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
 
     RNG rng;
     rng.state = seed;
@@ -429,7 +463,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         {
             // Shaded: the only branch the bake puts into acc, and the only one
             // that reads the feedback cage.
-            Efb = EvalResponseIndirect(respPrev, visMom, dir, p.worldPos,
+            Efb = EvalResponseIndirect(respPrev, visMom, kRespStride, kRespIdx, p.worldPos,
                                        p.normal, dims, gridMin, spacing);
             L   = p.albedo / PI * (p.NdotD * p.Vhit + Efb);
 

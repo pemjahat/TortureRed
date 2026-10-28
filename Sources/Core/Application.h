@@ -49,12 +49,21 @@ private:
     // a bake has folded the terms.
     void FillEfbBallConstants();
 
-    // Publishes the sun fold for the frame: the 16 normalised cos^8 weights
+    // Publishes the sun fold for the frame: the 16 normalised kernel weights
     // (FrameConstants::bakedGISunWeight, read by the Ray Fan's DeltaDirections
-    // channel) and the cached argmax and its weight (the Ray Fan's direction,
-    // and the UI text). One call to BakedGI::SunFoldWeights, so the channel, the
-    // UI and the printed weight ranking all describe one computation.
+    // channel), the cached argmax and its weight (the Ray Fan's direction, and
+    // the UI text), and the to-sun direction itself
+    // (FrameConstants::bakedGISunDir, the 17th box that same channel draws). One
+    // call to BakedGI::SunFoldWeights, so the channel, the UI and the printed
+    // weight ranking all describe one computation.
     void FillSunFoldConstants();
+
+    // The RNG seed index for the single-sun bake, and for its ray-debug replay.
+    // ONE function, because the two dispatches must receive ONE value: the replay
+    // reproduces the bake's stream, and its self-check is the only proof that the
+    // two agreed. Returns BakedGI::kSunSeedOwnDir — the shipped stream — unless
+    // the diagnostic below is on under method 3.
+    uint32_t SunBakeSeedDir(const DirectX::XMFLOAT3& sunToDir) const;
 
     bool m_IsRunning;
     bool m_EnableDepthPrePass    = false;
@@ -90,11 +99,12 @@ private:
                                          // index is the direction + 1, so entry 0 is "All"; the fill helper
                                          // clamps anything outside -1..15 back to "All".
     int   m_BakedGIRayDebugChannel = 1;  // Ray Fan (view 7) colour channel: 0 status, 1 albedo, 2 NdotD,
-                                         // 3 Vhit, 4 L, 5 Efb, 6 distance, 7 direct-vs-Efb, 8 DeltaDirections.
-                                         // Channel 8 swaps the geometry to the 16 delta directions of the fan's
-                                         // probe (grayscale, white = most weighted) and reads no record.
-                                         // BakedGI::kRayFanChannelDeltaDirs is the C++ spelling of that 8.
-    float m_BakedGIRayDebugLength  = 8.0f; // Ray Fan ray length cap, in probe spacings (channels 0..7 only)
+                                         // 3 Vhit, 4 Efb, 5 distance, 6 direct-vs-Efb, 7 DeltaDirections.
+                                         // Channel 7 swaps the geometry to the 16 delta directions of the fan's
+                                         // probe (grayscale, white = most weighted), adds one orange marker box
+                                         // for the real sun, and reads no record.
+                                         // BakedGI::kRayFanChannelDeltaDirs is the C++ spelling of that 7.
+    float m_BakedGIRayDebugLength  = 8.0f; // Ray Fan ray length cap, in probe spacings (channels 0..6 only)
     int   m_BakedGIRayDebugRay     = -1;   // Cage Trace (view 9) gather-ray OVERRIDE: -1 = the shader's own
                                          // argmax (largest feedback-dominated ray), else the RECORD INDEX
                                          // (0..63) of the ray to trace, picked out of the pool the dump
@@ -108,6 +118,12 @@ private:
     int   m_BakedGISunDir       = 0;     // The sun fold's argmax direction. Ray Fan (view 7) draws its 64
                                          // gather rays, and the DeltaDirections channel paints it white.
                                          // Refreshed each frame by FillSunFoldConstants.
+    // Diagnostic, OFF by default: pair the single-sun pass's RNG seed with the
+    // dominant fibonacci bin, so it traces the SAME 256 gather directions as that
+    // bin. The two methods then re-test the same hit surfaces, and their
+    // difference is angular instead of sampling noise. It CHANGES the baked sun
+    // table, so toggling it requests a rebake. Method 3 only.
+    bool  m_GISunSeedPairDominantBin = false;
     float m_BakedGISunWeight    = 0.0f;  // That direction's share of the fold (the 16 sum to 1). 0 = no sun.
     bool  m_BakedGIVisCheck     = true;  // A/B: step-3 fetch weights (bias + backface + Chebyshev) vs plain step-1 trilinear
     int   m_RayDebugProbeIndex  = 0;     // Probe index for the "Dump Probe Ray Debug" tool

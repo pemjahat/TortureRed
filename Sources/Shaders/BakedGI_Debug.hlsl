@@ -43,12 +43,20 @@
 //                      value = bakedGISunWeight[j].x / max_k(...), so WHITE is the
 //                      direction the sun weights most, which is the direction
 //                      the fan itself draws. The fold is probe INDEPENDENT —
-//                      cos^8(dot(W_j, toSun)) never reads the probe — so the 16
-//                      colours are the same at any valid cell: this channel
-//                      reports the fold, not a per-cell response. The weights
-//                      are the update pass's own cos^8 fold, published by the
-//                      CPU, so the white box and the printed kernel-weight
-//                      ranking describe one computation.
+//                      the kernel reads only dot(W_j, toSun), never the probe —
+//                      so the 16 colours are the same at any valid cell: this
+//                      channel reports the fold, not a per-cell response. The
+//                      weights are the update pass's own kernel fold, published
+//                      by the CPU, so the white box and the printed
+//                      kernel-weight ranking describe one computation.
+//                      One more instance is drawn from the same origin: a
+//                      THICKER ORANGE box along the REAL sun direction
+//                      (FrameConstants::bakedGISunDir), at the same length as a
+//                      bin box. The angle between that box and the bin boxes IS
+//                      the fold's angular error, so it is now visible in the
+//                      view instead of readable only in the bin table. The
+//                      marker does not draw when no sun exists or when every
+//                      kernel weight is zero.
 //   8 Efb Contribution — same SH ball as the lit views, but the value is
 //                      ball[selected term] - ball[term 1], read from the two
 //                      per-bake-term response balls that the bake's fold pass
@@ -226,17 +234,12 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // from the mockup the user approved.
 // ---------------------------------------------------------------------------
 
-// Radiance-L display gain. The mockup value. L is diffAlbedo/PI * (NdotD*Vhit +
-// Efb), so the direct term alone is bounded by 1/PI = 0.318, and a dark grazing
-// hit lands near 1e-3 — that wide range is what this gain lifts. Retune HERE if
-// the channel clips: the whole mapping lives in this one place.
-#define BAKED_GI_RAYFAN_L_GAIN 900.0f
 // Efb log ramp top. Efb blends response-table entries, so it shares the table's
 // units (order 0.1 to 1) and not the lit buffer's scale.
 #define BAKED_GI_RAYFAN_EFB_MAX 1.0f
 // Dim factor on an INVALID probe. An invalid probe's stored table is all zero,
-// so the table-derived channels (4 L, 5 Efb, 7 regime) describe nothing. Dim
-// exactly those three and leave the ray geometry channels at full strength.
+// so the table-derived channels (4 Efb, 6 direct-vs-Efb) describe nothing. Dim
+// exactly those two and leave the ray geometry channels at full strength.
 #define BAKED_GI_RAYFAN_INVALID_DIM 0.25f
 // "No ray-debug buffer" sentinel for bakedGIRayDebugSRVIndex. 0 is a legal
 // descriptor index, so the app publishes 0xFFFFFFFF instead. The mode-7 branch
@@ -247,11 +250,32 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // this value is conservative rather than necessary — mode 4's 0.015 is safe to
 // use here if the boxes read too thin.
 #define BAKED_GI_RAYFAN_BOX_HALF 0.01f
+// Half-width of the SUN-DIRECTION marker box (DeltaDirections channel), in probe
+// spacings. Thicker than the 0.015 of the bin boxes on purpose: it is ONE box
+// among sixteen greyscaled ones, so it must be told apart at a glance. The
+// LENGTH stays identical to a bin box (0.35 spacings) on purpose: a different
+// length would read as a magnitude, and this box reports a direction only.
+#define BAKED_GI_RAYFAN_SUNDIR_HALF 0.03f
+// Colour of the sun-direction marker. ORANGE, which is this codebase's warning
+// colour: the 16 bin boxes are greyscaled by fold weight, so no weight can ever
+// produce this hue and the marker cannot be mistaken for one.
+#define BAKED_GI_RAYFAN_SUNDIR_COLOR float3(0.95f, 0.55f, 0.15f)
 // Ray Fan colour channel that swaps the GEOMETRY: it draws the 16 fibonacci
-// delta directions of the fan's probe instead of the 64 gather rays, and reads
-// no record. Must match BakedGI::kRayFanChannelDeltaDirs (BakedGI.h) and the
-// "DeltaDirections" entry of the Ray Fan Channel combo in Application.cpp.
-#define BAKED_GI_RAYFAN_CH_DELTADIRS 8u
+// delta directions of the fan's probe, plus one marker for the real sun, and
+// reads no record. Must match BakedGI::kRayFanChannelDeltaDirs (BakedGI.h) and
+// the "DeltaDirections" entry of the Ray Fan Channel combo in Application.cpp.
+#define BAKED_GI_RAYFAN_CH_DELTADIRS 7u
+// Instances the DeltaDirections channel draws: one box for each fibonacci delta
+// direction, plus ONE marker box for the real sun (FrameCB.bakedGISunDir). The
+// 17th instance is a MARKER, not a 17th basis direction. BAKED_GI_DIRECTIONS
+// stays 16: its value divides the fibonacci lattice, so raising it would move
+// every existing bin (BakedGI.h, "BAKED_GI_DIRECTIONS cannot become 17").
+//
+// THIS FILE OWNS THIS COUNT, because this file owns the instance layout.
+// BakedGI::kRayFanDeltaDirInstances (BakedGI.h) mirrors it, and the renderer
+// takes its draw count from that mirror, so the draw call cannot disagree with
+// the geometry.
+#define BAKED_GI_RAYFAN_DELTADIRS_INSTANCES (BAKED_GI_DIRECTIONS + 1u)
 
 // Record component 3 of a ray: 0 = sky miss, 1 = backface reject, 2 = shaded.
 // rec3.w PACKS the status with the source ray index (BakedGI.hlsli), so decode
@@ -383,7 +407,7 @@ static const float3 kCagePickOutsidePool = float3(0.870f, 0.180f, 0.870f);
 // dark or blue surface carries a large Efb and contributes almost nothing.
 //
 // The DOMINANCE test (Efb > NdotD*Vhit at the hit) is the mean "Direct vs Efb"
-// regime the Ray Fan's channel 7 paints red, and it is the same rule the app's
+// regime the Ray Fan's channel 6 paints red, and it is the same rule the app's
 // CPU pool applies (BakedGI::LogRayDebugReadout step 2c), so the combo lists
 // exactly the rays this argmax ranks. The strict "direct == 0" set is its
 // subset (Efb > 0 implies Efb > direct there), so this rule covers both readings.
@@ -566,7 +590,7 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     // so the fan shows the rays that carry sun energy, and 64 boxes stay legible.
     if (mode == BAKED_GI_DEBUG_RAYFAN)
     {
-        // --- DeltaDirections: the 16 fold directions of this probe ---
+        // --- DeltaDirections: the 16 fold directions of this probe, plus the sun ---
         // Placed BEFORE the record path deliberately. This channel reads no
         // record, so it must not depend on the ray-debug buffer existing and
         // must not index the descriptor heap with the no-buffer sentinel. The
@@ -575,14 +599,49 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         // as the 64-ray channels.
         if (FrameCB.bakedGIRayDebugChannel == BAKED_GI_RAYFAN_CH_DELTADIRS)
         {
-            // One instance is one fibonacci direction. The guard is not a
-            // formality: the divisor array has exactly BAKED_GI_DIRECTIONS
-            // entries, so an unguarded instance index reads past it.
-            if (instance >= BAKED_GI_DIRECTIONS)
+            // Instances 0..15 are the fibonacci directions, instance 16 is the
+            // sun marker. The guard is not a formality: the weight array has
+            // exactly BAKED_GI_DIRECTIONS entries, so an unguarded bin index
+            // reads past it, and there is no box past the marker.
+            if (instance >= BAKED_GI_RAYFAN_DELTADIRS_INSTANCES)
                 return o;
             const uint probe = FrameCB.bakedGIRayDebugProbe;
             if (probe >= probeCount)
                 return o;
+
+            const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
+
+            // --- The 17th instance: the REAL sun ---
+            // The same origin and the same length as a bin box, so the angle
+            // between the sun and each bin is read directly off the picture.
+            // That angle is what this channel exists to report: the 16-bin fold
+            // cannot follow a light path narrower than its spacing, and until
+            // now the gap was readable only as a number in the Sun Fold Bins
+            // table. Colour is orange and half-width is thicker, so the box is
+            // never taken for a weighted bin.
+            if (instance == BAKED_GI_DIRECTIONS)
+            {
+                // w < 0.5 means no sun, or a sun whose every kernel weight is
+                // zero (below the horizon). Draw nothing then: a box along a
+                // direction the fold does not see would invent a light.
+                if (FrameCB.bakedGISunDir.w < 0.5f)
+                    return o;
+                // The app publishes a unit vector, so this is a NaN guard, not a
+                // normalisation the picture depends on. A NaN vertex position can
+                // fill the whole screen on some drivers.
+                const float sunLen = length(FrameCB.bakedGISunDir.xyz);
+                if (sunLen < 1e-6f)
+                    return o;
+
+                o.color = float4(BAKED_GI_RAYFAN_SUNDIR_COLOR, 1.0f);
+                const float3 world = OrientedBoxVertex(probePos,
+                                                       FrameCB.bakedGISunDir.xyz / sunLen,
+                                                       spacing * 0.35f,
+                                                       spacing * BAKED_GI_RAYFAN_SUNDIR_HALF,
+                                                       kCubeTris[vid % 36u]);
+                o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+                return o;
+            }
 
             // Grayscale, the NdotD channel's mapping: the value written
             // straight, no gain and no log ramp, so WHITE is 1.0 = the
@@ -595,7 +654,6 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
                           : 0.0f;
             o.color = float4(t.xxx, 1.0f);
 
-            const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
             const float3 w = BakedGIDeltaDirection(instance);
             const float3 world = OrientedBoxVertex(probePos, w, spacing * 0.35f,
                                                    spacing * 0.015f, kCubeTris[vid % 36u]);
@@ -651,20 +709,18 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
             col = (rec2.w > 0.5f) ? float3(0.909f, 0.909f, 0.909f)  // #e8e8e8 lit
                                   : float3(0.086f, 0.086f, 0.086f); // #161616 shadowed
         else if (ch == 4u)
-            col = saturate(rec2.rgb * BAKED_GI_RAYFAN_L_GAIN);
-        else if (ch == 5u)
             col = RayFanLogGray(dot(rec3.rgb, float3(0.2126f, 0.7152f, 0.0722f)), BAKED_GI_RAYFAN_EFB_MAX).xxx;
-        else if (ch == 6u)
+        else if (ch == 5u)
             col = miss ? float3(0.086f, 0.086f, 0.086f) : RayFanLogGray(t, cap).xxx;
-        else if (ch == 7u)
+        else if (ch == 6u)
             col = RayFanRegimeColor(rec1.w * rec2.w, dot(rec3.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
         else
             col = rec1.rgb; // 1 = albedo
 
         // An invalid probe has an all-zero stored table (BakedGI_Bake.hlsl:147-155),
-        // so the three channels read from that table are degenerate. Dim those
-        // three only: the ray geometry and the record channels stay readable.
-        if (FrameCB.bakedGIRayDebugValid == 0u && (ch == 4u || ch == 5u || ch == 7u))
+        // so the two channels read from that table are degenerate. Dim those two
+        // only: the ray geometry and the record channels stay readable.
+        if (FrameCB.bakedGIRayDebugValid == 0u && (ch == 4u || ch == 6u))
             col *= BAKED_GI_RAYFAN_INVALID_DIM;
 
         o.color = float4(col, 1.0f);

@@ -53,6 +53,19 @@ public:
     // real direction, and a default of 0 would silently un-average it.
     static constexpr uint32_t kEfbDirAll = 0xFFFFFFFFu;
 
+    // ---- Diagnostic seed pairing (BakedGIBakeParams::seedDir) ----
+    // The bake's RNG seed depends on the direction index, so the single-sun pass
+    // (dir 0) gathers DIFFERENT directions than any fibonacci bin. Passing a bin
+    // index here makes the sun pass trace that bin's directions, so the two
+    // estimates re-test the same hit surfaces and their difference is angular,
+    // not sampling noise.
+    //
+    // This value means "use the thread's own dir", which is the shipped stream.
+    // It is the SHIPPED default: both tables are bit-identical to the previous
+    // build whenever it is passed. The shaders spell it with a literal, because
+    // they cannot see this file.
+    static constexpr uint32_t kSunSeedOwnDir = 0xFFFFFFFFu;
+
     // ---- Ray-debug tool (debug only, on demand) ----
     // Rays the BAKE traces for each direction. 64 -> 256 on 2026-10-26.
     //
@@ -120,12 +133,17 @@ public:
                     // Method 3: also bake the sun's response toward the REAL sun
                     // direction, into the per-probe sun table. sunToDir is the
                     // TO-SUN unit direction and is read only when this is true.
+                    // seedDir: kSunSeedOwnDir keeps the shipped stream. Any bin
+                    // index makes the sun pass reuse that bin's gather
+                    // directions — a diagnostic, off by default. The binned
+                    // pass always uses kSunSeedOwnDir, so its table never moves.
                     bool singleDirectionSun = false,
-                    const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f));
+                    const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f),
+                    uint32_t seedDir = kSunSeedOwnDir);
 
     // Per-frame: fold the live sun/sky state into the lit-probe buffer.
-    // singleDirectionSun selects the sun branch: instead of the 16-bin cos^8
-    // kernel it takes the one baked sun term. Under method 3 this runs ONCE per
+    // singleDirectionSun selects the sun branch: instead of the 16-bin kernel
+    // it takes the one baked sun term. Under method 3 this runs ONCE per
     // bake (the fold is baked), not every frame.
     void RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,
                       D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
@@ -312,7 +330,7 @@ public:
     // one output shows both picks. It also runs the self-check that compares the
     // re-accumulated table with the stored table.
     //
-    // LogKernelWeights is the CPU mirror of the update pass's cos^8 sun kernel.
+    // LogKernelWeights is the CPU mirror of the update pass's sun kernel.
     // It has its own log line, so it is trivial to drop.
     // ---------------------------------------------------------------------
     bool RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
@@ -323,7 +341,17 @@ public:
                         D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                         D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                         D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                        uint32_t probeIndex);
+                        uint32_t probeIndex,
+                        // Method 3: replay the SUN pass instead of the 16 bins.
+                        // sunToDir may be null; the shader then falls back to +Y
+                        // exactly as BakedGI_Bake.hlsl does.
+                        bool singleDirectionSun = false,
+                        const DirectX::XMFLOAT3* sunToDir = nullptr,
+                        // The SAME seedDir value the bake was given. The replay
+                        // must trace the rays the stored table came from, or the
+                        // self-check reports MISMATCH. A different value here is a
+                        // true report, not a defect to route around.
+                        uint32_t seedDir = kSunSeedOwnDir);
     // sunToDir is required. The caller passes the to-sun direction to name the
     // sun-dominant direction in the same readout. The caller passes nullptr for
     // a scene with no sun. Do not add a default value here: a forgotten argument
@@ -333,14 +361,28 @@ public:
     static void LogKernelWeights(const DirectX::XMFLOAT3& sunToDir);
 
     // Ray Fan colour channel that swaps the geometry: it draws the 16 fibonacci
-    // delta directions of the fan's probe instead of the 64 gather rays, and
-    // reads no record, so it needs no dump. Must match
-    // BAKED_GI_RAYFAN_CH_DELTADIRS (BakedGI_Debug.hlsl) and the "DeltaDirections"
-    // entry of the Ray Fan Channel combo (Application.cpp). One value with three
-    // consumers is why it is named here rather than written as 8u three times.
-    static constexpr uint32_t kRayFanChannelDeltaDirs = 8u;
+    // delta directions of the fan's probe, plus one marker box for the real sun,
+    // instead of the 64 gather rays, and reads no record, so it needs no dump.
+    // Must match BAKED_GI_RAYFAN_CH_DELTADIRS (BakedGI_Debug.hlsl) and the
+    // "DeltaDirections" entry of the Ray Fan Channel combo (Application.cpp).
+    // One value with three consumers is why it is named here rather than written
+    // as 7u three times.
+    static constexpr uint32_t kRayFanChannelDeltaDirs = 7u;
 
-    // The sun fold's cos^8 weights for the 16 delta directions, NORMALISED BY
+    // Instances the DeltaDirections channel draws: kDirections bin boxes plus ONE
+    // marker box for the real sun (FrameConstants::bakedGISunDir). The 17th
+    // instance is a MARKER, not a 17th basis direction — kDirections stays 16,
+    // because its value divides the fibonacci lattice, so raising it would move
+    // every existing bin.
+    //
+    // BAKED_GI_RAYFAN_DELTADIRS_INSTANCES (BakedGI_Debug.hlsl, which owns the
+    // instance layout) is the authority and this is its mirror. The renderer
+    // takes its draw count from here, the shader takes its instance layout from
+    // there, and both derive the count from the same basis count, so the draw
+    // call cannot disagree with the geometry. Same shape as kCageInstances.
+    static constexpr uint32_t kRayFanDeltaDirInstances = kDirections + 1u;
+
+    // The sun fold's kernel weights for the 16 delta directions, NORMALISED BY
     // THEIR SUM, so w sums to 1 and w[j] is direction j's share of the fold.
     // Returns the argmax index and, through outMax, the largest of the 16.
     //
@@ -359,7 +401,7 @@ public:
                                    float (&w)[kDirections], float* outMax = nullptr);
 
     // The direction the sun fold weights most: argmax over j of the fold's
-    // cos^8 kernel. The Ray Fan draws that direction's 64 gather rays.
+    // kernel. The Ray Fan draws that direction's 64 gather rays.
     // Returns the index and, through outWeight, the normalised weight.
     // A zero sun direction, or a sun below the horizon, returns index 0 with
     // outWeight = 0.0, so a caller reports "no sun" instead of presenting
@@ -518,8 +560,9 @@ public:
     bool LoadedFromCache() const { return m_LoadedFromCache; }
 
 private:
-    // The CPU mirror of the update pass's cos^8 sun kernel
-    // (BakedGI_Update.hlsl:71-78). BakedGIDeltaDirection is reproduced from
+    // The CPU mirror of the update pass's sun kernel
+    // (BakedGI_Update.hlsl:116-125: bw[], the kernel loop, and the wsum guard).
+    // BakedGIDeltaDirection is reproduced from
     // BakedGI.hlsli:27-33. ONE mirror, ONE caller: SunFoldWeights composes the
     // normalisation and the argmax on top of it, and every other reader goes
     // through SunFoldWeights. Returns false on a zero sun direction, BEFORE it
@@ -594,6 +637,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_RayDebugReadback; // CPU: debug buffer | stored table
     GPUBuffer m_RayDebugBuf;                                   // GPU: records + re-accumulated table
     uint32_t m_RayDebugProbe = 0;
+    // Which table the last dump replayed. The readout runs separately and later,
+    // so it needs the method to compare against the right table.
+    bool     m_RayDebugSunMode = false;
     // Sun-bin panel read-back: ONE probe's response table. 2560 B, on demand.
     // m_ProbeTableValid is cleared whenever the bake replaces the table, so the
     // panel cannot show a previous bake's numbers after a Rebuild.

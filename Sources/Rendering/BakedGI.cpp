@@ -203,7 +203,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                          D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                          D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                          float spacing, bool singleDirectionSun,
-                         const DirectX::XMFLOAT3& sunToDir)
+                         const DirectX::XMFLOAT3& sunToDir, uint32_t seedDir)
 {
     if (!device || !cmdList || !rootSignature || !model || !m_BakePSO)
         return false;
@@ -356,6 +356,10 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         p.iteration          = it;
         p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
         p.sunMode            = 0u; // 16-bin transport: unchanged
+        // The binned table must not move, ever. It is the Probe method's data and
+        // the reference the sun table is compared against, so this pass keeps the
+        // shipped seed even when the caller pairs the sun with a bin.
+        p.seedDir            = kSunSeedOwnDir;
 
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
         cmdList->SetPipelineState(m_BakePSO.Get());
@@ -385,6 +389,11 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
             sp.sunDirZ            = sunToDir.z;
             sp.responseUAVIdx     = (uint32_t)m_SunResponse[cur].uavIndex;
             sp.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - cur].srvIndex;
+            // Diagnostic. kSunSeedOwnDir reproduces the shipped stream exactly
+            // (the shader then seeds from dir, which is 0 on this dispatch). A bin
+            // index makes the sun pass trace THAT bin's gather directions, so the
+            // same hit surfaces are re-tested toward the sun.
+            sp.seedDir            = seedDir;
 
             cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &sp, 0);
             cmdList->SetPipelineState(m_BakePSO.Get());
@@ -583,7 +592,8 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
                              D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                              D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                              D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                             uint32_t probeIndex)
+                             uint32_t probeIndex, bool singleDirectionSun,
+                             const DirectX::XMFLOAT3* sunToDir, uint32_t seedDir)
 {
     if (!device || !cmdList || !rootSignature || !m_RayDebugPSO)
         return false;
@@ -660,6 +670,27 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
     p.responsePrevSRVIdx = (uint32_t)m_Response[1 - m_FinalResponse].srvIndex;
     p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
 
+    // Method 3: replay the SUN pass. Its feedback AND its stored record both come
+    // from the sun table (stride kResponseFloat4s, one record per probe), which is
+    // what the bake's sun pass used. The ping-pong index is the same as the binned
+    // one: the sun series advances on the same per-iteration schedule.
+    m_RayDebugSunMode = singleDirectionSun && m_SunResponseValid;
+    p.sunMode = m_RayDebugSunMode ? 1u : 0u;
+    // The seed, resolved exactly as the bake resolves it. Under sunMode this must
+    // be the value the bake used, or the replay traces other rays and the
+    // self-check reports MISMATCH. Under the binned modes it is fixed to
+    // kSunSeedOwnDir, because that is what the binned bake always uses — passing
+    // a bin here would compare this replay against a table baked from `dir`.
+    p.seedDir = m_RayDebugSunMode ? seedDir : kSunSeedOwnDir;
+    if (m_RayDebugSunMode && sunToDir)
+    {
+        p.sunDirX = sunToDir->x;
+        p.sunDirY = sunToDir->y;
+        p.sunDirZ = sunToDir->z;
+    }
+    if (m_RayDebugSunMode)
+        p.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - m_FinalSunResponse].srvIndex;
+
     cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIRayDebugParams) / 4, &p, 0);
     cmdList->SetPipelineState(m_RayDebugPSO.Get());
     cmdList->Dispatch(1, kDirections, 1);
@@ -682,13 +713,21 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
 
     // The probe's slice of the stored table -> readback, for the self-check.
     {
-        ID3D12Resource* stored = m_Response[m_FinalResponse].resource.Get();
-        const UINT64 srcOffset = (UINT64)m_RayDebugProbe * kDirections * kResponseFloat4s * 16u;
+        // Under sunMode the stored record is the probe's ONE sun record; the
+        // binned table's 16-direction slice would read past it.
+        ID3D12Resource* stored = m_RayDebugSunMode
+            ? m_SunResponse[m_FinalSunResponse].resource.Get()
+            : m_Response[m_FinalResponse].resource.Get();
+        const UINT64 srcOffset = m_RayDebugSunMode
+            ? (UINT64)m_RayDebugProbe * kResponseFloat4s * 16u
+            : (UINT64)m_RayDebugProbe * kDirections * kResponseFloat4s * 16u;
+        const UINT64 tableBytes = m_RayDebugSunMode
+            ? (UINT64)kResponseFloat4s * 16u : kRayDebugTableBytes;
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
             stored, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cmdList->ResourceBarrier(1, &b);
         cmdList->CopyBufferRegion(m_RayDebugReadback.Get(), kRayDebugStoredOff, stored,
-                                  srcOffset, kRayDebugTableBytes);
+                                  srcOffset, tableBytes);
         D3D12_RESOURCE_BARRIER b2 = CD3DX12_RESOURCE_BARRIER::Transition(
             stored, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cmdList->ResourceBarrier(1, &b2);
@@ -879,9 +918,22 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     std::sort(rayRank.begin(), rayRank.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    std::cout << "[BakedGI RayDebug] step 2 — highest-DC-luminance direction " << dcDir
-              << ", " << kDebugGatherRays << " records by L luminance (high to low), top 16:"
-              << std::endl;
+    // Under method 3 the ray-debug replay wrote ONE direction, toward the real sun.
+    // The DC-luminance pick ranks the 16 bins, which that method's fold never reads,
+    // so naming a winner would point at a direction with no bearing on the image.
+    if (m_RayDebugSunMode)
+    {
+        std::cout << "[BakedGI RayDebug] step 2 — the SUN direction (method 3: one direction, "
+                     "no DC-luminance pick; the 16 bins carry no fold weight here), "
+                  << kDebugGatherRays << " records by L luminance (high to low), top 16:"
+                  << std::endl;
+    }
+    else
+    {
+        std::cout << "[BakedGI RayDebug] step 2 — highest-DC-luminance direction " << dcDir
+                  << ", " << kDebugGatherRays << " records by L luminance (high to low), top 16:"
+                  << std::endl;
+    }
     for (size_t i = 0; i < rayRank.size() && i < 16u; ++i)
     {
         const uint32_t r = rayRank[i].second;
@@ -1056,11 +1108,14 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
             std::cout << "    none — the trace draws nothing in this direction" << std::endl;
     }
 
+
     // --- Step 3: the self-check. Compare the re-accumulated table with the
     // stored table, element by element. ---
     float maxAbs = 0.0f, maxStored = 0.0f;
     uint32_t worstDir = 0, worstLm = 0;
-    for (uint32_t h = 0; h < kDirections; ++h)
+    // One direction under sunMode; the other fifteen records were never written.
+    const uint32_t dirsToCheck = m_RayDebugSunMode ? 1u : kDirections;
+    for (uint32_t h = 0; h < dirsToCheck; ++h)
     {
         for (uint32_t lm = 0; lm < kResponseFloat4s; ++lm)
         {
@@ -1125,11 +1180,30 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
 // and the angles cannot disagree with each other even if both drift from the
 // shader. The guard on a drift from the shader is the known-good reference below.
 //
-// KNOWN-GOOD REFERENCE, from the captured FrameCB with sunToDir = (0, 0.906106, 0.42305):
-//   w[14] = 0.451283 at 14.66 deg, w[11] = 0.334494 at 21.26 deg,
-//   weight-weighted mean angle 23.03 deg, 54.87 percent of the weight beyond 15 deg.
-// If the panel no longer reproduces those numbers for that sun, the mirror has
-// drifted from the shader and every weight in the engine is suspect.
+// KNOWN-GOOD REFERENCE. These numbers are a function of TWO things, so both are
+// stated with them: the sun direction and the kernel exponent. The captured
+// FrameCB sun is sunToDir = (0, 0.906106, 0.42305). The exponent is
+// kBakedGISunKernelExponent, defined just below.
+//
+//   exponent 64 — CURRENT, the value of kBakedGISunKernelExponent below:
+//     w[14] = 0.916504 at 14.66 deg, w[11] = 0.083495 at 21.26 deg, and every
+//     other bin below 1e-6. Weight-weighted mean angle 15.21 deg. 8.35 percent
+//     of the weight beyond 15 deg. 2 bins above 1e-6.
+//
+//   exponent 8 — HISTORY, what this block carried before 2026-10-27:
+//     w[14] = 0.451283, w[11] = 0.334494, mean angle 23.03 deg, 54.87 percent
+//     of the weight beyond 15 deg, 11 bins above 1e-6.
+//
+// Both sets are kept on purpose. Documents written before the exponent was
+// raised quote the exponent-8 numbers as if they were live, so a reader who
+// computes 0.451283 today must be able to see that it is the old kernel and not
+// a defect. Reproduce the exponent-64 set against the current build: if neither
+// set reproduces, the mirror HAS drifted from the shader and every weight in the
+// engine is suspect.
+//
+// A change to the exponent MUST recompute this block. This block went stale once
+// already — commit e00a415 raised the exponent from 8 to 64 and left the old
+// numbers in place, so the guard accused a correct mirror of having drifted.
 DirectX::XMFLOAT3 BakedGI::DeltaDirectionCPU(uint32_t j)
 {
     const float y   = ((float)j + 0.5f) / (float)kDirections;
@@ -1151,6 +1225,10 @@ DirectX::XMFLOAT3 BakedGI::DeltaDirectionCPU(uint32_t j)
 // MUST match BAKED_GI_SUN_KERNEL_EXPONENT in BakedGI_Update.hlsl, which is the
 // authority. Declared here rather than above SunFoldWeights because the first
 // user is ComputeSunKernelWeights, below this point.
+//
+// A CHANGE TO THIS VALUE MUST RECOMPUTE THE KNOWN-GOOD REFERENCE ABOVE. That
+// reference is a function of the exponent, and it went stale once when this
+// constant moved from 8 to 64 without it being updated.
 constexpr float kBakedGISunKernelExponent = 64.0f;
 
 // CPU mirror of the update pass's sun fold: bw[j] = pow(max(0, dot(dir_j,
@@ -1325,7 +1403,7 @@ void BakedGI::LogKernelWeights(const DirectX::XMFLOAT3& sunToDir)
     std::sort(rank.begin(), rank.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    std::cout << "[BakedGI RayDebug] kernel weights — the fold's cos^8 weights, normalised"
+    std::cout << "[BakedGI RayDebug] kernel weights — the fold's weights, normalised"
               << std::endl;
     if (wMax <= 0.0f)
     {

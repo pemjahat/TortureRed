@@ -755,14 +755,17 @@ void Application::FillEfbBallConstants()
 }
 
 // Publishes the sun fold for this frame, in both forms its two consumers need:
-//   - the 16 normalised cos^8 weights, for the Ray Fan's DeltaDirections
+//   - the 16 normalised kernel weights, for the Ray Fan's DeltaDirections
 //     channel (FrameConstants::bakedGISunWeight), and
 //   - the argmax and its weight, for the Ray Fan's direction
-//     (FrameConstants::bakedGIRayDebugDir) and for the UI text.
+//     (FrameConstants::bakedGIRayDebugDir) and for the UI text,
+// and the to-sun direction itself, for the 17th box that same channel draws
+// (FrameConstants::bakedGISunDir).
 //
-// Both come from ONE call to BakedGI::SunFoldWeights, the only owner of the
-// kernel, the normalisation and the argmax. That is what keeps the white box,
-// the fan's drawn direction and the printed weight ranking in agreement.
+// All of it comes from ONE call to BakedGI::SunFoldWeights, the only owner of
+// the kernel, the normalisation and the argmax. That is what keeps the white
+// box, the fan's drawn direction, the orange sun marker and the printed weight
+// ranking in agreement.
 //
 // The transport table is indexed by TO-SUN directions and the light stores the
 // direction it TRAVELS, so negate it — the same negation the update pass and the
@@ -774,12 +777,16 @@ void Application::FillSunFoldConstants()
     float wMax = 0.0f;
     uint32_t dominant = 0u;
 
+    // Kept in scope after the branch: the sun marker needs the direction, not
+    // only the weights. Left at zero when there is no light.
+    DirectX::XMFLOAT3 sunToDir = { 0.0f, 0.0f, 0.0f };
+
     const auto& lights = m_Scene.GetLights();
     if (!lights.empty())
     {
-        const DirectX::XMFLOAT3 sunToDir = { -lights[0].direction.x,
-                                             -lights[0].direction.y,
-                                             -lights[0].direction.z };
+        sunToDir = { -lights[0].direction.x,
+                     -lights[0].direction.y,
+                     -lights[0].direction.z };
         dominant = BakedGI::SunFoldWeights(sunToDir, w, &wMax);
     }
     else
@@ -793,9 +800,36 @@ void Application::FillSunFoldConstants()
     for (uint32_t j = 0; j < BakedGI::kDirections; ++j)
         m_FrameConstants.bakedGISunWeight[j].x = w[j]; // .x: the field is a float4 array
 
+    // The REAL sun, for the Ray Fan's DeltaDirections channel (debug view 7).
+    // That channel draws the 16 bin boxes and, from the same cell and at the
+    // same length, this one orange box: the angle between them is the fold's
+    // angular error, and it is now visible instead of readable only in the Sun
+    // Fold Bins table.
+    //
+    // w = 1.0 only when the fold is active for this sun. The weight test is the
+    // bin panel's own (BakedGI::BuildSunBinPanel sets haveSun from "a direction
+    // exists and wMax > 0"), so the marker and the panel's "fold active" label
+    // cannot disagree. A sun below the horizon zeroes every kernel weight, so
+    // wMax is 0 there too and the marker does not draw.
+    //
+    // The length test guards the divide AND the NaN case: a NaN passes every
+    // comparison as false, so it lands in the zero branch instead of reaching a
+    // vertex position. When the marker does not draw, xyz is zeroed as well, so
+    // no stale direction survives a removed or a set sun.
+    const float sunLen = std::sqrt(sunToDir.x * sunToDir.x + sunToDir.y * sunToDir.y
+                                   + sunToDir.z * sunToDir.z);
+    if (!lights.empty() && (sunLen > 1e-6f) && (wMax > 0.0f))
+        m_FrameConstants.bakedGISunDir = { sunToDir.x / sunLen, sunToDir.y / sunLen,
+                                           sunToDir.z / sunLen, 1.0f };
+    else
+        m_FrameConstants.bakedGISunDir = { 0.0f, 0.0f, 0.0f, 0.0f };
+
     m_BakedGISunDir    = (int)dominant;
     m_BakedGISunWeight = wMax; // 0.0 when there is no sun
-    m_FrameConstants.bakedGIRayDebugDir = dominant;
+    // Method 3 has ONE direction and no argmax: the dump writes group 0, so the
+    // fan must read group 0. Leaving the binned argmax here would point the fan at
+    // bin 14, which carries no weight in that method's fold.
+    m_FrameConstants.bakedGIRayDebugDir = SingleDirectionSun() ? 0u : dominant;
 }
 
 void Application::Render()
@@ -810,7 +844,8 @@ void Application::Render()
         // so the transport needs the to-sun direction at bake time. Everything
         // else about the bake is unchanged.
         const DirectX::XMFLOAT3 bakeSunToDir = SunToDirNow();
-        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing, SingleDirectionSun(), bakeSunToDir);
+        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing, SingleDirectionSun(), bakeSunToDir,
+                                SunBakeSeedDir(bakeSunToDir));
         // The fold is baked under method 3, so it must run once. It CANNOT run
         // here: the sky cubemap it samples is baked later in this same frame, so
         // folding now would use the previous frame's sky. Mark it pending and
@@ -844,8 +879,11 @@ void Application::Render()
         // readout and the kernel-weight log use this one direction.
         const bool haveSunToDir = HasSunLight();
         const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
+        // The SAME seed function the bake used. A different value here traces
+        // other rays and the self-check reports MISMATCH — a true report.
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
-                                   haveSunToDir ? &sunToDir : nullptr);
+                                   haveSunToDir ? &sunToDir : nullptr, SingleDirectionSun(),
+                                   SunBakeSeedDir(sunToDir));
         if (haveSunToDir)
             BakedGI::LogKernelWeights(sunToDir);
         // The dump replaced the ray-debug buffer and cached a new verdict. Fill
@@ -1477,6 +1515,14 @@ void Application::Render()
     MicroProfileFlip(nullptr);
 }
 
+// Method 3 traces ONE direction, so the help text of the views below describes a
+// fold it does not run. Printed as a line above the widget rather than folded into
+// the tooltip: the tooltip literals stay untouched, so Probe (Baked) output is
+// byte-identical by construction, not by careful editing.
+static const char* kMethod3WordingCaveat =
+    "Method 3 traces ONE direction -- the real sun. The help text below describes "
+    "Probe (Baked)'s 16-direction fold and does not apply to this method.";
+
 // The to-sun direction, negated from the light's travel direction exactly as the
 // update pass does. One definition for every reader: the bake, the fold, the
 // ray-debug readout, the kernel-weight log and the bin panel all used to negate
@@ -1488,6 +1534,19 @@ DirectX::XMFLOAT3 Application::SunToDirNow()
         return DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
     const LightConstants& sun = m_Scene.GetLights()[0];
     return DirectX::XMFLOAT3(-sun.direction.x, -sun.direction.y, -sun.direction.z);
+}
+
+// The seed index for the single-sun bake and for its ray-debug replay. One
+// function for both, because the replay reproduces the bake's RNG stream and its
+// self-check is the only proof that the two received the same value.
+//
+// The bin is DERIVED from the live sun, never written as a literal. It is 14 for
+// the captured sun and it stays correct when the sun moves.
+uint32_t Application::SunBakeSeedDir(const DirectX::XMFLOAT3& sunToDir) const
+{
+    if (!SingleDirectionSun() || !m_GISunSeedPairDominantBin)
+        return BakedGI::kSunSeedOwnDir;
+    return BakedGI::DominantSunDirection(sunToDir);
 }
 
 void Application::RenderImGui()
@@ -1891,6 +1950,35 @@ void Application::RenderImGui()
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
+                // --- Diagnostic: pair the sun's RNG seed with the dominant bin ---
+                // The bake seeds from the direction index, so the sun pass (dir 0)
+                // gathers a DIFFERENT set of 256 directions than bin 14. A
+                // bin-versus-sun difference then mixes an angular effect with a
+                // sampling effect, and the two cannot be told apart. This makes
+                // both trace the same directions, so only wDelta differs.
+                //
+                // It rewrites the baked sun table, so a toggle must request a
+                // rebake. Without that the control does nothing visible and the
+                // next comparison silently reads the old table. Method 3 only:
+                // the binned method has no single-sun pass to pair.
+                ImGui::BeginDisabled(!SingleDirectionSun());
+                if (ImGui::Checkbox("Pair sun seed with dominant bin (diagnostic)",
+                                    &m_GISunSeedPairDominantBin))
+                    m_PendingGIProbeBake = true;
+                ImGui::EndDisabled();
+                // AllowWhenDisabled: the tooltip is the only place that says WHY
+                // the control is greyed out, so it must still appear.
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Makes the single-sun pass trace the SAME 256 gather directions as\n"
+                                      "the dominant fibonacci bin (the sun fold's argmax, 14 for the captured\n"
+                                      "sun), instead of its own stream. Both methods then re-test the same hit\n"
+                                      "surfaces, so the difference between them is angular and not sampling\n"
+                                      "noise. Diagnostic only.\n"
+                                      "It CHANGES the baked sun table, so it requests a rebake. Wait for the bake\n"
+                                      "before you compare anything.\n"
+                                      "OFF by default, so the shipped path is unchanged.\n"
+                                      "Method \"Probe (Baked Sun)\" only.");
+
                 // Ray-debug tool: re-trace ONE probe and print the evidence.
                 ImGui::InputInt("Ray Debug Probe", &m_RayDebugProbeIndex);
                 if (ImGui::IsItemHovered())
@@ -2208,6 +2296,12 @@ void Application::RenderImGui()
                 const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays",
                                              "Lit Sky Source", "Lit Sun Source", "Ray Fan", "Efb Contribution",
                                              "Cage Trace" };
+                if (SingleDirectionSun())
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
+                    ImGui::TextWrapped("%s", kMethod3WordingCaveat);
+                    ImGui::PopStyleColor();
+                }
                 ImGui::SetNextItemWidth(180.f);
                 ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
                 if (ImGui::IsItemHovered())
@@ -2223,10 +2317,15 @@ void Application::RenderImGui()
                                       "The three lit views always sum: total = sky + sun.\n"
                                       "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
                                       "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).\n"
-                                      "Ray Fan: the 64 gather rays of the SUN-DOMINANT direction of ONE probe (the Ray Debug Probe above), as thin boxes.\n"
+                                      "Ray Fan: the 64 gather rays of ONE direction of one probe (the Ray Debug Probe above), as thin boxes.\n"
+                                       "  Probe (Baked): the SUN-DOMINANT direction, i.e. the bin the fold's kernel weights most.\n"
+                                       "  Probe (Baked Sun): the REAL SUN DIRECTION. That method traces a single direction\n"
+                                       "  toward the sun at bake time, so there is no dominant bin and the 16 delta\n"
+                                       "  directions shown by the DeltaDirections channel carry NO weight in its fold.\n"
                                       "It draws the records of the LAST dump, so press \"Dump Probe Ray Debug\" first and again after a rebuild.\n"
                                       "Its DeltaDirections channel swaps the geometry: the 16 delta directions of that same probe,\n"
-                                      "grayscale by the weight in the sun fold, white = the direction the fan itself draws. That\n"
+                                      "grayscale by the weight in the sun fold, white = the direction the fan itself draws, plus\n"
+                                      "one thicker ORANGE box along the REAL sun, so the fold's angular error is visible. That\n"
                                       "channel reads no record, so it works before any dump.\n"
                                       "Efb Contribution: SH ball per probe of the SERIES-FEEDBACK contribution — the selected\n"
                                       "bake term's response ball minus term 1's (the no-feedback baseline), so it is exactly what\n"
@@ -2322,23 +2421,32 @@ void Application::RenderImGui()
                     // BakedGI::kRayFanChannelDeltaDirs: the renderer reads the
                     // channel to choose the instance count, and the shader reads
                     // it to choose the geometry. Three places, one value.
-                    const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Radiance L", "Efb",
+                    const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Efb",
                                                      "Hit Distance", "Direct vs Efb", "DeltaDirections" };
+                    if (SingleDirectionSun())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
+                        ImGui::TextWrapped("%s", kMethod3WordingCaveat);
+                        ImGui::PopStyleColor();
+                    }
                     ImGui::SetNextItemWidth(180.f);
                     ImGui::Combo("Ray Fan Channel", &m_BakedGIRayDebugChannel, rayFanChannels, IM_ARRAYSIZE(rayFanChannels));
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Colour of each box. Channels 0..7 colour the 64 gather rays of the\n"
+                        ImGui::SetTooltip("Colour of each box. Channels 0..6 colour the 64 gather rays of the\n"
                                           "sun-dominant direction (see below).\n"
                                           "Status: grey = sky miss, blue = backface reject, orange = shaded.\n"
                                           "NdotD: cos(hit normal, the sun-dominant direction) drawn straight — 1 is white, 0 is black.\n"
-                                          "Albedo / Vhit / Radiance L / Efb: the record fields.\n"
+                                          "Albedo / Vhit / Efb: the record fields.\n"
                                           "Hit Distance: log ramp, sky miss near black.\n"
                                           "Direct vs Efb: green = NdotD*Vhit dominates, red = Efb dominates.\n"
                                           "DeltaDirections: swaps the geometry — the 16 delta directions of the\n"
                                           "same probe, one box each, drawn with the NdotD channel's straight\n"
                                           "grayscale on the sun-fold weight divided by the largest of the 16.\n"
                                           "WHITE is 1.0 = the most weighted direction, which is the direction\n"
-                                          "the fan draws. It reads no record, so it needs no dump.");
+                                          "the fan draws. One more box, thicker and ORANGE, points along the\n"
+                                          "REAL sun: the angle between it and the bin boxes is the fold's\n"
+                                          "angular error. It does not draw with no sun, or with the sun below\n"
+                                          "the horizon. It reads no record, so it needs no dump.");
 
                     const bool deltaDirs =
                         ((uint32_t)m_BakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs);
@@ -2347,7 +2455,12 @@ void Application::RenderImGui()
                     // fold weights it. A weight of 0 means no sun (the sun is
                     // below the horizon, or the direction is zero), so direction
                     // 0 is then not a real winner — say so, do not imply a pick.
-                    if (m_BakedGISunWeight > 0.0f)
+                    // Method 3 has ONE direction, traced toward the real sun. There
+                    // is no "dominant" bin there, and saying so would be false: the
+                    // fold does not touch the 16 bins at all.
+                    if (SingleDirectionSun())
+                        ImGui::Text("Ray Fan: the SUN direction (method 3 traces one direction, not 16)");
+                    else if (m_BakedGISunWeight > 0.0f)
                         ImGui::Text("Ray Fan: sun-dominant direction %d of 16, share %.3f of the fold",
                                     m_BakedGISunDir, m_BakedGISunWeight);
                     else
@@ -2375,8 +2488,8 @@ void Application::RenderImGui()
                         {
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
                             ImGui::TextWrapped("Warning: the dumped probe is INVALID. Channels 4 "
-                                               "(Radiance L), 5 (Efb) and 7 (Direct vs Efb) are "
-                                               "degenerate and drawn dimmed.");
+                                               "(Efb) and 6 (Direct vs Efb) are degenerate and drawn "
+                                               "dimmed.");
                             ImGui::PopStyleColor();
                         }
 
@@ -2413,6 +2526,18 @@ void Application::RenderImGui()
                         ImGui::TextWrapped("No ray dump. Press \"Dump Probe Ray Debug\" above — the trace "
                                            "follows the dumped probe's records.");
                         ImGui::PopStyleColor();
+                    }
+                    else if (SingleDirectionSun())
+                    {
+                        // No argmax exists under method 3: the dump wrote one
+                        // direction, toward the real sun. Naming a bin here would
+                        // point at a direction that method's fold never reads.
+                        ImGui::Text("Cage Trace: probe %u, the SUN direction (method 3) — no dominant bin",
+                                    cageGI.GetRayDebugProbe());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("The probe is the dumped one. The direction is the REAL SUN\n"
+                                              "DIRECTION, which is the only direction this method traces.\n"
+                                              "There is no argmax and no 16-bin fold to name a direction from.");
                     }
                     else
                     {

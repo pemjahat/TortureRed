@@ -661,7 +661,7 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
     // DDGIParams (30 DWORDs — the largest consumer of this slot).
-    // BakedGIRayDebugParams (11 DWORDs) and BakedGIIterFoldParams (3 DWORDs) are
+    // BakedGIRayDebugParams (16 DWORDs) and BakedGIIterFoldParams (3 DWORDs) are
     // listed for completeness: both are smaller than DDGIParams, so neither
     // changes the slot size.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
@@ -963,7 +963,7 @@ void Renderer::CreateBakedGIPipelines()
 }
 
 bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun,
-                            const DirectX::XMFLOAT3& sunToDir)
+                            const DirectX::XMFLOAT3& sunToDir, uint32_t seedDir)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -981,7 +981,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing, singleDirectionSun, sunToDir);
+                                    spacing, singleDirectionSun, sunToDir, seedDir);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.
@@ -1024,7 +1024,8 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
 // waits for the GPU, exactly like BakeGIProbes, so the caller runs it on a
 // synced GPU (before BeginFrame). The readout is printed after the sync.
 bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
-                               const DirectX::XMFLOAT3* sunToDir)
+                               const DirectX::XMFLOAT3* sunToDir, bool singleDirectionSun,
+                               uint32_t seedDir)
 {
     if (!m_RayTracingSupported || !model || !m_BakedGI.IsValid())
         return false;
@@ -1039,7 +1040,7 @@ bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
                                              model->GetDrawNodeBufferAddress(),
                                              model->GetGlobalIndexBufferAddress(),
                                              model->GetGlobalVertexBufferAddress(),
-                                             probeIndex);
+                                             probeIndex, singleDirectionSun, sunToDir, seedDir);
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
         m_BakedGI.LogRayDebugReadout(sunToDir);
@@ -1131,11 +1132,14 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
             //
             //   DeltaDirections — 16 instances, one for each fibonacci delta
             //   direction of the fan's own probe, grayscale by the sun fold's
-            //   weight. It reads NO record, so it is NOT gated on the ray-debug
-            //   buffer: gating it would hide the channel until a dump, and the
-            //   shader's no-buffer sentinel early-out is bypassed for channel 8
-            //   for the same reason. Without a dump the probe index is 0, so the
-            //   16 boxes sit at probe 0's cell.
+            //   weight, PLUS one instance that draws the REAL sun as a thicker
+            //   orange box (BakedGI::kRayFanDeltaDirInstances = 17). The marker
+            //   shares the bins' origin and length, so the angle between the sun
+            //   and each bin is visible in the view. It reads NO record, so it is
+            //   NOT gated on the ray-debug buffer: gating it would hide the
+            //   channel until a dump, and the shader's no-buffer sentinel
+            //   early-out is bypassed for channel 7 for the same reason. Without
+            //   a dump the probe index is 0, so the boxes sit at probe 0's cell.
             //
             //   Every other channel — 64 instances, one per gather ray of the
             //   SUN-DOMINANT direction (FrameConstants::bakedGIRayDebugDir).
@@ -1143,7 +1147,9 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
             //   after a dump. Without it the SRV index is unset, so do not draw.
             if (frame.bakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs)
             {
-                instanceCount = BakedGI::kDirections;
+                // 16 bins + the sun marker. BAKED_GI_RAYFAN_DELTADIRS_INSTANCES
+                // (BakedGI_Debug.hlsl) owns the layout; this is its mirror.
+                instanceCount = BakedGI::kRayFanDeltaDirInstances;
             }
             else
             {

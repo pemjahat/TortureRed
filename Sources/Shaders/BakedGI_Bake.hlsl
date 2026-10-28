@@ -218,8 +218,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
+    // The seed index. seedDir 0xFFFFFFFF means "this thread's own direction",
+    // which is the shipped stream. Any other value pairs this pass with one
+    // fibonacci bin, so the same gather directions are used and only wDelta
+    // differs. BakedGI_RayDebug.hlsl uses this exact expression; the two must
+    // stay identical or its self-check reports a MISMATCH.
+    const uint seedDir = (BakeParams.seedDir == 0xFFFFFFFFu) ? dir : BakeParams.seedDir;
     RNG rng;
-    rng.state = pcg_hash(probe * 131u + dir * 7919u + 0x9e3779b9u);
+    rng.state = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
     rng.inc   = 1;
 
     // --- Direct-delta visibility from the probe (V_i) ---

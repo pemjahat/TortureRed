@@ -205,8 +205,8 @@ struct FrameConstants {
                                     // 0xFFFFFFFF = no ray-debug buffer yet. 0 is a legal descriptor index,
                                     // so it cannot mean "none": the fan shader early-outs on the sentinel.
     uint  bakedGIRayDebugProbe;     // the probe the fan belongs to (matches the dump)
-    uint  bakedGIRayDebugChannel;   // 0 status, 1 albedo, 2 NdotD, 3 Vhit, 4 L, 5 Efb, 6 distance,
-                                    // 7 direct-vs-Efb, 8 DeltaDirections. Channel 8 also swaps the
+    uint  bakedGIRayDebugChannel;   // 0 status, 1 albedo, 2 NdotD, 3 Vhit, 4 Efb, 5 distance,
+                                    // 6 direct-vs-Efb, 7 DeltaDirections. Channel 7 also swaps the
                                     // GEOMETRY: the 16 fibonacci delta directions at this probe
                                     // instead of the 64 gather rays, grayscale by the sun fold's
                                     // weight, white = the direction the fan itself draws. It reads
@@ -220,14 +220,14 @@ struct FrameConstants {
                                     // carries to a later probe. The Application fills this again
                                     // right after the dump, so the bound frame has the verdict.
     uint  bakedGIRayDebugDir;       // the SUN-DOMINANT direction the fan draws: the argmax of the
-                                    // sun fold's cos^8 kernel over the 16 directions. The fan draws
+                                    // sun fold's kernel over the 16 directions. The fan draws
                                     // that direction's 64 gather rays only. 0 when there is no sun,
                                     // together with a normalised weight of 0 (see DominantSunDirection).
 
     // Sun-fold kernel weights, read by the Ray Fan's DeltaDirections channel
-    // (bakedGIRayDebugChannel == 8). One entry for each BakedGI::kDirections /
-    // BAKED_GI_DIRECTIONS direction, in index order: the update pass's cos^8
-    // fold weights, SUMMED TO 1, so entry j is direction j's share of the fold.
+    // (bakedGIRayDebugChannel == 7). One entry for each BakedGI::kDirections /
+    // BAKED_GI_DIRECTIONS direction, in index order: the update pass's fold
+    // weights, SUMMED TO 1, so entry j is direction j's share of the fold.
     // These are the same numbers BakedGI::LogKernelWeights ranks, from the one
     // CPU mirror (BakedGI::SunFoldWeights) — so the channel and the printed
     // ranking cannot describe two different folds.
@@ -244,14 +244,16 @@ struct FrameConstants {
     //
     // LAYOUT — a cbuffer array of SCALARS is VECTOR-STRIDED: dxc gives each
     // element a full 16-byte register, so `float x[16]` is 244 bytes wide in HLSL
-    // and 64 in C++. Measured on this file's own compiled blob, not assumed: the
-    // blob reflected bakedGISunWeight at 864 and the field after it at 1108 (the
-    // first free component of the last element's register). A tight C++ scalar
-    // array therefore put every following field 188 bytes early, which is why the
-    // Efb indices read zero (past the constant buffer's size) and the sun-weight
-    // ramp read two directions out. A float4 array has no such trap — its element
-    // stride is its own size, so both languages agree — and one float4 for each
-    // direction is exactly one 16-byte register each. Only .x carries the weight.
+    // and 64 in C++. Measured on this file's own compiled blob, not assumed: with
+    // the scalar array the blob reflected bakedGISunWeight at 864 and the field
+    // after it at 1108 (the first free component of the last element's register).
+    // With the float4 array below, that same next field sits at 1120 on both
+    // sides. A tight C++ scalar array therefore put every following field 188
+    // bytes early, which is why the Efb indices read zero (past the constant
+    // buffer's size) and the sun-weight ramp read two directions out. A float4
+    // array has no such trap — its element stride is its own size, so both
+    // languages agree — and one float4 for each direction is exactly one 16-byte
+    // register each. Only .x carries the weight.
     // Do not turn this back into a scalar array, and do not add a field between
     // this array and the next without re-measuring both sides.
     //
@@ -330,6 +332,41 @@ struct FrameConstants {
     //
     // Appended last on purpose: every earlier offset is unchanged.
     uint bakedGIRayDebugRay;
+
+    // The REAL sun, for the Ray Fan's DeltaDirections channel (debug view 7,
+    // BAKED_GI_RAYFAN_CH_DELTADIRS). That channel draws the 16 fibonacci delta
+    // directions, and without this field it could not draw the direction those
+    // bins are being compared against. The gap between the sun and the bins is
+    // then visible in the 3D view instead of readable only in the Sun Fold Bins
+    // table. The shader draws it as a 17th, thicker, ORANGE box.
+    //
+    // xyz = the to-sun UNIT direction (the light's travel direction negated, the
+    //       same negation BakedGI_Update.hlsl applies). w = 1.0 when a sun
+    //       exists and the fold is active, 0.0 otherwise — one test in the
+    //       shader, not two. With w = 0 the xyz is written as zero too, so no
+    //       stale direction can survive a sun that is removed or that drops
+    //       below the horizon (all 16 kernel weights vanish then).
+    //
+    // Ownership: Application::FillSunFoldConstants writes it, every frame, from
+    // the same SunFoldWeights call that fills bakedGISunWeight above. One source
+    // for the weights, the argmax and this direction, so the panel text and the
+    // 3D marker cannot disagree.
+    //
+    // LAYOUT — this is a float4 appended after a uint, so it needs explicit pads
+    // in C++ only. HLSL will not split a vector across a 16-byte register: it
+    // places a float4 at the next 16-byte boundary, which is 1152, while C++
+    // would place the field at 1144 (a XMFLOAT4 is 4-byte aligned). The two uint
+    // pads below move the C++ offset to 1152. This is the same arithmetic, and
+    // the same reason, as _sunWeightPad0/_sunWeightPad1 above. Measured, not
+    // assumed: offsetof says bakedGIRayDebugRay 1140, the pads 1144 and 1148,
+    // this field 1152, sizeof 1168; the compiled shader blob reports the same
+    // four numbers. Re-measure both sides when any field BEFORE this one changes
+    // size or count: the pads hold this alignment for this exact prefix only.
+    //
+    // Appended last on purpose: every earlier offset is unchanged.
+    uint   _sunDirPad0;             // 1144, 1148: the 8 bytes HLSL leaves before the
+    uint   _sunDirPad1;             //           16-byte boundary this field needs
+    float4 bakedGISunDir;           // 1152: xyz = to-sun unit direction, w = sun exists
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -358,6 +395,25 @@ struct BakedGIBakeParams {
     // change BakedGIDeltaDirection's geometry for all 16 existing bins.
     uint  sunMode;
     float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
+
+    // ---- Diagnostic: pair the sun seed with a fibonacci bin ----
+    // The bake's RNG seed depends on the direction index, so the sun pass (which
+    // runs with dir 0) gathers a DIFFERENT set of directions than any bin. A
+    // comparison between the two methods then mixes an angular difference with a
+    // sampling difference. This field overrides the index that enters the hash,
+    // so both passes can trace the SAME gather directions and only wDelta
+    // differs — the same hit surfaces are re-tested toward the sun.
+    //   0xFFFFFFFF = use the thread's own `dir`. Today's behaviour, exactly.
+    //   0..15      = use that bin index in the seed hash instead.
+    // BakedGI::kSunSeedOwnDir is the C++ spelling of 0xFFFFFFFF. The ray-replay
+    // pass carries the same field, or its self-check reports MISMATCH.
+    //
+    // APPENDED last, so every earlier offset is unchanged. A uint needs 4-byte
+    // alignment only, so it lands directly after sunDirZ at 68 with no pad. The
+    // struct becomes 72 B = 18 dwords, which the root-constant call passes in
+    // full, so the shader never reads a stale dword. Measured on both sides:
+    // dxc reports the member at 68 and the struct at 72.
+    uint  seedDir;
 };
 
 // Root constants for the per-frame lit-probe update dispatch.
@@ -373,7 +429,7 @@ struct BakedGIUpdateParams {
     float spacing;
     uint  dimX, dimY, dimZ;
     // Sun-source selection for the folded output.
-    //   0 = the 16-bin cos^8 fold over the response table. Unchanged.
+    //   0 = the 16-bin kernel fold over the response table. Unchanged.
     //   1 = the single baked sun response, one term, no kernel. `sunResponseSRVIdx`
     //       must be live in that case. This is the method-3 path: the sun's
     //       visibility was tested toward the real sun at bake time, so there is
@@ -389,7 +445,7 @@ struct BakedGIUpdateParams {
 // after the records. See Shaders/BakedGI_RayDebug.hlsl.
 //
 // The shared root-constants slot (root parameter 12) is sized by DDGIParams.
-// This struct is 44 B, smaller, so the shipped root signature does not change.
+// This struct is 64 B, smaller, so the shipped root signature does not change.
 struct BakedGIRayDebugParams {
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
@@ -398,6 +454,20 @@ struct BakedGIRayDebugParams {
     uint  rayRecUAVIdx;        // RW: ray records, then the re-accumulated table
     uint  responsePrevSRVIdx;  // SRV: previous bake iteration's table (the Efb source)
     uint  visSRVIdx;           // SRV: per-probe octahedral depth moments
+    // Method-3 replay. sunMode 0: the binned 16-direction trace, unchanged.
+    // sunMode 1: ONE trace toward the real sun, exactly as the bake's sun pass
+    // runs it, so the self-check compares against the sun response table.
+    uint  sunMode;
+    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
+
+    // Same field, same meaning, same expression as BakedGIBakeParams::seedDir.
+    // The replay reproduces the bake's RNG stream by construction, so a bake that
+    // seeds from a bin while the replay seeds from dir 0 traces other rays and the
+    // self-check reports MISMATCH for a reason that is not a defect. Both sides
+    // read one caller variable, never two copies.
+    // 64 B = 16 dwords. Measured: dxc reports this member at 60 and the struct at
+    // 64, and offsetof agrees.
+    uint  seedDir;
 };
 
 // Root constants for the visibility-moment bake dispatch (step 3). One
