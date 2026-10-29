@@ -36,27 +36,21 @@
 //
 //                      ONE channel swaps the geometry: DeltaDirections
 //                      (BAKED_GI_RAYFAN_CH_DELTADIRS) draws the 16 fibonacci
-//                      delta directions of that same probe, one thin box each,
-//                      and reads NO record — so it needs no dump and works
+//                      SKY-QUADRATURE directions of that same probe, one thin box
+//                      each, and reads NO record — so it needs no dump and works
 //                      before one. Its colour is the NdotD channel's mapping
 //                      (plain linear grayscale, no gain, no log):
-//                      value = bakedGISunWeight[j].x / max_k(...), so WHITE is the
-//                      direction the sun weights most, which is the direction
-//                      the fan itself draws. The fold is probe INDEPENDENT —
-//                      the kernel reads only dot(W_j, toSun), never the probe —
-//                      so the 16 colours are the same at any valid cell: this
-//                      channel reports the fold, not a per-cell response. The
-//                      weights are the update pass's own kernel fold, published
-//                      by the CPU, so the white box and the printed
-//                      kernel-weight ranking describe one computation.
+//                      value = bakedGISunWeight[j].x / max_k(...). Those weights
+//                      are uniform now, so every box reads white: the 16 boxes are
+//                      a hemisphere quadrature, which weights all of them
+//                      equally. The sun is not among them any more — it is 17
+//                      baked hour states, and the Sun Hour States panel is where
+//                      that fold is reported.
 //                      One more instance is drawn from the same origin: a
-//                      THICKER ORANGE box along the REAL sun direction
-//                      (FrameConstants::bakedGISunDir), at the same length as a
-//                      bin box. The angle between that box and the bin boxes IS
-//                      the fold's angular error, so it is now visible in the
-//                      view instead of readable only in the bin table. The
-//                      marker does not draw when no sun exists or when every
-//                      kernel weight is zero.
+//                      THICKER ORANGE box along the sun's direction at the current
+//                      HOUR (FrameConstants::bakedGISunDir), at the same length as
+//                      a bin box. The marker does not draw outside daylight,
+//                      where the sun term is zero.
 //   8 Efb Contribution — same SH ball as the lit views, but the value is
 //                      ball[selected term] - ball[term 1], read from the two
 //                      per-bake-term response balls that the bake's fold pass
@@ -265,11 +259,15 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // reads no record. Must match BakedGI::kRayFanChannelDeltaDirs (BakedGI.h) and
 // the "DeltaDirections" entry of the Ray Fan Channel combo in Application.cpp.
 #define BAKED_GI_RAYFAN_CH_DELTADIRS 7u
-// Instances the DeltaDirections channel draws: one box for each fibonacci delta
-// direction, plus ONE marker box for the real sun (FrameCB.bakedGISunDir). The
-// 17th instance is a MARKER, not a 17th basis direction. BAKED_GI_DIRECTIONS
-// stays 16: its value divides the fibonacci lattice, so raising it would move
-// every existing bin (BakedGI.h, "BAKED_GI_DIRECTIONS cannot become 17").
+// Instances the DeltaDirections channel draws: one box for each fibonacci
+// sky-quadrature direction, plus ONE marker box for the sun at the current hour
+// (FrameCB.bakedGISunDir). The 17th instance is a MARKER, not a 17th basis
+// direction. BAKED_GI_DIRECTIONS stays 16: its value divides the fibonacci
+// lattice, so raising it would move every existing bin.
+//
+// Drawing the 17 SUN STATES along the arc is separate work. It needs a different
+// instance layout and a 17-slot weight array, which changes FrameConstants, so it
+// is not part of this change.
 //
 // THIS FILE OWNS THIS COUNT, because this file owns the instance layout.
 // BakedGI::kRayFanDeltaDirInstances (BakedGI.h) mirrors it, and the renderer
@@ -317,15 +315,16 @@ float3 RayFanRegimeColor(float direct, float efb)
 // DeltaDirections channel (mode 7, BAKED_GI_RAYFAN_CH_DELTADIRS).
 //
 // The largest of the 16 published weights — the divisor of the grayscale ramp.
-// The MAXIMUM, not the sum, on purpose: the published weights are normalised to
-// sum to 1, so the winner holds only ~0.5 whenever the sun sits between two
-// directions, and a share-based ramp would then leave NO direction white — in
-// exactly the configuration this channel exists to report. With the maximum as
-// the divisor the dominant direction reads 1.0 whatever the sun does.
 //
-// A TIE at the maximum paints every tied direction white. That is the weights
-// being reported, not an arbitration: BakedGI::SunFoldWeights still returns the
-// lowest index, and the UI text names that one.
+// These 16 weights now describe the SKY QUADRATURE, which weights every direction
+// equally, so the ramp is flat by construction and every box reads white. The
+// channel still draws what it is for: the 16 quadrature directions of the fan's
+// probe, plus the sun marker at the current hour. The per-bin sun weight it used
+// to show died with the 16-bin sun kernel; the sun is 17 hour states now, and the
+// Sun Hour States panel is the place that reports them.
+//
+// The MAXIMUM rather than the sum is kept so a future non-uniform weight set
+// still ramps to white on its winner instead of never reaching it.
 // ---------------------------------------------------------------------------
 float BakedGISunWeightMax()
 {

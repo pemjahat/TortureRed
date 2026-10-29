@@ -159,8 +159,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     uint probeCount = dims.x * dims.y * dims.z;
     uint probe = dtid.x; // flattened probe cell
     uint dir   = dtid.y; // delta direction index
-    // sunMode: the delta light IS the real sun (method 3). One dispatch covers it,
-    // so only row 0 works. The record has no bin index — one per probe.
+    // sunMode: the delta light is the sun at ONE hour state. One dispatch per
+    // state, so only row 0 works; sunState names which of the 17 records is
+    // written.
     const bool sunMode = BakeParams.sunMode != 0u;
     if (probe >= probeCount)
         return;
@@ -176,9 +177,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 gridMin = float3(BakeParams.gridMinX, BakeParams.gridMinY, BakeParams.gridMinZ);
     float3 probePos = gridMin + float3(cell) * BakeParams.spacing;
 
-    // Record addressing: 16 bins for the binned transport, ONE record for the sun.
-    const uint kRespStride = sunMode ? 1u : BAKED_GI_DIRECTIONS;
-    const uint kRespIdx    = sunMode ? 0u : dir;
+    // Record addressing: 16 bins for the binned transport, one record for each
+    // sun hour state for the sun transport.
+    const uint kRespStride = sunMode ? BAKED_GI_SUN_STATES : BAKED_GI_DIRECTIONS;
+    const uint kRespIdx    = sunMode ? BakeParams.sunState : dir;
 
     // The delta direction. sunMode uses the real sun, so the visibility test and
     // the cosine below finally ask the right question: this is the whole point of

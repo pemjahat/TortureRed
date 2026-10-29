@@ -53,17 +53,10 @@ private:
     // (FrameConstants::bakedGISunWeight, read by the Ray Fan's DeltaDirections
     // channel), the cached argmax and its weight (the Ray Fan's direction, and
     // the UI text), and the to-sun direction itself
-    // (FrameConstants::bakedGISunDir, the 17th box that same channel draws). One
-    // call to BakedGI::SunFoldWeights, so the channel, the UI and the printed
-    // weight ranking all describe one computation.
+    // (FrameConstants::bakedGISunDir, the 17th box that same channel draws). All of
+    // it comes from one BakedGI::SunBlendForHour, so the channel, the UI and the
+    // panel all describe one computation.
     void FillSunFoldConstants();
-
-    // The RNG seed index for the single-sun bake, and for its ray-debug replay.
-    // ONE function, because the two dispatches must receive ONE value: the replay
-    // reproduces the bake's stream, and its self-check is the only proof that the
-    // two agreed. Returns BakedGI::kSunSeedOwnDir — the shipped stream — unless
-    // the diagnostic below is on under method 3.
-    uint32_t SunBakeSeedDir(const DirectX::XMFLOAT3& sunToDir) const;
 
     bool m_IsRunning;
     bool m_EnableDepthPrePass    = false;
@@ -115,31 +108,14 @@ private:
                                          // changes. A pick from another direction's pool (the sun moved) is
                                          // drawn in magenta and reported in the panel.
                                          // BakedGI::kNoRayPick is the published spelling of -1.
-    int   m_BakedGISunDir       = 0;     // The sun fold's argmax direction. Ray Fan (view 7) draws its 64
-                                         // gather rays, and the DeltaDirections channel paints it white.
-                                         // Refreshed each frame by FillSunFoldConstants.
-    // Diagnostic, OFF by default: pair the single-sun pass's RNG seed with the
-    // dominant fibonacci bin, so it traces the SAME 256 gather directions as that
-    // bin. The two methods then re-test the same hit surfaces, and their
-    // difference is angular instead of sampling noise. It CHANGES the baked sun
-    // table, so toggling it requests a rebake. Method 3 only.
-    bool  m_GISunSeedPairDominantBin = false;
-    float m_BakedGISunWeight    = 0.0f;  // That direction's share of the fold (the 16 sum to 1). 0 = no sun.
+    int   m_BakedGISunState     = 0;     // The first of the two hour states the fold
+                                         // interpolates (BakedGI::SunHourBlend::i0).
+                                         // Refreshed each frame by
+                                         // FillSunFoldConstants, so the labels that
+                                         // name it can never describe another hour.
     bool  m_BakedGIVisCheck     = true;  // A/B: step-3 fetch weights (bias + backface + Chebyshev) vs plain step-1 trilinear
     int   m_RayDebugProbeIndex  = 0;     // Probe index for the "Dump Probe Ray Debug" tool
     bool  m_PendingRayDebug     = false; // Ray-debug dump request (set by the button)
-
-    // Sun-bin panel: the per-probe contribution column needs the probe's GPU
-    // response table, so it is read back ON DEMAND and never per frame. The
-    // request rides the same synced-list path as m_PendingRayDebug: set here or
-    // in the UI, serviced in Render() before the frame is recorded. Servicing it
-    // from inside the ImGui build would reset the command list mid-frame.
-    bool     m_PendingProbeTableReadback = false;
-    // The probe the last request was for. Kept separate from the panel's own
-    // validity check on purpose: a request that FAILED (no bake yet) must not
-    // re-fire every frame, because each attempt costs a full GPU wait. The
-    // Refresh button is the way to retry.
-    uint32_t m_ProbeTableRequestedProbe  = 0xFFFFFFFFu;
 
     // "Probes Near Camera" list — the answer to "which probe index am I standing
     // in?". Filled by BakedGI::FindNearestValidProbes from the live camera
@@ -163,35 +139,54 @@ private:
     // Method enum for m_IndirectGIMethod. Declared BEFORE it, because the default
     // initialiser below names one of these constants.
     //
-    // Index 3 is APPENDED, not inserted: 0/1/2 keep their meaning so nothing that
-    // stores or compares the method is reinterpreted, and Probe stays at index 0
-    // as the fallback.
+    // The values CHANGED on 2026-10-29, and nothing needed remapping: the method
+    // is a plain in-memory member with a default initialiser. It is not a scene
+    // field, not an ini key and not a saved setting — a grep for it finds this
+    // header and the combo only. "Probe (Baked)" was the old index 0; the binned
+    // sun fold it existed for is gone, so it was deleted and the rest moved down.
     //
-    // Both probe methods share the bake, the grid, the payload and the deferred
-    // fetch. They differ in ONE thing: whether the sun's visibility was tested
-    // toward a fibonacci bin or toward the real sun. Gate every "is this the probe
-    // method" check on ProbeMethodActive(), never on a literal, or the fourth
-    // method silently loses a control or the auto-bake.
-    static constexpr int kIndirectMethodProbe                = 0;
-    static constexpr int kIndirectMethodRestirGI             = 1;
-    static constexpr int kIndirectMethodDDGI                 = 2;
-    static constexpr int kIndirectMethodProbeSingleDirection = 3; // default
-    int   m_IndirectGIMethod    = kIndirectMethodProbeSingleDirection;
+    // Every "is this the probe method" check goes through ProbeMethodActive(),
+    // never a literal.
+    static constexpr int kIndirectMethodRestirGI = 0;
+    static constexpr int kIndirectMethodDDGI     = 1;
+    static constexpr int kIndirectMethodProbe    = 2; // "Probe (Baked Sun)" — the default
+    int   m_IndirectGIMethod    = kIndirectMethodProbe;
     bool ProbeMethodActive() const
     {
-        return m_IndirectGIMethod == kIndirectMethodProbe
-            || m_IndirectGIMethod == kIndirectMethodProbeSingleDirection;
+        return m_IndirectGIMethod == kIndirectMethodProbe;
     }
-    // True when the fold is baked: sun visibility toward the real sun, one term,
-    // no 16-bin kernel, fold dispatched once per bake instead of every frame.
+    // True when the sun column comes from the baked hour states, which is now the
+    // only probe method there is. Kept as a separate predicate because the call
+    // sites read better against it and because a future probe method that does
+    // NOT bake the sun would flip this one alone.
     bool SingleDirectionSun() const
     {
-        return m_IndirectGIMethod == kIndirectMethodProbeSingleDirection;
+        return m_IndirectGIMethod == kIndirectMethodProbe;
     }
-    // Set by a bake under SingleDirectionSun and cleared when the fold runs. The
-    // fold cannot run inside BakeGIProbes: the sky cubemap it samples is baked
-    // later in the same frame, so it is serviced right after ExecuteSky.
-    bool  m_PendingProbeFold    = false;
+    // The GI sun input: TRUE SOLAR TIME in hours, 0..24, where hour 12 is solar
+    // noon. The sun is not a free direction any more — the 17 baked hour states
+    // bracket this value and the fold interpolates the pair.
+    // Default 12.0, which reproduces the scene's authored sun: state 8 is noon by
+    // construction, and its direction equals the authored one to 8.1e-10.
+    float m_GIHour = 12.0f;
+
+    // ---- Probe fold dirty flag ----
+    //
+    // The fold's output is a pure function of the baked tables, the hour and
+    // sunE. It is therefore stale only when one of those moves, and this flag
+    // says "one of them moved". The fold is 2880 B read and 432 B written for
+    // each probe, which is 17.28 GB/s at 100,000 probes and 60 Hz, so running it
+    // on a clean frame is pure waste.
+    //
+    // TRUE at construction, so the first frame folds unconditionally. The four
+    // triggers live where the change happens, not here: the hour compare in
+    // Application::Render, a completed bake, a method change, and the light
+    // editor's own `changed` flag.
+    bool  m_ProbeFoldWanted = true;
+    // The hour the resident lit table was folded for. -1 is outside 0..24, so the
+    // first frame always differs and always folds; it is also the value set after
+    // a bake or a method change, for the same reason.
+    float m_ProbeFoldHour   = -1.0f;
 
     // ONE definition of the to-sun direction: the light's travel direction,
     // negated, exactly as BakedGI_Update.hlsl negates it. Four inline copies had

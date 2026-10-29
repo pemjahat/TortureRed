@@ -83,9 +83,9 @@ groupshared int   g_slot[BAKE_RAYS]; // record slot for each source ray; -1 = no
 // feedback term (Efb) of the final iteration without a change to the bake.
 // ---------------------------------------------------------------------------
 // stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: 16 bins for the
-// binned transport, stride 1 and index 0 for the method-3 sun pass. A hardcoded
-// 16 here would read the wrong record under sunMode and the self-check would
-// report a MISMATCH that is purely an addressing difference.
+// binned transport, BAKED_GI_SUN_STATES and the dispatch's sunState for the sun
+// pass. A hardcoded 16 here would read the wrong record under sunMode and the
+// self-check would report a MISMATCH that is purely an addressing difference.
 float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
                             uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
@@ -296,15 +296,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     const uint3 cell = uint3(probe % dims.x, (probe / dims.x) % dims.y, probe / (dims.x * dims.y));
     const float3 probePos = gridMin + float3(cell) * spacing;
-    // Method 3 has ONE direction. Every group would otherwise trace the same sun
-    // and produce sixteen identical record sets, so only group 0 works.
+    // Method 3 replays ONE hour state. Every group would otherwise trace the same
+    // sun and produce sixteen identical record sets, so only group 0 works.
     if (RayDbg.sunMode != 0u && dir != 0u)
         return;
 
     const bool sunMode = RayDbg.sunMode != 0u;
-    // Record addressing per method: 16 bins, or the single sun record.
-    const uint kRespStride = sunMode ? 1u : BAKED_GI_DIRECTIONS;
-    const uint kRespIdx    = sunMode ? 0u : dir;
+    // Record addressing per method: 16 bins, or one of the 17 sun hour states.
+    const uint kRespStride = sunMode ? BAKED_GI_SUN_STATES : BAKED_GI_DIRECTIONS;
+    const uint kRespIdx    = sunMode ? RayDbg.sunState : dir;
 
     // wDelta. Under sunMode this is BakedGI_Bake.hlsl's sun expression VERBATIM,
     // including the +Y fallback for a zero sun. A different fallback traces a

@@ -219,28 +219,29 @@ struct FrameConstants {
                                     // Set on every dump and bound to its probe, so no verdict
                                     // carries to a later probe. The Application fills this again
                                     // right after the dump, so the bound frame has the verdict.
-    uint  bakedGIRayDebugDir;       // the SUN-DOMINANT direction the fan draws: the argmax of the
-                                    // sun fold's kernel over the 16 directions. The fan draws
-                                    // that direction's 64 gather rays only. 0 when there is no sun,
-                                    // together with a normalised weight of 0 (see DominantSunDirection).
+    uint  bakedGIRayDebugDir;       // which record GROUP of the ray-debug buffer the fan draws.
+                                    // The sun replay writes group 0 only, so this is always 0.
+                                    // It stays a field because the fan still selects a group and
+                                    // the binned replay path uses it. The per-bin argmax that used
+                                    // to pick it died with the 16-bin sun kernel.
 
-    // Sun-fold kernel weights, read by the Ray Fan's DeltaDirections channel
+    // Sky-quadrature weights, read by the Ray Fan's DeltaDirections channel
     // (bakedGIRayDebugChannel == 7). One entry for each BakedGI::kDirections /
-    // BAKED_GI_DIRECTIONS direction, in index order: the update pass's fold
-    // weights, SUMMED TO 1, so entry j is direction j's share of the fold.
-    // These are the same numbers BakedGI::LogKernelWeights ranks, from the one
-    // CPU mirror (BakedGI::SunFoldWeights) — so the channel and the printed
-    // ranking cannot describe two different folds.
+    // BAKED_GI_DIRECTIONS direction, in index order.
     //
-    // All 16 are 0 when there is no sun: a zero light direction, or a sun below
-    // the horizon. The channel then paints every direction black rather than
-    // falsely whitening one, and the UI says "no sun" instead of presenting
-    // direction 0 as a winner.
+    // These were the sun fold's kernel weights. That kernel is gone: the sun is 17
+    // baked hour states now, so no per-bin sun weight exists. The 16 directions
+    // are the hemisphere sky quadrature, which weights every direction equally, so
+    // every entry is 1/16 and the channel draws them all at the same brightness.
+    //
+    // The field is KEPT at this size and this offset on purpose: a shrunken array
+    // would shift every field after it, and the DeltaDirections channel still
+    // needs per-direction values.
     //
     // The channel ramps on this array DIVIDED BY ITS OWN MAXIMUM, not on the
-    // share itself: the dominant direction must read exactly white whether it
-    // holds 0.99 of the fold or 0.20 of it. That divisor is a display choice and
-    // lives in BakedGI_Debug.hlsl (BakedGISunWeightMax's call site).
+    // share itself, so a future non-uniform set still reads white on its winner.
+    // That divisor is a display choice and lives in BakedGI_Debug.hlsl
+    // (BakedGISunWeightMax's call site).
     //
     // LAYOUT — a cbuffer array of SCALARS is VECTOR-STRIDED: dxc gives each
     // element a full 16-byte register, so `float x[16]` is 244 bytes wide in HLSL
@@ -340,17 +341,17 @@ struct FrameConstants {
     // then visible in the 3D view instead of readable only in the Sun Fold Bins
     // table. The shader draws it as a 17th, thicker, ORANGE box.
     //
-    // xyz = the to-sun UNIT direction (the light's travel direction negated, the
-    //       same negation BakedGI_Update.hlsl applies). w = 1.0 when a sun
-    //       exists and the fold is active, 0.0 otherwise — one test in the
-    //       shader, not two. With w = 0 the xyz is written as zero too, so no
-    //       stale direction can survive a sun that is removed or that drops
-    //       below the horizon (all 16 kernel weights vanish then).
+    // xyz = the to-sun UNIT direction at the current HOUR, from
+    //       BakedGI::SunDirectionAtHour. It is no longer the light's live
+    //       direction: the GI sun comes from the hour, and the two are kept equal
+    //       by Application::Render, which writes the same direction into the
+    //       directional light. w = 1.0 inside daylight, 0.0 otherwise — outside
+    //       hour 6 to 18 the sun term is zero, so the marker does not draw. With
+    //       w = 0 the xyz is written as zero too, so no stale direction survives.
     //
-    // Ownership: Application::FillSunFoldConstants writes it, every frame, from
-    // the same SunFoldWeights call that fills bakedGISunWeight above. One source
-    // for the weights, the argmax and this direction, so the panel text and the
-    // 3D marker cannot disagree.
+    // Ownership: Application::FillSunFoldConstants writes it every frame, from the
+    // same BakedGI::SunBlendForHour call that fills the hour-state panel. One
+    // source, so the panel text and the 3D marker cannot disagree.
     //
     // LAYOUT — this is a float4 appended after a uint, so it needs explicit pads
     // in C++ only. HLSL will not split a vector across a 16-byte register: it
@@ -386,13 +387,15 @@ struct BakedGIBakeParams {
 
     // ---- Single-direction sun transport (method 3) ----
     // sunMode 0: the thread's `dir` selects one of the 16 fibonacci bins. Unchanged.
-    // sunMode 1: the delta light IS the real sun. Only dir 0 works, `wDelta` comes
-    //            from sunToDir below, and responseUAVIdx / responsePrevSRVIdx point
-    //            at the per-probe SUN table (stride kResponseFloat4s, no bin index)
-    //            instead of the 16-bin table. ONE pair of indices, interpreted per
-    //            mode: a second pair would be two places to get wrong.
-    // The sun table is a separate buffer on purpose: a 17th fibonacci bin would
-    // change BakedGIDeltaDirection's geometry for all 16 existing bins.
+    // sunMode 1: the delta light is the SUN AT ONE HOUR STATE. Only dir 0 works,
+    //            `wDelta` comes from sunToDir below, sunState names the state, and
+    //            responseUAVIdx / responsePrevSRVIdx point at the per-probe SUN
+    //            table (stride BAKED_GI_SUN_STATES, indexed by sunState) instead of
+    //            the 16-bin table. ONE pair of indices, interpreted per mode: a
+    //            second pair would be two places to get wrong.
+    // The sun table is a separate buffer on purpose: extra fibonacci bins would
+    // change BakedGIDeltaDirection's geometry for all 16 existing bins, and those
+    // 16 are the live sky quadrature, not a spare direction set.
     uint  sunMode;
     float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
 
@@ -414,13 +417,33 @@ struct BakedGIBakeParams {
     // full, so the shader never reads a stale dword. Measured on both sides:
     // dxc reports the member at 68 and the struct at 72.
     uint  seedDir;
+    // ---- Equinox hour states: which state this dispatch bakes ----
+    // 0..BakedGI::kSunStates-1. sunMode 1 only. The sun record stride is
+    // BAKED_GI_SUN_STATES, so the shader indexes
+    // slot = (probe * 17 + sunState) * kResponseFloat4s.
+    // APPENDED again, so the offsets above are unchanged: 72, sizeof 76 (19
+    // dwords), still far below the 30-dword DDGIParams that sizes root slot 12.
+    uint  sunState;
 };
 
 // Root constants for the per-frame lit-probe update dispatch.
+//
+// OFFSETS, measured on both sides after the 2026-10-29 cleanup:
+// sunIrradianceX 0, hour 12, responseSRVIdx 16, litSunUAVIdx 32, dimZ 60,
+// sunResponseSRVIdx 64, sizeof 68.
+//
+// Three dead slots were REMOVED, not kept as pads: the ones that used to hold
+// sunDirY, sunDirZ and sunMode. Nothing reads them, and SharedTypes.h is compiled
+// from source on both sides, so a shifted layout costs nothing beyond a shader
+// cache wipe. Keeping a pad to protect an ABI that no longer exists only invites
+// a reader to think the field is still meaningful.
 struct BakedGIUpdateParams {
     float sunIrradianceX, sunIrradianceY, sunIrradianceZ; // sun perpendicular irradiance (RGB)
-    float sunDirX, sunDirY, sunDirZ;                       // TO-SUN unit direction
-    uint  responseSRVIdx;  // final response table (SRV)
+    // 12: the GI sun input. TRUE SOLAR TIME in hours, 0..24, hour 12 = solar noon.
+    // This slot held sunDirX. The fold no longer interpolates by direction: the 17
+    // baked hour states already bracket the hour, so the direction is not an input.
+    float hour;
+    uint  responseSRVIdx;  // final response table (SRV), the 16-record sky basis
     uint  metaSRVIdx;      // probe validity (SRV)
     uint  litUAVIdx;       // lit probe output, TOTAL (runtime fetch source)
     uint  litSkyUAVIdx;    // lit probe output, sky-sourced split (debug views)
@@ -428,15 +451,9 @@ struct BakedGIUpdateParams {
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
     uint  dimX, dimY, dimZ;
-    // Sun-source selection for the folded output.
-    //   0 = the 16-bin kernel fold over the response table. Unchanged.
-    //   1 = the single baked sun response, one term, no kernel. `sunResponseSRVIdx`
-    //       must be live in that case. This is the method-3 path: the sun's
-    //       visibility was tested toward the real sun at bake time, so there is
-    //       nothing left to interpolate.
-    uint  sunMode;
-    uint  sunResponseSRVIdx; // SRV: per-probe sun response, stride kResponseFloat4s
+    uint  sunResponseSRVIdx; // SRV: per-probe sun response, stride BAKED_GI_SUN_STATES
 };
+
 
 // Root constants for the on-demand ray-debug dispatch. DEBUG ONLY — this pass
 // never runs in a normal frame. One 64-thread group for each direction of ONE
@@ -444,8 +461,8 @@ struct BakedGIUpdateParams {
 // 64 B record for each ray. The re-accumulated table shares the same buffer,
 // after the records. See Shaders/BakedGI_RayDebug.hlsl.
 //
-// The shared root-constants slot (root parameter 12) is sized by DDGIParams.
-// This struct is 64 B, smaller, so the shipped root signature does not change.
+// The shared root-constants slot (root parameter 12) is sized by DDGIParams,
+// which is 30 dwords. This struct is 17 dwords, so the slot does not change.
 struct BakedGIRayDebugParams {
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
@@ -455,8 +472,9 @@ struct BakedGIRayDebugParams {
     uint  responsePrevSRVIdx;  // SRV: previous bake iteration's table (the Efb source)
     uint  visSRVIdx;           // SRV: per-probe octahedral depth moments
     // Method-3 replay. sunMode 0: the binned 16-direction trace, unchanged.
-    // sunMode 1: ONE trace toward the real sun, exactly as the bake's sun pass
-    // runs it, so the self-check compares against the sun response table.
+    // sunMode 1: ONE trace toward the sun at hour state `sunState`, exactly as the
+    // bake's sun pass runs it, so the self-check compares against that state's
+    // record of the sun response table.
     uint  sunMode;
     float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
 
@@ -468,6 +486,10 @@ struct BakedGIRayDebugParams {
     // 64 B = 16 dwords. Measured: dxc reports this member at 60 and the struct at
     // 64, and offsetof agrees.
     uint  seedDir;
+    // Which hour state to replay, sunMode 1 only: 0..BakedGI::kSunStates-1.
+    // APPENDED, so offsets 0..63 are unchanged: 64, sizeof 68 (17 dwords). The
+    // root-constant slot is sized by the 30-dword DDGIParams, so it still fits.
+    uint  sunState;
 };
 
 // Root constants for the visibility-moment bake dispatch (step 3). One

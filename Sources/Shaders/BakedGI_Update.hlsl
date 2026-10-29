@@ -4,14 +4,14 @@
 // Folds the LIVE sun/sky state into the baked transport, one thread per probe:
 //
 //   e_lm = sum_i wq * L_sky(W_i) * [ R_i_lm  +  A_l Y_lm(W_i) V_i ]   (sky)
-//        + E_sun * sum_j b_j(W_sun) * R_j_lm                            (sun)
+//        + E_sun * lerp(R[i0], R[i0+1], t)                            (sun, 2 records)
 //
 //   sky: wq = 2pi/16 hemisphere quadrature; L_sky sampled from the baked
 //        Hosek-Wilkie cubemap (Tier 1); R = bounces, A_l Y V = occluded
 //        first-bounce sky (remedy for the disabled Tier-2 ambient).
-//   sun: kernel interpolation over the 16 directions (the response is
-//        INDIRECT-ONLY, so there is no double count with the runtime-exact
-//        direct sun; below-horizon sun fades out with the kernel weights).
+//   sun: the 17 baked hour states bracket the current hour, and the fold reads
+//        exactly the two that do. The response is INDIRECT-ONLY, so there is no
+//        double count with the runtime-exact direct sun.
 //
 // Writes THREE buffers: the sky-sourced and sun-sourced splits, and the
 // TOTAL as their exact sum (the runtime fetch reads only the total; the
@@ -25,19 +25,6 @@ ConstantBuffer<BakedGIUpdateParams>  Upd     : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
-// Sun kernel exponent. The weight falls to half at acos(0.5^(1/64)), about 8.4
-// degrees, against 23.5 at exponent 8. Sharper localises a narrow light path and
-// cuts the weight that leaks onto unlit bins; too sharp approaches nearest-bin
-// selection and pops at a bin boundary. Measured 2026-10-27: argmax pops by the
-// full bin-to-bin contrast 2.28 degrees from the captured sun, exponent 64 steps
-// 0.17 percent and recovers 85 percent of the gap to the exact single-direction
-// bake.
-//
-// MUST match kBakedGISunKernelExponent in BakedGI.cpp. The CPU mirror of this
-// kernel publishes bakedGISunWeight, which the Ray Fan and the bin panel read, so
-// a mismatch would make the picture and the numbers describe different folds.
-#define BAKED_GI_SUN_KERNEL_EXPONENT 64.0f
-
 [numthreads(64, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -47,12 +34,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (probe >= probeCount)
         return;
 
+    // The sky quadrature reads the 16-record table below; the sun term reads the
+    // separate 17-state sun table. Two tables, one thread.
     StructuredBuffer<float4> response = ResourceDescriptorHeap[Upd.responseSRVIdx];
     RWStructuredBuffer<float4> lit     = ResourceDescriptorHeap[Upd.litUAVIdx];
     RWStructuredBuffer<float4> litSky  = ResourceDescriptorHeap[Upd.litSkyUAVIdx];
     RWStructuredBuffer<float4> litSun  = ResourceDescriptorHeap[Upd.litSunUAVIdx];
 
-    float3 sunDir = normalize(float3(Upd.sunDirX, Upd.sunDirY, Upd.sunDirZ));
     float3 sunE   = float3(Upd.sunIrradianceX, Upd.sunIrradianceY, Upd.sunIrradianceZ);
 
     float3 coefSky[9] = (float3[9])0;
@@ -80,75 +68,33 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
     }
 
-    // --- Sun: kernel-interpolated indirect response x sun irradiance ---
+    // --- Sun: TWO records, the pair that brackets the current hour ---
     //
-    // TWO SOURCES, chosen by the method baked into this table:
+    // The 17 states sit on the equinox arc at 0.75 h intervals: state k is at
+    // hour 6 + 0.75 k. A given hour can only be between two of them, so the fold
+    // reads two records and never the whole set. The sky loop above is a
+    // different integral and still reads all 16 of its own records.
     //
-    //   sunMode 0 (Probe)      : the 16-bin kernel fold. Each bin is the response
-    //                            to a delta light from W_j, and the kernel mixes
-    //                            them to approximate the response at the sun. The
-    //                            mix is sound for smooth radiance and wrong for
-    //                            visibility: a light path narrower than the
-    //                            NEAREST bin's offset — about 15 degrees here,
-    //                            bin 14 at 14.66 — reads as fully lit or fully
-    //                            shadowed, with no partial credit. That offset
-    //                            belongs to the direction set, not the kernel,
-    //                            so only a denser set moves it. The weighted
-    //                            mean angle is 15.21 degrees at the current
-    //                            exponent, and 23.03 at exponent 8.
-    //
-    //   sunMode 1 (SingleDir)  : ONE term, no kernel. The bake traced visibility
-    //                            toward the real sun, so the response already
-    //                            describes the sun and there is nothing to
-    //                            interpolate. This is the whole point of the method.
-    if (Upd.sunMode != 0u)
+    // The weight is LINEAR, and that is a decision rather than a shortcut. The
+    // equinox moves the sun at exactly 15.00 degrees each hour, so a linear weight
+    // in hours is also a linear weight in angle: time and angle are the same
+    // parameter here. A power kernel would place almost all the weight on one
+    // state and pop at every midpoint. Do not reintroduce one.
     {
-        // One record per probe: no bin index, so the stride is kResponseFloat4s
-        // rather than BAKED_GI_DIRECTIONS * kResponseFloat4s.
         StructuredBuffer<float4> sunResp = ResourceDescriptorHeap[Upd.sunResponseSRVIdx];
-        const uint sunSlot = probe * BAKED_GI_RESPONSE_F4;
+        const float u  = (Upd.hour - BAKED_GI_SUN_STATE_HOUR0) * (1.0f / BAKED_GI_SUN_STATE_STEP);
+        // The clamp is what makes the night case safe with no branch. Below hour 6
+        // and above hour 18 the two end states are used and sunE is already near
+        // zero, so the term fades to nothing without a test and without a step.
+        const int   i0 = (int)clamp(floor(u), 0.0f, (float)(BAKED_GI_SUN_STATES - 2));
+        const float t  = saturate(u - (float)i0);
+        const uint  base = (probe * BAKED_GI_SUN_STATES + (uint)i0) * BAKED_GI_RESPONSE_F4;
         [unroll]
-        for (uint lms = 0; lms < 9; ++lms)
-            coefSun[lms] += sunE * sunResp[sunSlot + lms].rgb;
-    }
-    else
-    {
-        float bw[BAKED_GI_DIRECTIONS];
-        float wsum = 0.0f;
-        [unroll]
-        for (uint j = 0; j < BAKED_GI_DIRECTIONS; ++j)
+        for (uint lm = 0; lm < 9; ++lm)
         {
-            bw[j] = pow(max(0.0f, dot(BakedGIDeltaDirection(j), sunDir)),
-                        BAKED_GI_SUN_KERNEL_EXPONENT);
-            wsum += bw[j];
-        }
-        if (wsum > 1e-6f)
-        {
-            // Kernel-interpolated response. The visibility stays INSIDE the stored
-            // table: the bake multiplied each bin by the visibility of its own
-            // delta direction, so this blend sees the occluded value, as shipped.
-            // Do not separate it here. A per-direction scalar visibility cannot be
-            // applied after the SH projection without destroying the directional
-            // structure, and a band-limited SH fit of that field overshoots by
-            // about 28 percent at a 45-60 degree light path.
-            //
-            // SAMPLING FLOOR, which no estimator fixes: a 256-ray bin integrates
-            // 4pi/256 = 0.049 sr per ray, so a light path of half-angle H holds
-            // 2pi(1-cos H)/0.049 rays. Measured: 5 degrees -> 0 rays, 10 degrees ->
-            // about 2, 15 degrees -> about 4. Under 10 degrees a bin may hold no
-            // sun-visible hit at all, so a window seen from across a hall sits in
-            // the band this CANNOT fix.
-            [unroll]
-            for (uint j2 = 0; j2 < BAKED_GI_DIRECTIONS; ++j2)
-            {
-                if (bw[j2] <= 0.0f)
-                    continue;
-                const float b = bw[j2] / wsum;
-                const uint slot = (probe * BAKED_GI_DIRECTIONS + j2) * BAKED_GI_RESPONSE_F4;
-                [unroll]
-                for (uint lm = 0; lm < 9; ++lm)
-                    coefSun[lm] += sunE * b * response[slot + lm].rgb;
-            }
+            const float3 a = sunResp[base + lm].rgb;
+            const float3 b = sunResp[base + BAKED_GI_RESPONSE_F4 + lm].rgb;
+            coefSun[lm] += sunE * lerp(a, b, t);
         }
     }
 

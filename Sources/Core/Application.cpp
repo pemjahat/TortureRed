@@ -246,7 +246,7 @@ void Application::Initialize()
     // DDGI probe system : pipelines + grid setup. The grid fits the loaded model
     // bounds, so the setup runs at the start of the first Render.
     m_Renderer.CreateDDGIPipelines();
-    if (m_IndirectGIEnabled && m_IndirectGIMethod == 2)
+    if (m_IndirectGIEnabled && m_IndirectGIMethod == kIndirectMethodDDGI)
         m_PendingDDGISetup = true; // auto-fit the grid when DDGI is the default method
 
     // Initialize TAA / Temporal Super-Resolution
@@ -754,104 +754,96 @@ void Application::FillEfbBallConstants()
     m_FrameConstants.bakedGIEfbDir = (uint32_t)m_BakedGIEfbDir;
 }
 
-// Publishes the sun fold for this frame, in both forms its two consumers need:
-//   - the 16 normalised kernel weights, for the Ray Fan's DeltaDirections
-//     channel (FrameConstants::bakedGISunWeight), and
-//   - the argmax and its weight, for the Ray Fan's direction
-//     (FrameConstants::bakedGIRayDebugDir) and for the UI text,
-// and the to-sun direction itself, for the 17th box that same channel draws
-// (FrameConstants::bakedGISunDir).
+// Publishes the sun fold for this frame to the debug surfaces:
+//   - the 16 direction weights the Ray Fan's DeltaDirections channel ramps, and
+//   - the to-sun direction of the current HOUR, for the 17th box that same
+//     channel draws (FrameConstants::bakedGISunDir),
+// plus the two hour states the fold is interpolating (FrameConstants::
+// bakedGIRayDebugDir and m_BakedGISunState), for the UI text.
 //
-// All of it comes from ONE call to BakedGI::SunFoldWeights, the only owner of
-// the kernel, the normalisation and the argmax. That is what keeps the white
-// box, the fan's drawn direction, the orange sun marker and the printed weight
-// ranking in agreement.
+// All of it comes from ONE BakedGI::SunBlendForHour and ONE
+// BakedGI::SunDirectionAtHour, so the box colours, the orange marker and the
+// panel table cannot describe different hours.
 //
-// The transport table is indexed by TO-SUN directions and the light stores the
-// direction it TRAVELS, so negate it — the same negation the update pass and the
-// pending-dump block use. With no sun every weight is 0 and the argmax is 0
-// with weight 0, which is the "no sun" report, not a winner.
+// THE 16 WEIGHTS ARE NOW UNIFORM. They described a kernel that no longer exists.
+// The 16 directions are the SKY QUADRATURE, and a hemisphere quadrature weights
+// every direction equally, so 1/16 each is the truthful value and the channel
+// draws them all at the same brightness. Do not invent a ramp here: a non-uniform
+// weight would claim the sun prefers a fibonacci bin, which it cannot any more.
 void Application::FillSunFoldConstants()
 {
-    float w[BakedGI::kDirections];
-    float wMax = 0.0f;
-    uint32_t dominant = 0u;
-
-    // Kept in scope after the branch: the sun marker needs the direction, not
-    // only the weights. Left at zero when there is no light.
-    DirectX::XMFLOAT3 sunToDir = { 0.0f, 0.0f, 0.0f };
-
     const auto& lights = m_Scene.GetLights();
-    if (!lights.empty())
-    {
-        sunToDir = { -lights[0].direction.x,
-                     -lights[0].direction.y,
-                     -lights[0].direction.z };
-        dominant = BakedGI::SunFoldWeights(sunToDir, w, &wMax);
-    }
-    else
-    {
-        // No light at all: no fold, so every weight is 0. SunFoldWeights zeroes
-        // its array itself, but this path never calls it, so clear here too.
-        for (uint32_t j = 0; j < BakedGI::kDirections; ++j)
-            w[j] = 0.0f;
-    }
+    const bool haveSun = !lights.empty();
 
     for (uint32_t j = 0; j < BakedGI::kDirections; ++j)
-        m_FrameConstants.bakedGISunWeight[j].x = w[j]; // .x: the field is a float4 array
+        m_FrameConstants.bakedGISunWeight[j].x = 1.0f / (float)BakedGI::kDirections;
 
-    // The REAL sun, for the Ray Fan's DeltaDirections channel (debug view 7).
-    // That channel draws the 16 bin boxes and, from the same cell and at the
-    // same length, this one orange box: the angle between them is the fold's
-    // angular error, and it is now visible instead of readable only in the Sun
-    // Fold Bins table.
-    //
-    // w = 1.0 only when the fold is active for this sun. The weight test is the
-    // bin panel's own (BakedGI::BuildSunBinPanel sets haveSun from "a direction
-    // exists and wMax > 0"), so the marker and the panel's "fold active" label
-    // cannot disagree. A sun below the horizon zeroes every kernel weight, so
-    // wMax is 0 there too and the marker does not draw.
-    //
-    // The length test guards the divide AND the NaN case: a NaN passes every
-    // comparison as false, so it lands in the zero branch instead of reaching a
-    // vertex position. When the marker does not draw, xyz is zeroed as well, so
-    // no stale direction survives a removed or a set sun.
-    const float sunLen = std::sqrt(sunToDir.x * sunToDir.x + sunToDir.y * sunToDir.y
-                                   + sunToDir.z * sunToDir.z);
-    if (!lights.empty() && (sunLen > 1e-6f) && (wMax > 0.0f))
-        m_FrameConstants.bakedGISunDir = { sunToDir.x / sunLen, sunToDir.y / sunLen,
-                                           sunToDir.z / sunLen, 1.0f };
+    // The hour's sun, for the Ray Fan's DeltaDirections channel (debug view 7).
+    // The marker does not draw below the horizon: outside [6, 18] the sun term is
+    // zero, so presenting a direction there would claim light that is not there.
+    const BakedGI::SunHourBlend blend = BakedGI::SunBlendForHour(m_GIHour);
+    const DirectX::XMFLOAT3 toSun = BakedGI::SunDirectionAtHour(m_GIHour);
+    // Unit length by construction, so no divide and no NaN case to guard.
+    if (haveSun && blend.inDaylight)
+        m_FrameConstants.bakedGISunDir = { toSun.x, toSun.y, toSun.z, 1.0f };
     else
         m_FrameConstants.bakedGISunDir = { 0.0f, 0.0f, 0.0f, 0.0f };
 
-    m_BakedGISunDir    = (int)dominant;
-    m_BakedGISunWeight = wMax; // 0.0 when there is no sun
-    // Method 3 has ONE direction and no argmax: the dump writes group 0, so the
-    // fan must read group 0. Leaving the binned argmax here would point the fan at
-    // bin 14, which carries no weight in that method's fold.
-    m_FrameConstants.bakedGIRayDebugDir = SingleDirectionSun() ? 0u : dominant;
+    m_BakedGISunState = (int)blend.i0;
+    // The sun dump writes group 0 only, so the fan must read group 0. The old
+    // per-bin argmax would point it at a bin the fold never touches.
+    m_FrameConstants.bakedGIRayDebugDir = 0u;
 }
 
 void Application::Render()
 {
+    // --- The sun is the hour: ONE writer for the directional light ---
+    //
+    // Everything downstream reads the light's direction: the Hosek-Wilkie sky
+    // bake, the runtime-exact direct sun, the shadow map, the path tracer and
+    // DDGI. Writing it here, before any pass records, is what keeps the GI sun (a
+    // blend of two baked hour states) and the direct sun pointing the same way.
+    // Two authors would give a lit surface two shadows in two directions.
+    //
+    // Only the first light is treated as the sun, which is the same assumption
+    // every other sun reader in this file already makes.
+    if (!m_Scene.GetLights().empty() && m_Scene.GetLights()[0].direction.w < 0.5f)
+    {
+        LightConstants& sun = m_Scene.GetLights()[0];
+        const DirectX::XMFLOAT3 toSun = BakedGI::SunDirectionAtHour(m_GIHour);
+        const DirectX::XMFLOAT4 want = { -toSun.x, -toSun.y, -toSun.z, 0.0f };
+        // A change restarts the path tracer, exactly as the old direction drag
+        // did. The compare is on the stored direction, so this needs no extra
+        // member and cannot miss an externally authored change either.
+        if (std::fabs(sun.direction.x - want.x) > 1e-6f ||
+            std::fabs(sun.direction.y - want.y) > 1e-6f ||
+            std::fabs(sun.direction.z - want.z) > 1e-6f)
+        {
+            sun.direction = want;
+            m_FrameConstants.frameIndex = 0;
+        }
+    }
+
     // Baked GI probe bake — runs on a synced command list of
     // its own before the frame starts recording. Triggered by the scene-load
     // auto-bake or the "Rebuild GI Probes" button.
     if (m_PendingGIProbeBake)
     {
         m_PendingGIProbeBake = false;
-        // Method 3 additionally bakes the sun's own response toward the REAL sun,
-        // so the transport needs the to-sun direction at bake time. Everything
-        // else about the bake is unchanged.
-        const DirectX::XMFLOAT3 bakeSunToDir = SunToDirNow();
-        m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing, SingleDirectionSun(), bakeSunToDir,
-                                SunBakeSeedDir(bakeSunToDir));
-        // The fold is baked under method 3, so it must run once. It CANNOT run
-        // here: the sky cubemap it samples is baked later in this same frame, so
-        // folding now would use the previous frame's sky. Mark it pending and
-        // service it right after ExecuteSky below.
-        if (SingleDirectionSun())
-            m_PendingProbeFold = true;
+        // The sun states are baked for every hour, so the bake needs no direction
+        // from the UI: each state's direction comes from
+        // BakedGI::SunDirectionAtHourCPU and the RNG seed from the state index.
+        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing,
+                                                   SingleDirectionSun());
+        // Trigger 2: a completed bake rewrote the tables, so the resident lit
+        // table describes the previous one. Fold again on the next opportunity.
+        // A failed bake leaves the tables alone, and the fold gate already checks
+        // bakedGIValid, so this cannot fold unbacked data.
+        if (baked)
+        {
+            m_ProbeFoldWanted = true;
+            m_ProbeFoldHour   = -1.0f; // no hour has been folded against these tables
+        }
         // The bake replaced the per-term capture, so the SRV indices the "Efb
         // Contribution" view reads changed. Update published the PRE-bake ones,
         // and Render uploads the constants again after these pending blocks, so
@@ -870,38 +862,27 @@ void Application::Render()
 
     // Ray-debug dump — same synced-list pattern, debug only. Runs after the
     // bake so it reads a complete table. Logs the direction ranking, the ray
-    // ranking, the self-check, and the CPU kernel-weight mirror.
+    // ranking and the self-check.
     if (m_PendingRayDebug)
     {
         m_PendingRayDebug = false;
-        // The table is indexed by TO-SUN directions; the light stores the travel
-        // direction. Same negation the update pass uses. Both the ray-debug
-        // readout and the kernel-weight log use this one direction.
+        // The readout names a direction only for its message. The GI sun itself
+        // comes from the hour, and the replay's state index is what selects the
+        // record, so the light's current direction has no bearing on the trace.
         const bool haveSunToDir = HasSunLight();
         const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
-        // The SAME seed function the bake used. A different value here traces
-        // other rays and the self-check reports MISMATCH — a true report.
+        // The SAME state the fold is interpolating, so the dump describes the
+        // record the frame actually reads. A different state replays a different
+        // bake and the self-check reports MISMATCH — a true report.
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
                                    haveSunToDir ? &sunToDir : nullptr, SingleDirectionSun(),
-                                   SunBakeSeedDir(sunToDir));
-        if (haveSunToDir)
-            BakedGI::LogKernelWeights(sunToDir);
+                                   (uint32_t)m_BakedGISunState);
         // The dump replaced the ray-debug buffer and cached a new verdict. Fill
         // the dump-derived constants again so the fan reads the new buffer, probe
         // and verdict on THIS frame. Without this the fan would read the pre-dump
         // SRV index, whose first value is 0 — a descriptor that is not the
         // ray-debug buffer.
         FillRayDebugConstants();
-    }
-
-    // Sun-bin panel read-back — the same synced-list pattern, and for the same
-    // reason: the copy must finish before the Map, and resetting the command
-    // list mid-frame would discard the frame in flight.
-    if (m_PendingProbeTableReadback)
-    {
-        m_PendingProbeTableReadback = false;
-        const uint32_t want = (uint32_t)std::max(0, m_RayDebugProbeIndex);
-        m_Renderer.ReadbackBakedGIProbeTable(want); // no bake, no data; the panel says so
     }
 
     // Begin frame rendering
@@ -964,28 +945,39 @@ void Application::Render()
         // Baked GI — fold the live sun/sky state into the lit probe grid
         // (probe mode only; ReSTIR GI is the exclusive alternative and its
         // dispatch early-outs via enableRestirGI = 0).
-        // Under method 3 the fold is BAKED: it runs once per bake, not per frame.
-        // It is serviced here, after ExecuteSky and after the sun-irradiance
+        //
+        // THE FOLD IS GATED ON ITS INPUTS, not run every frame. Its output is a
+        // pure function of four things, and it is only stale when one of them
+        // moves:
+        //   1. the hour, which sets the sun direction and therefore the whole sun
+        //      term (two baked records, blended linearly);
+        //   2. a completed bake, which rewrites the tables;
+        //   3. a change of indirect method;
+        //   4. a light parameter, which scales sunE and multiplies coefSun.
+        // The sky cubemap is a pure function of the sun, and the sun is now a pure
+        // function of the hour, so nothing else can move the output. The two sky
+        // settings that are NOT derived from the hour — turbidity and ground
+        // albedo — are fixed code defaults (Application.cpp:566-567) with no UI
+        // control, so they are constant for the life of the process. If either
+        // ever gains a control, add it to this list.
+        //
+        // Cost: a clean frame issues no dispatch, so it reads 0 B of probe data.
+        // A fold frame reads 18 records for each probe (16 sky + 2 sun), which is
+        // 2880 B, and writes 432 B.
+        //
+        // Serviced here, after ExecuteSky and after the sun-irradiance
         // replacement above, so sunE and the cubemap are both current. Running it
         // inside BakeGIProbes instead would read the previous frame's sky.
-        const bool foldWanted = SingleDirectionSun() ? m_PendingProbeFold : true;
-        if (m_FrameConstants.bakedGIMode != 0 && m_FrameConstants.bakedGIValid != 0
-            && !m_Scene.GetLights().empty() && foldWanted)
+        if (m_GIHour != m_ProbeFoldHour)
+            m_ProbeFoldWanted = true; // trigger 1: the hour moved
+
+        if (m_ProbeFoldWanted && m_FrameConstants.bakedGIMode != 0
+            && m_FrameConstants.bakedGIValid != 0 && !m_Scene.GetLights().empty())
         {
             GPU_MARKER(cmdList, L"BakedGI Update");
-            m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0],
-                                             SingleDirectionSun());
-            m_PendingProbeFold = false;
-            // ONE line, once per bake, never per frame. This is the observation
-            // that the method-3 update pass is idle: if this prints again on the
-            // next frame, the gate is broken and the 17.95 -> 0 GB/s claim is
-            // wrong. Gated on SingleDirectionSun() so the binned method, which
-            // folds every frame by design, does not spam the log.
-            if (SingleDirectionSun())
-                std::cout << "[BakedGI] fold baked once for "
-                          << m_Renderer.GetBakedGI().GetProbeCount()
-                          << " probes (single-direction sun); the update pass is idle"
-                          << std::endl;
+            m_Renderer.DispatchBakedGIUpdate(m_FrameConstants, m_Scene.GetLights()[0], m_GIHour);
+            m_ProbeFoldWanted = false;
+            m_ProbeFoldHour   = m_GIHour; // what the resident lit table was folded for
         }
 
         // DDGI — trace the probe rays and resolve the two atlases. It runs after
@@ -1517,36 +1509,27 @@ void Application::Render()
 
 // Method 3 traces ONE direction, so the help text of the views below describes a
 // fold it does not run. Printed as a line above the widget rather than folded into
-// the tooltip: the tooltip literals stay untouched, so Probe (Baked) output is
-// byte-identical by construction, not by careful editing.
+// the tooltip: the tooltip literals stay untouched, so the remaining methods'
+// output is byte-identical by construction, not by careful editing.
 static const char* kMethod3WordingCaveat =
     "Method 3 traces ONE direction -- the real sun. The help text below describes "
-    "Probe (Baked)'s 16-direction fold and does not apply to this method.";
+    "the removed 16-direction fold and does not apply to this method.";
 
 // The to-sun direction, negated from the light's travel direction exactly as the
-// update pass does. One definition for every reader: the bake, the fold, the
-// ray-debug readout, the kernel-weight log and the bin panel all used to negate
-// it inline, and the mode-swap check below compares directions, so a divergence
-// between two copies would silently disable that check.
+// sky bake and the direct lighting read it. One definition for every reader: the
+// ray-debug readout and the debug panels all used to negate it inline, and the
+// mode-swap check compares directions, so a divergence between two copies would
+// silently disable that check.
+//
+// The GI sun itself no longer comes from here: it comes from m_GIHour through
+// BakedGI::SunDirectionAtHour. See the note on the hour control in the Light
+// Editor.
 DirectX::XMFLOAT3 Application::SunToDirNow()
 {
     if (!HasSunLight())
         return DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
     const LightConstants& sun = m_Scene.GetLights()[0];
     return DirectX::XMFLOAT3(-sun.direction.x, -sun.direction.y, -sun.direction.z);
-}
-
-// The seed index for the single-sun bake and for its ray-debug replay. One
-// function for both, because the replay reproduces the bake's RNG stream and its
-// self-check is the only proof that the two received the same value.
-//
-// The bin is DERIVED from the live sun, never written as a literal. It is 14 for
-// the captured sun and it stays correct when the sun moves.
-uint32_t Application::SunBakeSeedDir(const DirectX::XMFLOAT3& sunToDir) const
-{
-    if (!SingleDirectionSun() || !m_GISunSeedPairDominantBin)
-        return BakedGI::kSunSeedOwnDir;
-    return BakedGI::DominantSunDirection(sunToDir);
 }
 
 void Application::RenderImGui()
@@ -1740,13 +1723,38 @@ void Application::RenderImGui()
             ImGui::Text("Sun Irradiance (auto)");
             ImGui::InputFloat3("##irradiance", irradianceRGB, "%.3f", ImGuiInputTextFlags_ReadOnly);
 
-            if (ImGui::DragFloat3("Direction", &selectedLight.direction.x, 0.01f, -1.0f, 1.0f))
+            // The sun is not a free direction any more: it is one number, the
+            // hour of true solar time. This control replaces the direction drag,
+            // and the direction below is the DERIVED value, shown read-only so the
+            // two can never disagree.
+            //
+            // It lives here rather than only in the Indirect GI panel because the
+            // sun must stay adjustable under the path tracer and under ReSTIR GI,
+            // where that panel is not drawn.
+            //
+            // TWO widgets edit m_GIHour: this one and the copy in the Indirect GI
+            // panel. Sharing the float is intended. Sharing the LABEL is not, and
+            // that was the defect: ImGui derives a widget ID from its label plus the
+            // ID stack, so two widgets with the same label in one scope get the SAME
+            // ID. Both then believe they are active, and each maps the mouse against
+            // its own rect, so a drag past the far widget's track clamps to the range
+            // maximum. That is what snapped the hour to 24. PushID gives each a
+            // distinct ID while the visible label stays identical.
+            ImGui::PushID("HourLightEditor");
+            ImGui::SliderFloat("Hour (0-24)", &m_GIHour, 0.0f, 24.0f, "%.2f");
+            ImGui::PopID();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Sun position as an hour of TRUE SOLAR TIME: 6 is sunrise, 12 is\n"
+                                  "solar noon, 18 is sunset. The date is fixed at the equinox and the\n"
+                                  "latitude at %.5f degrees, so the hour is the whole sun input.\n"
+                                  "Hour 12 reproduces the scene's authored sun to 1e-9.",
+                                  BakedGI::kEquinoxLatitudeDeg);
             {
-                // Normalize direction
-                DirectX::XMVECTOR lightDir = DirectX::XMLoadFloat4(&selectedLight.direction);
-                lightDir = DirectX::XMVector3Normalize(lightDir);
-                DirectX::XMStoreFloat4(&selectedLight.direction, lightDir);
-                changed = true;
+                const DirectX::XMFLOAT3 toSun = BakedGI::SunDirectionAtHour(m_GIHour);
+                float dirReadOnly[3] = { -toSun.x, -toSun.y, -toSun.z }; // travel, not to-sun
+                ImGui::BeginDisabled();
+                ImGui::InputFloat3("Direction (derived)", dirReadOnly, "%.4f", ImGuiInputTextFlags_ReadOnly);
+                ImGui::EndDisabled();
             }
         }
         else // Point/Spot
@@ -1812,6 +1820,14 @@ void Application::RenderImGui()
         if (changed)
         {
             m_FrameConstants.frameIndex = 0; // Reset path tracer if light changes
+            // Trigger 4: a light parameter moved, and it scales sunE, which
+            // multiplies the whole sun term. This is the flag the editor already
+            // sets; a second detector would be a second thing to keep in step.
+            //
+            // It over-triggers on a SPOT light edit, which does not enter the
+            // baked probe field at all. One redundant fold on a UI action is
+            // cheaper than a stale one, and under-triggering is silent.
+            m_ProbeFoldWanted = true;
         }
     }
     else
@@ -1838,58 +1854,48 @@ void Application::RenderImGui()
         {
             ImGui::Indent();
 
-            // Index 3 is APPENDED, not inserted: 0/1/2 keep their meaning so no
-            // stored setting or external reference is reinterpreted, and Probe
-            // stays reachable at index 0 as the fallback.
-            const char* giMethods[] = { "Probe (Baked)", "ReSTIR GI", "DDGI",
-                                        "Probe (Baked Sun)" };
+            // "Probe (Baked)" was removed with the 16-bin sun fold it existed
+            // for, so the entries below shifted down by one. Nothing stored the
+            // old index: m_IndirectGIMethod is a plain member with a default
+            // initialiser, not a scene field and not an ini key.
+            const char* giMethods[] = { "ReSTIR GI", "DDGI", "Probe (Baked Sun)" };
             const bool methodChanged = ImGui::Combo("Indirect GI Method", &m_IndirectGIMethod, giMethods, IM_ARRAYSIZE(giMethods));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Exclusive methods.\nProbe: direct sun stays runtime-exact; sun/sky bounces + occluded sky come from the baked grid. No local-light indirect, no indirect specular.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.\nDDGI: a runtime ray-traced octahedral irradiance probe volume. Re-traces every frame (no bake, no sun gating); sun light enters the probes through frontface hits only, so the probes store indirect light.\nProbe (Baked Sun): the sun is baked as a single response toward the real sun direction instead of being reconstructed from the 16 bins, and the whole fold is baked, so a sun or sky change needs a rebake. Direct sun stays runtime-exact.");
+                ImGui::SetTooltip("Exclusive methods.\nReSTIR GI: spatiotemporal resampling with the SHaRC irradiance cache.\nDDGI: a runtime ray-traced octahedral irradiance probe volume. Re-traces every frame (no bake, no sun gating); sun light enters the probes through frontface hits only, so the probes store indirect light.\nProbe (Baked Sun): the grid stores 17 baked sun responses, one for each hour state along the equinox arc, and the per-frame fold interpolates the two that bracket Hour. Direct sun stays runtime-exact; the sky quadrature stays live.");
 
             // Exactly one of the three engine flags is ever set.
             m_FrameConstants.bakedGIMode            = ProbeMethodActive() ? 1u : 0u;
-            m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == 1) ? 1u : 0u;
-            m_FrameConstants.ddgiMode      = (m_IndirectGIMethod == 2) ? 1u : 0u;
+            m_FrameConstants.enableRestirGI = (m_IndirectGIMethod == kIndirectMethodRestirGI) ? 1u : 0u;
+            m_FrameConstants.ddgiMode      = (m_IndirectGIMethod == kIndirectMethodDDGI) ? 1u : 0u;
 
             // -----------------------------------------------------------------
             // A METHOD CHANGE IS AN EVENT, NOT A STATE. Service it here, once,
             // unconditionally.
             //
             // The old code requested work from inside "if (!gi.IsValid())", two
-            // blocks further down. That is why the swap back into the
-            // single-direction method left the image stuck: a bake already
-            // existed, so the branch never ran, nothing armed m_PendingProbeFold,
-            // the fold's gate evaluated false, and Lit kept whatever the previous
-            // method had written. It also gated the request on
-            // "!m_PendingGIProbeBake", which can swallow an event outright. A
-            // pending request is idempotent, so that guard bought nothing and
-            // risked losing the only retry.
+            // blocks further down. That is why a swap back into the probe method
+            // once left the image stuck: a bake already existed, so the branch
+            // never ran, nothing armed the fold, the fold's gate evaluated false,
+            // and Lit kept whatever the previous method had written. It also gated
+            // the request on "!m_PendingGIProbeBake", which can swallow an event
+            // outright. A pending request is idempotent, so that guard bought
+            // nothing and risked losing the only retry.
             // -----------------------------------------------------------------
             if (methodChanged || !wasGIEnabled)
             {
-                if (SingleDirectionSun())
+                // Trigger 3: the method changed, so the lit table now belongs to a
+                // pass that is no longer drawn. Fold again as soon as the probe
+                // method is the live one again, even if nothing else moved. This
+                // is the exact fault the comment above records.
+                m_ProbeFoldWanted = true;
+                m_ProbeFoldHour   = -1.0f;
+
+                if (ProbeMethodActive())
                 {
-                    const bool haveSun = HasSunLight();
-                    const DirectX::XMFLOAT3 sun = SunToDirNow();
-                    BakedGI& giRef = m_Renderer.GetBakedGI();
-                    // Arming the fold is free. A bake is 1.6 to 97 s on a UI
-                    // action. So reuse the resident sun table when it already
-                    // describes THIS sun, and rebake only when the table is
-                    // missing or was baked for a different direction. The second
-                    // case matters: a stale table would multiply a live sunE by a
-                    // response for the wrong direction and look plausible.
-                    if (haveSun && giRef.HasSunResponseFor(sun))
-                        m_PendingProbeFold = true;
-                    else if (haveSun)
-                        m_PendingGIProbeBake = true;
-                    // No sun: nothing to fold, and the fold gate requires a light.
-                }
-                else if (m_IndirectGIMethod == kIndirectMethodProbe)
-                {
-                    // Probe folds every frame from a sun-independent table, so an
-                    // existing bake needs nothing at all.
-                    if (!m_Renderer.GetBakedGI().IsValid())
+                    // The fold needs the baked tables, and they are hourly, so an
+                    // existing bake needs nothing at all: the hour never
+                    // invalidates it because all 17 states are resident.
+                    if (!m_Renderer.GetBakedGI().HasSunResponseFor(m_GIHour))
                         m_PendingGIProbeBake = true;
                 }
                 // DDGI is deliberately NOT re-fitted here. Its grid depends on the
@@ -1898,6 +1904,19 @@ void Application::RenderImGui()
                 // guard further down is structurally identical to the probe one
                 // but cannot leave method-dependent stale data behind.
             }
+
+            // The sun input, repeated here because this is the panel the GI work
+            // is configured from. The two widgets share the float, so they cannot
+            // disagree about the VALUE — but they must not share an ID, so each is
+            // wrapped in its own PushID. See the note at the Light Editor copy.
+            ImGui::SetNextItemWidth(220.f);
+            ImGui::PushID("HourGIPanel");
+            ImGui::SliderFloat("Hour (0-24)", &m_GIHour, 0.0f, 24.0f, "%.2f");
+            ImGui::PopID();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Sun position as an hour of TRUE SOLAR TIME. The probe grid holds\n"
+                                  "17 baked sun responses along the equinox arc, and the fold blends\n"
+                                  "the two that bracket this hour.");
 
             ImGui::Checkbox("Indirect Only View", &m_GIIndirectOnly);
             if (ImGui::IsItemHovered())
@@ -1943,7 +1962,12 @@ void Application::RenderImGui()
 
             if (ProbeMethodActive())
             {
+                // The DDGI panel has a widget with the same label bound to a
+                // DIFFERENT float. PushID keeps the two IDs apart, so a drag can
+                // never write the other method's spacing.
+                ImGui::PushID("ProbeSpacingBaked");
                 ImGui::SliderFloat("Probe Spacing", &m_BakedGISpacing, 0.5f, 8.0f, "%.1f m");
+                ImGui::PopID();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Grid spacing used by the next \"Rebuild GI Probes\" (auto-grows to fit the probe cap).");
 
@@ -1952,33 +1976,6 @@ void Application::RenderImGui()
 
                 // --- Diagnostic: pair the sun's RNG seed with the dominant bin ---
                 // The bake seeds from the direction index, so the sun pass (dir 0)
-                // gathers a DIFFERENT set of 256 directions than bin 14. A
-                // bin-versus-sun difference then mixes an angular effect with a
-                // sampling effect, and the two cannot be told apart. This makes
-                // both trace the same directions, so only wDelta differs.
-                //
-                // It rewrites the baked sun table, so a toggle must request a
-                // rebake. Without that the control does nothing visible and the
-                // next comparison silently reads the old table. Method 3 only:
-                // the binned method has no single-sun pass to pair.
-                ImGui::BeginDisabled(!SingleDirectionSun());
-                if (ImGui::Checkbox("Pair sun seed with dominant bin (diagnostic)",
-                                    &m_GISunSeedPairDominantBin))
-                    m_PendingGIProbeBake = true;
-                ImGui::EndDisabled();
-                // AllowWhenDisabled: the tooltip is the only place that says WHY
-                // the control is greyed out, so it must still appear.
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Makes the single-sun pass trace the SAME 256 gather directions as\n"
-                                      "the dominant fibonacci bin (the sun fold's argmax, 14 for the captured\n"
-                                      "sun), instead of its own stream. Both methods then re-test the same hit\n"
-                                      "surfaces, so the difference between them is angular and not sampling\n"
-                                      "noise. Diagnostic only.\n"
-                                      "It CHANGES the baked sun table, so it requests a rebake. Wait for the bake\n"
-                                      "before you compare anything.\n"
-                                      "OFF by default, so the shipped path is unchanged.\n"
-                                      "Method \"Probe (Baked Sun)\" only.");
-
                 // Ray-debug tool: re-trace ONE probe and print the evidence.
                 ImGui::InputInt("Ray Debug Probe", &m_RayDebugProbeIndex);
                 if (ImGui::IsItemHovered())
@@ -1986,9 +1983,9 @@ void Application::RenderImGui()
                                       "Index = x + y*dimX + z*dimX*dimY, clamped to the grid.\n"
                                       "Do not derive this by hand: read it off \"Probes Near Camera\"\n"
                                       "below, whose rows set this field and dump in one click.\n"
-                                      "The dump re-traces the 64 gather rays of this probe and prints:\n"
-                                      "the 16-direction ranking, the 64-ray ranking, and a self-check\n"
-                                      "that compares the re-trace with the stored table.\n"
+                                      "The dump re-traces the 64 gather rays of this probe's sun hour\n"
+                                      "state and prints the 64-ray ranking and a self-check that\n"
+                                      "compares the re-trace with the stored record.\n"
                                       "The Ray Fan debug view draws the same probe, so the picture and\n"
                                       "the text always describe one probe.");
                 if (ImGui::Button("Dump Probe Ray Debug"))
@@ -1998,175 +1995,67 @@ void Application::RenderImGui()
                                       "Debug only, on demand — no per-frame cost. See the log section\n"
                                       "[BakedGI RayDebug].");
 
-                // --- Sun fold bins ---
-                // The answer to "which bins interpolate this probe, and by how
-                // much". Two DIFFERENT quantities side by side:
-                //   weight       GLOBAL     w_j, the same for every probe
-                //   contribution PER PROBE  w_j * R_j[0], this probe's table
-                // Weight alone points at the wrong bin, because R_j varies up to
-                // 4x between bins. Do not show one without the other.
+                // --- Sun hour states ---
+                // The answer to "which states does this hour interpolate, and by
+                // how much". Every row is a state, so the table is the whole fold.
+                // The weight depends on the hour alone, so it is the same for
+                // every probe: there is no per-probe column and nothing to read
+                // back from the GPU.
                 ImGui::Separator();
-                ImGui::Text("Sun Fold Bins");
-                // Method 3 does not run this fold. The weights below are still the
-                // RIGHT weights for the sun direction, but nothing consumes them:
-                // the sun column comes from one baked term instead. Say so here,
-                // because a panel that silently shows live weights for a fold that
-                // is not running is worse than no panel.
-                if (SingleDirectionSun())
+                ImGui::Text("Sun Hour States");
                 {
-                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                                       "FOLD IS BAKED under \"Probe (Baked Sun)\".");
-                    ImGui::TextWrapped("The weights and angles below are the kernel's, "
-                                       "but this method does not use the kernel: the sun "
-                                       "column is one response baked toward the real sun. "
-                                       "The contribution column reads the 16-bin table, "
-                                       "which is still baked for the sky quadrature and "
-                                       "for these debug views.");
-                }
-                {
-                    BakedGI& binGI = m_Renderer.GetBakedGI();
+                    BakedGI::SunStatePanel panel;
+                    BakedGI::BuildSunStatePanel(m_GIHour, panel);
 
-                    // The to-sun direction, negated from the light's travel
-                    // direction exactly as the update pass and FillSunFoldConstants
-                    // negate it. One negation rule, three readers.
-                    const bool haveSun = HasSunLight();
-                    const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
-
-                    if (ImGui::Button("Refresh Bin Contributions"))
-                    {
-                        m_PendingProbeTableReadback = true;
-                        m_ProbeTableRequestedProbe  = (uint32_t)std::max(0, m_RayDebugProbeIndex);
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(reads %u's table)", (uint32_t)std::max(0, m_RayDebugProbeIndex));
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Reads ONE probe's response table (2560 B) and waits for the GPU.\n"
-                                          "On demand only — never per frame. The weight and angle columns\n"
-                                          "below are pure CPU and update as you drag the sun.");
-
-                    // A probe change re-requests once. A FAILED request does not
-                    // retry every frame: each retry costs a GPU wait, so the
-                    // Refresh button is the way back.
-                    const uint32_t wantProbe = (uint32_t)std::max(0, m_RayDebugProbeIndex);
-                    if (binGI.IsValid() && !m_PendingProbeTableReadback
-                        && m_ProbeTableRequestedProbe != wantProbe)
-                    {
-                        m_PendingProbeTableReadback = true;
-                        m_ProbeTableRequestedProbe  = wantProbe;
-                    }
-
-                    BakedGI::SunBinPanel panel;
-                    binGI.BuildSunBinPanel(haveSun ? &sunToDir : nullptr, wantProbe, panel);
-
-                    if (panel.haveDirection)
-                    {
-                        ImGui::Text("Sun (to-sun)  elev %.1f deg   azim %.1f deg"
-                                    "   (%s)", panel.elevationDeg, panel.azimuthDeg,
-                                    panel.haveSun ? "fold active" : "below horizon, or no sun: all weights 0");
-                    }
-                    if (panel.haveSun)
-                    {
-                        ImGui::Text("Weighted mean angle %.2f deg", panel.meanAngleDeg);
-                        ImGui::SameLine();
-                        ImGui::TextColored((panel.weightBeyond15 > 0.5f)
-                                               ? ImVec4(0.95f, 0.55f, 0.20f, 1.0f)
-                                               : ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
-                                           "| weight beyond 15 deg %.1f%%", panel.weightBeyond15 * 100.0f);
-                        ImGui::SameLine();
-                        // Name the THRESHOLD, not "nonzero". Only 1 of the 16
-                        // weights is exactly 0 (a bin whose direction faces
-                        // away from the sun); 15 are nonzero and all 15 enter
-                        // the fold, because BakedGI_Update.hlsl:84 skips only
-                        // bw <= 0. So "nonzero" would assert 16 when the count
-                        // below is 11. The threshold is the honest label.
-                        ImGui::Text("| bins with weight > 1e-6: %u / %u",
-                                    panel.nonzeroBins, BakedGI::kDirections);
-                    }
-
-                    // Legend. The two markers are different picks and the panel
-                    // never calls either one "dominant": a bare dominant label
-                    // already caused a defect in this codebase.
-                    ImGui::TextDisabled("w*  = fold-weight argmax  = bin %u  (the Ray Fan draws this bin)",
-                                        panel.weightArgmax);
-                    if (panel.haveResponse)
-                        ImGui::TextDisabled("dc* = highest stored DC luminance = bin %u  (NOT the same pick)",
-                                            panel.dcArgmax);
-
-                    if (!panel.haveResponse)
+                    ImGui::Text("Hour %.3f  ->  states %u and %u, blend t = %.4f",
+                                panel.hour, panel.i0, panel.i0 + 1u, panel.t);
+                    if (!panel.inDaylight)
                     {
                         ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                                           "No table read back for probe %u, so the contribution column is empty.",
-                                           wantProbe);
-                        if (!binGI.IsValid())
-                            ImGui::TextDisabled("(no bake yet — press \"Rebuild GI Probes\")");
-                        else
-                            ImGui::TextDisabled("(press \"Refresh Bin Contributions\"; sorted by weight until then)");
+                                           "Outside daylight (hour 6 to 18): the sun irradiance is "
+                                           "zero, so the sun term contributes nothing.");
                     }
+                    ImGui::Text("Sun at this hour  elev %.2f deg   azim %.2f deg",
+                                panel.elevationDeg, panel.azimuthDeg);
 
-                    if (ImGui::BeginTable("SunBinTable", 5,
+                    if (ImGui::BeginTable("SunStateTable", 4,
                                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
                                               | ImGuiTableFlags_SizingStretchProp))
                     {
-                        ImGui::TableSetupColumn("Bin",  ImGuiTableColumnFlags_WidthFixed, 62.0f);
-                        ImGui::TableSetupColumn("Weight % (GLOBAL)");
-                        ImGui::TableSetupColumn("Angle deg");
-                        ImGui::TableSetupColumn("Contribution (PER PROBE)");
-                        ImGui::TableSetupColumn("% of probe");
+                        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                        ImGui::TableSetupColumn("Hour");
+                        ImGui::TableSetupColumn("Angle to hour deg");
+                        ImGui::TableSetupColumn("Weight");
                         ImGui::TableHeadersRow();
 
-                        for (uint32_t r = 0; r < BakedGI::kDirections; ++r)
+                        for (uint32_t r = 0; r < BakedGI::kSunStates; ++r)
                         {
-                            const BakedGI::SunBinRow& row = panel.rows[r];
-                            // A zero-weight bin contributes nothing and cannot be
-                            // the answer to "which bins interpolate". Hide it, but
-                            // keep the count honest in the header above.
-                            if (row.weight <= 1e-6f && !panel.haveResponse)
-                                continue;
-
+                            const BakedGI::SunStateRow& row = panel.rows[r];
+                            // Only the two brackets carry weight, so only they can
+                            // answer "which states interpolate". Hide the other
+                            // fifteen rows unless the user wants the whole arc —
+                            // the count in the header keeps the total honest.
                             ImGui::TableNextRow();
                             ImGui::TableSetColumnIndex(0);
-                            {
-                                const char* mark = (row.bin == panel.weightArgmax) ? " w*"
-                                                 : (panel.haveResponse && row.bin == panel.dcArgmax) ? " dc*"
-                                                 : "";
-                                ImGui::Text("%2u%s", row.bin, mark);
-                            }
+                            if (row.active)
+                                ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.55f, 1.0f), "%2u *", row.state);
+                            else
+                                ImGui::TextDisabled("%2u", row.state);
                             ImGui::TableSetColumnIndex(1);
-                            ImGui::Text("%6.2f %%", row.weight * 100.0f);
+                            ImGui::Text("%6.2f", row.hour);
                             ImGui::TableSetColumnIndex(2);
-                            ImGui::Text("%6.2f", row.angleDeg);
+                            ImGui::Text("%7.3f", row.angleDeg);
                             ImGui::TableSetColumnIndex(3);
-                            if (panel.haveResponse)
-                            {
-                                // Tint by the contribution's own hue, so a bin that
-                                // carries red reads red. The number is luminance;
-                                // the tooltip carries the channels.
-                                const DirectX::XMFLOAT3& c = row.contribRGB;
-                                const float mx = std::max(c.x, std::max(c.y, c.z));
-                                const ImVec4 tint = (mx > 1e-12f)
-                                    ? ImVec4(0.25f + 0.75f * (c.x / mx), 0.25f + 0.75f * (c.y / mx),
-                                             0.25f + 0.75f * (c.z / mx), 1.0f)
-                                    : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
-                                ImGui::TextColored(tint, "%.5f", row.contrib);
-                                if (ImGui::IsItemHovered())
-                                    ImGui::SetTooltip("weight x R_bin[slot 0], per channel:\n"
-                                                      "R %.5f   G %.5f   B %.5f\n"
-                                                      "R_bin[0] luminance %.5f",
-                                                      row.contribRGB.x, row.contribRGB.y, row.contribRGB.z,
-                                                      row.dcLum);
-                            }
+                            if (row.active)
+                                ImGui::Text("%7.4f  (%.1f %%)", row.weight, row.weight * 100.0f);
                             else
-                            {
-                                ImGui::TextDisabled("--");
-                            }
-                            ImGui::TableSetColumnIndex(4);
-                            if (panel.haveResponse)
-                                ImGui::Text("%6.2f %%", row.contribPct * 100.0f);
-                            else
-                                ImGui::TextDisabled("--");
+                                ImGui::TextDisabled("0");
                         }
                         ImGui::EndTable();
                     }
+                    ImGui::TextDisabled("* = one of the two states this hour interpolates. "
+                                        "Adjacent states are %.2f deg apart.",
+                                        BakedGI::kSunStateStepHours * 15.0f);
                 }
 
                 // --- Probes near the camera ---
@@ -2451,27 +2340,17 @@ void Application::RenderImGui()
                     const bool deltaDirs =
                         ((uint32_t)m_BakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs);
 
-                    // Which direction the fan draws, and how strongly the sun
-                    // fold weights it. A weight of 0 means no sun (the sun is
-                    // below the horizon, or the direction is zero), so direction
-                    // 0 is then not a real winner — say so, do not imply a pick.
-                    // Method 3 has ONE direction, traced toward the real sun. There
-                    // is no "dominant" bin there, and saying so would be false: the
-                    // fold does not touch the 16 bins at all.
-                    if (SingleDirectionSun())
-                        ImGui::Text("Ray Fan: the SUN direction (method 3 traces one direction, not 16)");
-                    else if (m_BakedGISunWeight > 0.0f)
-                        ImGui::Text("Ray Fan: sun-dominant direction %d of 16, share %.3f of the fold",
-                                    m_BakedGISunDir, m_BakedGISunWeight);
-                    else
-                        ImGui::Text("Ray Fan: no sun. Direction %d of 16, weight 0.000",
-                                    m_BakedGISunDir);
+                    // Which state the fan replays. The sun is one direction, so
+                    // there is no dominant bin and no per-bin weight: saying
+                    // otherwise would describe the removed 16-bin kernel.
+                    ImGui::Text("Ray Fan: probe %u, sun hour state %d (hour %.2f)",
+                                m_Renderer.GetBakedGI().GetRayDebugProbe(), m_BakedGISunState,
+                                m_GIHour);
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("The sun fold weights each of the 16 delta directions by\n"
-                                          "pow(max(0, dot(direction, toSun)), 8), then normalises.\n"
-                                          "The fan draws the 64 gather rays of the largest one, so every\n"
-                                          "drawn ray is one the sun actually weights. The dump's kernel\n"
-                                          "weight line marks the same direction with an arrow.");
+                        ImGui::SetTooltip("The dump replayed this probe's record for the first of the\n"
+                                          "two hour states the fold interpolates. The fan draws that\n"
+                                          "record's 64 gather rays, so every drawn ray belongs to a\n"
+                                          "bake the current hour actually reads.");
 
                     // Both widgets below describe the RECORD channels only.
                     // DeltaDirections reads no record and draws a fixed-length box,
@@ -2527,25 +2406,16 @@ void Application::RenderImGui()
                                            "follows the dumped probe's records.");
                         ImGui::PopStyleColor();
                     }
-                    else if (SingleDirectionSun())
-                    {
-                        // No argmax exists under method 3: the dump wrote one
-                        // direction, toward the real sun. Naming a bin here would
-                        // point at a direction that method's fold never reads.
-                        ImGui::Text("Cage Trace: probe %u, the SUN direction (method 3) — no dominant bin",
-                                    cageGI.GetRayDebugProbe());
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("The probe is the dumped one. The direction is the REAL SUN\n"
-                                              "DIRECTION, which is the only direction this method traces.\n"
-                                              "There is no argmax and no 16-bin fold to name a direction from.");
-                    }
                     else
                     {
-                        ImGui::Text("Cage Trace: probe %u, sun-dominant direction %d of 16",
-                                    cageGI.GetRayDebugProbe(), m_BakedGISunDir);
+                        // The sun dump writes group 0 only, so group 0 is the pool
+                        // that describes the trace. There is no argmax to name any
+                        // more: the 16 bins carry no sun weight.
+                        ImGui::Text("Cage Trace: probe %u, sun hour state %d — picks from group 0",
+                                    cageGI.GetRayDebugProbe(), m_BakedGISunState);
                         if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("The probe is the dumped one. The direction is the sun fold's argmax,\n"
-                                              "the same pick the Ray Fan draws. What the trace draws:\n"
+                            ImGui::SetTooltip("The probe is the dumped one, and the state is the first of the\n"
+                                              "two the current hour interpolates. What the trace draws:/n"
                                               "  the probe -> hit segment, then the 8 trilinear cage probes the\n"
                                               "  bake's feedback gather actually sampled at that hit, then the\n"
                                               "  trilinear CELL of the pushed read point (hit + n*0.1*spacing) as a\n"
@@ -2570,9 +2440,9 @@ void Application::RenderImGui()
                         }
                         else
                         {
-                            const uint32_t dir =
-                                (m_BakedGISunDir >= 0 && m_BakedGISunDir < (int)BakedGI::kDirections)
-                                    ? (uint32_t)m_BakedGISunDir : 0u;
+                            // Group 0: the only group the sun replay writes.
+                            constexpr uint32_t kSunGroup = 0u;
+                            const uint32_t dir = kSunGroup;
                             const auto& pool = cageGI.GetRayCandidates(dir);
 
                             const BakedGI::RayCandidate* sel = nullptr;
@@ -2629,9 +2499,7 @@ void Application::RenderImGui()
 
                         if (m_BakedGIRayDebugRay >= 0)
                         {
-                            const auto& check = cageGI.GetRayCandidates(
-                                (m_BakedGISunDir >= 0 && m_BakedGISunDir < (int)BakedGI::kDirections)
-                                    ? (uint32_t)m_BakedGISunDir : 0u);
+                            const auto& check = cageGI.GetRayCandidates(0u);
                             bool inPool = false;
                             for (const BakedGI::RayCandidate& c : check)
                                 if ((int)c.ray == m_BakedGIRayDebugRay) { inPool = true; break; }
@@ -2684,9 +2552,13 @@ void Application::RenderImGui()
                         m_PendingGIProbeBake = true;
                 }
             }
-            else if (m_IndirectGIMethod == 2)
+            else if (m_IndirectGIMethod == kIndirectMethodDDGI)
             {
+                // Same label as the probe panel's control, and a DIFFERENT float.
+                // PushID: see the note at the other copy.
+                ImGui::PushID("ProbeSpacingDDGI");
                 ImGui::SliderFloat("Probe Spacing", &m_DDGISpacing, 0.5f, 8.0f, "%.1f m");
+                ImGui::PopID();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Grid spacing used by the next \"Rebuild DDGI Grid\" (auto-grows to fit the probe cap).");
 

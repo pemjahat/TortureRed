@@ -26,6 +26,41 @@ class BakedGI
 public:
     static constexpr uint32_t kDirections      = 16; // delta/sky-quadrature directions
     static constexpr uint32_t kResponseFloat4s = 10; // per (probe, dir): 9 SH9 RGB + V_i
+
+    // ---- Equinox hour states: the sun direction set ----
+    //
+    // The sun is one number now: the hour of TRUE SOLAR TIME, where hour 12 is
+    // solar noon. The date is fixed at the equinox, so the sun path is a great
+    // circle and the arc above the horizon is exactly 180 degrees. Seventeen
+    // states cover that arc at 0.75 h (11.25 degree) intervals.
+    //
+    // An ODD count is required. State 8 is noon. With an even count no state falls
+    // at noon, so the scene's authored sun becomes a blend of two bakes instead of
+    // one.
+    //
+    // MUST match BAKED_GI_SUN_STATES and the two spacing constants in
+    // BakedGI.hlsli.
+    static constexpr uint32_t kSunStates       = 17;
+    static constexpr float    kSunStateHour0   = 6.0f;  // state 0 sits at sunrise
+    static constexpr float    kSunStateStepHours = 0.75f; // 17 states over 12 hours
+
+    // The scene's authored sun, VERTICAL COMPONENT. This is the source of truth
+    // for the latitude, not a transcribed number: at the equinox the noon
+    // elevation is 90 - latitude, so this cosine IS cos(latitude), and
+    // SunDirectionAtHour derives the latitude from it with acos.
+    //
+    // Kept in DOUBLE on purpose. acos(0.906106471) = 25.0272791670 degrees, and
+    // rounding that to the six decimals the design note prints (25.027279) moves
+    // state 8 by 3.5e-9 — above the 1e-9 the authored sun is held to. The double
+    // keeps the round trip exact: the state-8 direction is bit-identical to the
+    // authored float3.
+    static constexpr double   kEquinoxSunY     = 0.906106471;
+
+    // The same latitude in degrees, for display and for the tooltips.
+    // Informational only: no math reads this, because the rounded value is not
+    // accurate enough to reproduce the authored sun. See kEquinoxSunY.
+    static constexpr double   kEquinoxLatitudeDeg = 25.027279;
+
     static constexpr uint32_t kLitFloat4s     = 9;  // per probe: 9 SH9 RGB
     static constexpr uint32_t kBakeIterations  = 3;  // series-expansion bounces
     static constexpr uint32_t kMaxProbeCount   = 128 * 1024;
@@ -53,17 +88,16 @@ public:
     // real direction, and a default of 0 would silently un-average it.
     static constexpr uint32_t kEfbDirAll = 0xFFFFFFFFu;
 
-    // ---- Diagnostic seed pairing (BakedGIBakeParams::seedDir) ----
-    // The bake's RNG seed depends on the direction index, so the single-sun pass
-    // (dir 0) gathers DIFFERENT directions than any fibonacci bin. Passing a bin
-    // index here makes the sun pass trace that bin's directions, so the two
-    // estimates re-test the same hit surfaces and their difference is angular,
-    // not sampling noise.
+    // ---- RNG seed index (BakedGIBakeParams::seedDir) ----
+    // The bake's RNG seed depends on an index, so two passes over the same probe
+    // with different indices gather DIFFERENT directions. The sun pass now seeds
+    // from the hour STATE, so two adjacent states never share rays: sharing them
+    // would make the blend inherit a correlated error instead of averaging two
+    // independent draws.
     //
-    // This value means "use the thread's own dir", which is the shipped stream.
-    // It is the SHIPPED default: both tables are bit-identical to the previous
-    // build whenever it is passed. The shaders spell it with a literal, because
-    // they cannot see this file.
+    // This value means "use the thread's own direction", which is what the binned
+    // sky transport uses. The shaders spell it with a literal, because they cannot
+    // see this file.
     static constexpr uint32_t kSunSeedOwnDir = 0xFFFFFFFFu;
 
     // ---- Ray-debug tool (debug only, on demand) ----
@@ -130,25 +164,18 @@ public:
                     D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                     float spacing,
-                    // Method 3: also bake the sun's response toward the REAL sun
-                    // direction, into the per-probe sun table. sunToDir is the
-                    // TO-SUN unit direction and is read only when this is true.
-                    // seedDir: kSunSeedOwnDir keeps the shipped stream. Any bin
-                    // index makes the sun pass reuse that bin's gather
-                    // directions — a diagnostic, off by default. The binned
-                    // pass always uses kSunSeedOwnDir, so its table never moves.
-                    bool singleDirectionSun = false,
-                    const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f),
-                    uint32_t seedDir = kSunSeedOwnDir);
+                    // Method 3: also bake the sun's response for every hour state,
+                    // into the per-probe sun table. The directions come from
+                    // SunDirectionAtHourCPU, not from a caller argument: the sun
+                    // is the hour, so a live direction must not reach the bake.
+                    bool singleDirectionSun = false);
 
     // Per-frame: fold the live sun/sky state into the lit-probe buffer.
-    // singleDirectionSun selects the sun branch: instead of the 16-bin kernel
-    // it takes the one baked sun term. Under method 3 this runs ONCE per
-    // bake (the fold is baked), not every frame.
+    // hour selects the two baked sun states that bracket it. The sky term reads
+    // the 16-record quadrature table and does not depend on the hour.
     void RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignature* rootSignature,
                       D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
-                      const DirectX::XMFLOAT3& sunIrradiance, const DirectX::XMFLOAT3& sunToDir,
-                      bool singleDirectionSun = false);
+                      const DirectX::XMFLOAT3& sunIrradiance, float hour);
 
     bool              IsValid() const { return m_Valid; }
     float             GetSpacing() const { return m_Spacing; }
@@ -169,23 +196,26 @@ public:
     uint32_t          GetVisibilitySRVIndex() const { return (uint32_t)m_Visibility.srvIndex; }
     uint32_t          GetResponseSRVIndex() const { return (uint32_t)m_Response[m_FinalResponse].srvIndex; }
 
-    // Per-probe SUN response table (method 3 only): kResponseFloat4s float4 for
-    // each probe, no bin index. Populated by RecordBake when singleDirectionSun
-    // is set. Separate from the 16-bin table on purpose — see
+    // Per-probe SUN response table (method 3 only): kSunStates x kResponseFloat4s
+    // float4 for each probe, indexed by hour state. Populated by RecordBake when
+    // singleDirectionSun is set. Separate from the 16-bin table on purpose — see
     // BakedGIBakeParams::sunMode. Returns 0 when no sun table exists.
     uint32_t          GetSunResponseSRVIndex() const
     {
         return m_SunResponseValid ? (uint32_t)m_SunResponse[m_FinalSunResponse].srvIndex : 0u;
     }
     bool              HasSunResponse() const { return m_SunResponseValid; }
-    // True only when the resident sun table was baked for THIS sun direction.
+    // True only when the resident sun table can serve THIS hour.
     //
-    // The table is a baked response toward one direction, so a moved sun makes it
-    // stale. A stale table is worse than a missing one: the fold would multiply a
-    // live sunE by a response for the wrong direction and produce a plausible
-    // wrong image instead of failing visibly. Callers that want to reuse the
-    // table must ask this, not HasSunResponse.
-    bool              HasSunResponseFor(const DirectX::XMFLOAT3& sunToDir) const;
+    // The table holds every hour state, so the only way it can fail to serve an
+    // hour is that no bake has produced it. The direction test that used to live
+    // here is gone: the state directions are fixed by the equinox formula and are
+    // unit length by construction, so no live sun vector can invalidate them.
+    //
+    // Kept as a query rather than a bare HasSunResponse so the callers that ask
+    // "is the sun term available for the frame I am about to draw" keep one
+    // expression, and a future partial-coverage table has a place to say so.
+    bool              HasSunResponseFor(float hour) const;
     // Ray-debug buffer (records + re-accumulated table). The Ray Fan view reads
     // the records. The buffer exists only after a dump.
     bool              HasRayDebugBuffer() const { return m_RayDebugBuf.resource != nullptr; }
@@ -324,14 +354,10 @@ public:
     // LogRayDebugReadout on the idle GPU.
     //
     // LogRayDebugReadout ranks the 16 directions by stored DC luminance and the
-    // 64 rays of that winner. That winner is the highest-DC-luminance direction,
-    // which is NOT the sun-dominant direction the Ray Fan draws. When the caller
-    // passes the sun, the same readout also names the sun-dominant direction, so
-    // one output shows both picks. It also runs the self-check that compares the
-    // re-accumulated table with the stored table.
-    //
-    // LogKernelWeights is the CPU mirror of the update pass's sun kernel.
-    // It has its own log line, so it is trivial to drop.
+    // 64 rays of that winner. Under method 3 it ranks the replayed sun state's
+    // rays and names no bin winner, because the 16 bins carry no sun weight.
+    // It also runs the self-check that compares the re-accumulated table with
+    // the stored table.
     // ---------------------------------------------------------------------
     bool RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
                         ID3D12RootSignature* rootSignature,
@@ -342,27 +368,23 @@ public:
                         D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                         D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                         uint32_t probeIndex,
-                        // Method 3: replay the SUN pass instead of the 16 bins.
-                        // sunToDir may be null; the shader then falls back to +Y
-                        // exactly as BakedGI_Bake.hlsl does.
+                        // Method 3: replay ONE sun hour state instead of the 16
+                        // bins. sunState selects the state, and the direction and
+                        // the RNG seed both follow from it, exactly as the bake
+                        // derives them. A different state here replays a
+                        // different bake and the self-check reports MISMATCH —
+                        // which is a true report, not a defect to route around.
                         bool singleDirectionSun = false,
-                        const DirectX::XMFLOAT3* sunToDir = nullptr,
-                        // The SAME seedDir value the bake was given. The replay
-                        // must trace the rays the stored table came from, or the
-                        // self-check reports MISMATCH. A different value here is a
-                        // true report, not a defect to route around.
-                        uint32_t seedDir = kSunSeedOwnDir);
-    // sunToDir is required. The caller passes the to-sun direction to name the
-    // sun-dominant direction in the same readout. The caller passes nullptr for
-    // a scene with no sun. Do not add a default value here: a forgotten argument
-    // would print "no sun" while the fan draws the real sun, and the log and the
-    // picture would disagree.
+                        uint32_t sunState = 8u);
+    // Names the sun state the fan draws. Pass nullptr for a scene with no sun.
+    // Do not add a default value: a forgotten argument would print "no sun" while
+    // the fan draws a real one, and the log and the picture would disagree.
     void LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const;
-    static void LogKernelWeights(const DirectX::XMFLOAT3& sunToDir);
 
     // Ray Fan colour channel that swaps the geometry: it draws the 16 fibonacci
-    // delta directions of the fan's probe, plus one marker box for the real sun,
-    // instead of the 64 gather rays, and reads no record, so it needs no dump.
+    // sky-quadrature directions of the fan's probe, plus one marker box for the
+    // sun's direction at the current hour, instead of the 64 gather rays. It
+    // reads no record, so it needs no dump.
     // Must match BAKED_GI_RAYFAN_CH_DELTADIRS (BakedGI_Debug.hlsl) and the
     // "DeltaDirections" entry of the Ray Fan Channel combo (Application.cpp).
     // One value with three consumers is why it is named here rather than written
@@ -382,114 +404,81 @@ public:
     // call cannot disagree with the geometry. Same shape as kCageInstances.
     static constexpr uint32_t kRayFanDeltaDirInstances = kDirections + 1u;
 
-    // The sun fold's kernel weights for the 16 delta directions, NORMALISED BY
-    // THEIR SUM, so w sums to 1 and w[j] is direction j's share of the fold.
-    // Returns the argmax index and, through outMax, the largest of the 16.
+    // ---------------------------------------------------------------------
+    // Sun fold: the ONE definition of the hour -> two-state blend.
     //
-    // ONE kernel, ONE normalisation, ONE argmax, THREE consumers: this call
-    // serves LogKernelWeights (the printed ranking), DominantSunDirection
-    // (which delegates here) and the Ray Fan's DeltaDirections channel
-    // (FrameConstants::bakedGISunWeight). A second copy of any of the three
-    // would drift, and the channel would then paint a direction white that the
-    // log does not name, or the fan would draw one the channel does not whiten.
+    // The shader owns the formula (BakedGISunDirectionAtHour, BakedGI.hlsli) and
+    // BakedGI_Update.hlsl owns the fold. These two functions are the CPU mirror,
+    // and every CPU consumer goes through them: the bake's state directions, the
+    // panel's table, and the frame constants the debug views read.
     //
-    // A zero sun direction, or a sun below the horizon (every raw weight 0),
-    // fills w with ZEROS, sets outMax to 0.0 and returns index 0. No direction
-    // is a winner in that case, so a caller must report "no sun" rather than
-    // present direction 0 as one.
-    static uint32_t SunFoldWeights(const DirectX::XMFLOAT3& sunToDir,
-                                   float (&w)[kDirections], float* outMax = nullptr);
+    // A drift between the shader and this mirror puts the bake and the fold on
+    // different arcs, and nothing reports it: the image stays plausible. The
+    // known-good reference values sit beside the definitions.
+    // ---------------------------------------------------------------------
 
-    // The direction the sun fold weights most: argmax over j of the fold's
-    // kernel. The Ray Fan draws that direction's 64 gather rays.
-    // Returns the index and, through outWeight, the normalised weight.
-    // A zero sun direction, or a sun below the horizon, returns index 0 with
-    // outWeight = 0.0, so a caller reports "no sun" instead of presenting
-    // direction 0 as a winner.
-    // Implemented as SunFoldWeights with the weight array discarded: the argmax
-    // rule exists once, so this and the debug view can never disagree.
-    static uint32_t DominantSunDirection(const DirectX::XMFLOAT3& sunToDir, float* outWeight = nullptr);
+    // The equinox sun direction at an hour of TRUE SOLAR TIME. Unit length by
+    // construction, so there is no normalize and no NaN case.
+    // Reference, hour 12 at kEquinoxLatitudeDeg: (0, 0.906106471, 0.423049718).
+    static DirectX::XMFLOAT3 SunDirectionAtHour(float hour);
+    // The same call at the hour of a state index: hour = kSunStateHour0 +
+    // kSunStateStepHours * state. This is the bake's direction for that state.
+    static DirectX::XMFLOAT3 SunDirectionAtHourCPU(uint32_t state);
+
+    // The two states that bracket an hour, and the linear blend weight between
+    // them. i0 is clamped to 0..kSunStates-2, so i0 + 1 is always a real state.
+    // t = 0 at state i0, 1 at state i0 + 1. Below hour 6 and above hour 18 this
+    // returns a ZERO t at the end pair and sunE is already near zero, so the term
+    // fades out without a branch.
+    struct SunHourBlend
+    {
+        uint32_t i0 = 0u;   // first bracketing state
+        float    t  = 0.0f; // blend weight toward i0 + 1
+        float    u  = 0.0f; // unclamped state coordinate; < 0 before sunrise
+        bool     inDaylight = false; // hour inside [6, 18]
+    };
+    static SunHourBlend SunBlendForHour(float hour);
 
     ID3D12PipelineState* GetRayDebugPSO() const { return m_RayDebugPSO.Get(); }
 
     // ---------------------------------------------------------------------
-    // Sun-fold bin panel (debug UI only)
+    // Sun hour-state panel (debug UI only)
     //
-    // The question it answers: "which bins actually interpolate this probe, and
-    // by how much". It shows two DIFFERENT quantities side by side, and they
-    // must never be confused:
+    // The question it answers: "which states does this hour interpolate, and by
+    // how much". Every row is one of the 17 baked states, so the table is a
+    // complete map of the fold rather than a subset of it.
     //
-    //   weight      — GLOBAL. w_j depends only on the sun direction, so every
-    //                 probe shares it. Comes from SunFoldWeights, the one
-    //                 mirror the update pass and the Ray Fan also use.
-    //   contribution— PER PROBE. w_j * R_j[slot 0] luminance, where R_j is this
-    //                 probe's stored response in bin j. R_j varies up to 4x
-    //                 between bins, so a weights-only list points at the wrong
-    //                 bin. Measured on the probe we investigated: bin 14 holds
-    //                 0.451 of the weight but 0.747 of the sun red.
-    //
-    // The contribution column needs the probe's GPU-side table. It is read back
-    // ON DEMAND — a Refresh press or a probe-index change — never per frame.
+    // The weight is GLOBAL: it depends only on the hour, so every probe shares it.
+    // Only the two bracketing states carry a non-zero weight, and the two always
+    // sum to 1. There is no per-probe column and no argmax any more: the old
+    // panel ranked a kernel that no longer exists, and its "highest DC" marker
+    // named a bin the fold never read.
     // ---------------------------------------------------------------------
-
-    // ONE CPU mirror of BakedGIDeltaDirection (BakedGI.hlsli:27-33). Extracted
-    // from ComputeSunKernelWeights so the kernel and the panel's angle column
-    // read the same function instead of two copies of one formula. A change to
-    // the shader formula MUST change this function. Nothing can catch that at
-    // compile time — the formula is runtime float math — so the known-good
-    // reference values sit in a comment beside the definition.
-    static DirectX::XMFLOAT3 DeltaDirectionCPU(uint32_t j);
-
-    // One row of the panel. Sorted by contribution descending.
-    struct SunBinRow
+    struct SunStateRow
     {
-        uint32_t bin        = 0u;    // the delta-direction index 0..15
-        float    weight     = 0.0f;  // GLOBAL: this bin's share of the fold
-        float    angleDeg   = 0.0f;  // angle between W_bin and the to-sun direction
-        float    dcLum      = 0.0f;  // PER PROBE: luminance of R_bin[slot 0]
-        float    contrib    = 0.0f;  // PER PROBE: weight * dcLum
-        float    contribPct = 0.0f;  // contrib as a fraction of the 16-bin total
-        DirectX::XMFLOAT3 contribRGB = { 0.0f, 0.0f, 0.0f }; // weight * R_bin[slot 0].rgb
+        uint32_t          state    = 0u;    // 0..kSunStates-1
+        float             hour     = 0.0f;  // kSunStateHour0 + kSunStateStepHours * state
+        float             angleDeg = 0.0f;  // angle to the sun direction at the current hour
+        float             weight   = 0.0f;  // 0 except for the two bracketing states
+        bool              active   = false; // this row is one of the two brackets
+        DirectX::XMFLOAT3 dir      = { 0.0f, 0.0f, 0.0f };
+        float             elevationDeg = 0.0f;
+        float             azimuthDeg   = 0.0f;
     };
 
-    struct SunBinPanel
+    struct SunStatePanel
     {
-        SunBinRow rows[kDirections];
-        float    w[kDirections] = {};   // the same weights, by bin index
-        bool     haveDirection  = false; // sunToDir was non-zero: the angles mean something
-        bool     haveSun        = false; // the fold produced non-zero weights
-        bool     haveResponse   = false; // the per-probe column is filled for this probe
-        uint32_t responseProbe  = 0u;    // which probe the filled column describes
-        uint32_t weightArgmax   = 0u;    // argmax of the WEIGHT
-        float    weightArgmaxW  = 0.0f;
-        uint32_t dcArgmax       = 0u;    // argmax of the stored DC LUMINANCE
-        float    elevationDeg   = 0.0f;
-        float    azimuthDeg     = 0.0f;
-        float    meanAngleDeg   = 0.0f;  // weight-weighted mean angle to the sun
-        float    weightBeyond15 = 0.0f;  // share of the weight further than 15 degrees
-        uint32_t nonzeroBins    = 0u;
-        float    contribTotal   = 0.0f;
+        SunStateRow rows[kSunStates];
+        float    hour          = 12.0f;
+        uint32_t i0            = 0u;    // first bracketing state
+        float    t             = 0.0f;  // weight toward i0 + 1
+        bool     inDaylight    = false; // hour inside [6, 18]: the sun term is on
+        float    elevationDeg  = 0.0f;  // of the hour's sun direction
+        float    azimuthDeg    = 0.0f;
     };
 
-    // Fills the panel. `probe` selects which read-back table the contribution
-    // column describes; when the read-back belongs to another probe, the column
-    // is left empty and haveResponse is false. Pure CPU, except that the
-    // contribution column reads the table from the last read-back.
-    void BuildSunBinPanel(const DirectX::XMFLOAT3* sunToDir, uint32_t probe, SunBinPanel& out) const;
-
-    // Read back ONE probe's whole response table (16 x 10 float4 = 2560 B) into
-    // m_ProbeTableCPU. Split in two because the copy must run on a command list
-    // and the Map must wait for it: Record queues the copy, the caller executes
-    // and waits, then Consume maps and stores. Mirrors the RecordRayDebug split.
-    // Debug only, on demand. The caller MUST have synced the GPU before calling
-    // RecordProbeTableReadback: it releases the previous read-back resource.
-    bool RecordProbeTableReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
-                                  uint32_t probe);
-    void ConsumeProbeTableReadback();
-    bool HasProbeTable(uint32_t probe) const
-    {
-        return m_ProbeTableValid && m_ProbeTableProbe == probe;
-    }
+    // Fills the panel from the hour alone. Pure CPU, no GPU read-back, no state.
+    static void BuildSunStatePanel(float hour, SunStatePanel& out);
 
     // Why a probe's meta word could not be read. Two causes are common and they
     // need different messages and different fixes: no readback buffer (the bake
@@ -534,46 +523,45 @@ public:
                                     std::vector<NearestProbe>& out) const;
 
     // ---------------------------------------------------------------------
-    // Probe disk cache switch. TEMPORARILY OFF.
+    // Probe disk cache switch. STILL OFF, and the reason is unchanged.
     //
-    // The cache code below is intact and still compiled; this constant only
-    // decides whether the bake path uses it. While it is false:
+    // While it is false:
     //   - RecordBake never calls TryLoadCache, so every RecordBake re-runs the
-    //     dispatches instead of restoring a Probes/ file. This is what makes a
+    //     dispatches instead of restoring a Probes/ file. That is what makes a
     //     bake-shader edit take effect without deleting a stale cache file.
-    //   - Renderer::BakeGIProbes skips RecordCacheReadback and WriteCacheFile,
-    //     so no new Probes/ file is written either.
-    // Existing Probes/ files are left untouched on disk and are simply
-    // ignored. Set to true to restore the previous behaviour exactly.
+    //   - Renderer::BakeGIProbes skips RecordCacheReadback and WriteCacheFile, so
+    //     no Probes/ file is written and the sun-table hash line never prints.
+    //
+    // CONSEQUENCE FOR THE VERSION-2 FORMAT: the round-trip test cannot run while
+    // this is false. Set it to true, bake twice, and compare the two
+    // "[BakedGI] sun table ..." FNV1a64 lines. That switch is a separate decision
+    // from the format itself, so it is left as the human set it.
     static constexpr bool kProbeCacheEnabled = false;
 
-    // Disk cache (Probes/ — the ShaderCache pattern). After a bake, the bake
-    // outputs (final response table, meta bits, visibility moments) are read
-    // back on the same list (RecordCacheReadback, before executing) and
-    // written to <exeDir>/Probes/<stem>_s<spacing>.probebin after the sync
-    // (WriteCacheFile). A later RecordBake with the same grid config and
-    // fresh mtimes (scene file + the bake shaders' include closure) restores
-    // the state with plain buffer copies instead of dispatching — check
-    // LoadedFromCache() after RecordBake to know which path ran.
+    // Disk cache (Probes/ — the ShaderCache pattern), format version 2.
+    //
+    // After a bake, FOUR outputs are read back on the same list
+    // (RecordCacheReadback, before executing) and written to
+    // <exeDir>/Probes/<stem>_s<spacing>.probebin after the sync (WriteCacheFile):
+    //   1. the 16-record response table,
+    //   2. the meta words,
+    //   3. the visibility moments,
+    //   4. the per-probe SUN table, all 17 hour states, appended.
+    // One file for all 17 states, which is the human's decision. Section 4 costs
+    // 17 x 10 float4 x 16 B = 2720 B for each probe.
+    //
+    // A later RecordBake with the same grid config, the same state count and the
+    // same latitude restores the state with plain buffer copies instead of 51
+    // dispatches — check LoadedFromCache() after RecordBake to know which ran.
     bool RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
     void WriteCacheFile(const std::string& scenePath);
     bool LoadedFromCache() const { return m_LoadedFromCache; }
 
 private:
-    // The CPU mirror of the update pass's sun kernel
-    // (BakedGI_Update.hlsl:116-125: bw[], the kernel loop, and the wsum guard).
-    // BakedGIDeltaDirection is reproduced from
-    // BakedGI.hlsli:27-33. ONE mirror, ONE caller: SunFoldWeights composes the
-    // normalisation and the argmax on top of it, and every other reader goes
-    // through SunFoldWeights. Returns false on a zero sun direction, BEFORE it
-    // fills bw, so a caller must not read bw after a false return.
-    static bool ComputeSunKernelWeights(const DirectX::XMFLOAT3& sunToDir,
-                                        float (&bw)[kDirections], float& wsum);
-
     // Shared by the bake and the cache-load paths: (re)creates the seven
     // probe buffers for the current grid (dims/spacing/probeCount members).
-    // wantSunTable: also create the method-3 per-probe sun response pair. Off
-   // for the Probe method, so its payload is byte-for-byte what it was.
+    // wantSunTable: also create the per-probe sun response pair. Off for a bake
+    // that does not need the sun, so its payload is byte-for-byte what it was.
    bool CreateProbeBuffers(bool wantSunTable = false);
     // Debug-only outputs of the bake: the per-term transport snapshots
     // (m_ResponseIter, kIterSnapshotCount tables) and the folded per-probe
@@ -587,22 +575,26 @@ private:
     // record-copy-record pattern needs, exactly as the ray-debug dump's stored
     // table copy does.
     void SnapshotResponseTable(ID3D12GraphicsCommandList* cmdList, uint32_t src, uint32_t snapshot);
-    // Restores the bake outputs from the Probes/ cache (fresh mtimes +
-    // matching grid header). Called inside RecordBake after the grid is
-    // computed; on a hit RecordBake returns true immediately.
-    bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const std::string& scenePath);
+    // Restores the bake outputs from the Probes/ cache (a matching header).
+    // Called inside RecordBake after the grid is computed; on a hit RecordBake
+    // returns true immediately.
+    //
+    // The cache holds FOUR sections now: the 16-record response table, the meta
+    // words, the visibility moments, and — appended, one file for all 17 states —
+    // the per-probe sun table. wantSunTable is the same flag RecordBake was given:
+    // it decides whether the sun buffer exists to copy into, so a caller that did
+    // not ask for the sun term does not pay 2720 B for each probe of VRAM.
+    bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                      const std::string& scenePath, bool wantSunTable);
 
     // Ping-pong transport table: probeCount x kDirections x kResponseFloat4s float4s.
     GPUBuffer m_Response[2];
-    // Method-3 sun series. Ping-pong for the same reason as m_Response: each
-    // iteration's feedback reads the previous one. Stride is kResponseFloat4s
-    // (one record per probe, no bin index), so 160 B per probe per buffer.
+    // Sun hour-state series. Ping-pong for the same reason as m_Response: each
+    // iteration's feedback reads the previous one. Stride is kSunStates records
+    // per probe, so 17 x 160 B = 2720 B per probe per buffer.
     GPUBuffer m_SunResponse[2];
     bool      m_SunResponseValid = false;
     uint32_t  m_FinalSunResponse = 0;
-    // The to-sun direction the resident table describes. Recorded at bake time so
-    // HasSunResponseFor can reject a stale table after a sun move.
-    DirectX::XMFLOAT3 m_SunBakeDir = { 0.0f, 1.0f, 0.0f };
     GPUBuffer m_LitProbes;    // per-frame lit SH9 RGB, TOTAL (runtime fetch source)
     GPUBuffer m_LitProbesSky; // per-frame lit SH9 RGB, sky-sourced split (debug)
     GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)
@@ -640,13 +632,9 @@ private:
     // Which table the last dump replayed. The readout runs separately and later,
     // so it needs the method to compare against the right table.
     bool     m_RayDebugSunMode = false;
-    // Sun-bin panel read-back: ONE probe's response table. 2560 B, on demand.
-    // m_ProbeTableValid is cleared whenever the bake replaces the table, so the
-    // panel cannot show a previous bake's numbers after a Rebuild.
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_ProbeTableReadback;
-    DirectX::XMFLOAT4 m_ProbeTableCPU[kDirections * kResponseFloat4s] = {};
-    uint32_t m_ProbeTableProbe = 0u;
-    bool     m_ProbeTableValid = false;
+    // Which hour state the last dump replayed, so the readout compares against
+    // the right record of the sun table.
+    uint32_t m_RayDebugSunState = 0u;
     // Written by LogRayDebugReadout, which is const, so these members are
     // mutable. m_RayDebugValid is true when the meta bit was read and the probe
     // is valid, and also when there is no verdict. RecordRayDebug clears the

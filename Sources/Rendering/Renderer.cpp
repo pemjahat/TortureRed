@@ -962,8 +962,7 @@ void Renderer::CreateBakedGIPipelines()
     m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 }
 
-bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun,
-                            const DirectX::XMFLOAT3& sunToDir, uint32_t seedDir)
+bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -981,7 +980,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing, singleDirectionSun, sunToDir, seedDir);
+                                    spacing, singleDirectionSun);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.
@@ -1007,17 +1006,18 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun
 }
 
 void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
-                                    bool singleDirectionSun)
+                                    float giHour)
 {
     if (!m_BakedGI.IsValid() || frame.bakedGIValid == 0)
         return;
 
-    // sun.direction stores the direction the light TRAVELS; the transport
-    // table is indexed by TO-SUN directions.
-    DirectX::XMFLOAT3 sunToDir = { -sun.direction.x, -sun.direction.y, -sun.direction.z };
+    // The sun column no longer needs a direction: the hour selects the two baked
+    // states. `sun` is kept in the signature because the irradiance that scales
+    // the term still comes from the sky model, which the same light drives.
+    (void)sun;
 
     m_BakedGI.RecordUpdate(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
-                            m_Sky.GetSunIrradiance(), sunToDir, singleDirectionSun);
+                            m_Sky.GetSunIrradiance(), giHour);
 }
 
 // On-demand ray-debug re-trace. Debug only: it resets the command list and
@@ -1025,7 +1025,7 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
 // synced GPU (before BeginFrame). The readout is printed after the sync.
 bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
                                const DirectX::XMFLOAT3* sunToDir, bool singleDirectionSun,
-                               uint32_t seedDir)
+                               uint32_t sunState)
 {
     if (!m_RayTracingSupported || !model || !m_BakedGI.IsValid())
         return false;
@@ -1040,30 +1040,10 @@ bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
                                              model->GetDrawNodeBufferAddress(),
                                              model->GetGlobalIndexBufferAddress(),
                                              model->GetGlobalVertexBufferAddress(),
-                                             probeIndex, singleDirectionSun, sunToDir, seedDir);
+                                             probeIndex, singleDirectionSun, sunState);
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
         m_BakedGI.LogRayDebugReadout(sunToDir);
-    return ok;
-}
-
-// On-demand read-back of ONE probe's response table for the sun-bin panel.
-// Debug only. Resets the command list and waits for the GPU, exactly like
-// RayDebugBakedGI, because the copy must complete before the Map. Called from
-// Application::Render, never from inside the ImGui build: resetting the list
-// mid-frame would discard the frame being recorded.
-bool Renderer::ReadbackBakedGIProbeTable(uint32_t probeIndex)
-{
-    if (!m_BakedGI.IsValid())
-        return false;
-
-    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
-    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
-
-    const bool ok = m_BakedGI.RecordProbeTableReadback(m_Device.Get(), m_CommandList.Get(), probeIndex);
-    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
-    if (ok)
-        m_BakedGI.ConsumeProbeTableReadback();
     return ok;
 }
 

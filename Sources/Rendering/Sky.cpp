@@ -136,6 +136,37 @@ namespace
         float toSunY = -sunLight.direction.y;
         return (double)std::asin(std::max(-1.0f, std::min(1.0f, toSunY)));
     }
+
+    // -----------------------------------------------------------------------
+    // Twilight fade for the Hosek-Wilkie radiance.
+    //
+    // Hosek-Wilkie is a DAYLIGHT model. It has no moon, no stars and no ambient
+    // floor, so it says nothing about a sun below the horizon. It is also not
+    // merely silent there: the coefficient solve takes
+    // pow(solar_elevation, 1/3) on a SIGNED angle, so a negative elevation is a
+    // domain error and every coefficient comes out NaN.
+    //
+    // So the model is evaluated at a CLAMPED elevation, never below zero, and the
+    // radiance it returns is faded by this factor, computed from the TRUE
+    // elevation:
+    //   elevation >= +1 deg -> 1.0 exactly, so daylight output does not change
+    //   elevation <= -6 deg -> 0.0, so the sky is finite and black
+    //   between             -> smoothstep, so dusk and dawn are not a step
+    //
+    // THIS IS NOT A NIGHT SKY. After the fade, true night is still black, because
+    // the model has nothing to say about it. Light at midnight is a night-sky
+    // feature and a separate decision. Do not read this fade as ambient.
+    // -----------------------------------------------------------------------
+    constexpr double kPiTwilight       = 3.14159265358979323846;
+    constexpr double kTwilightStartRad = -6.0 * (kPiTwilight / 180.0); // fully night below this
+    constexpr double kTwilightFullRad  =  1.0 * (kPiTwilight / 180.0); // fully day above this
+
+    double TwilightFactor(double elevationRad)
+    {
+        const double span = kTwilightFullRad - kTwilightStartRad;
+        const double t    = std::min(std::max((elevationRad - kTwilightStartRad) / span, 0.0), 1.0);
+        return t * t * (3.0 - 2.0 * t); // smoothstep
+    }
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -155,8 +186,34 @@ void Sky::ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, 
 {
     // --- Elevation & sun-centre angles ---
     double elevation = SunElevationFromDirection(sunLight);
-    double thetaS    = (XM_PI / 2.0) - elevation;  // zenith angle of sun centre
-    double gamma     = 0.0;                            // looking directly at sun centre
+
+    // The spectral solve takes pow(elevation, 1/3) on a signed angle, so a
+    // negative elevation is a domain error: NaN, not a dark sun. BakeCubemap has
+    // the same problem, so this term takes the same treatment: evaluate at a
+    // CLAMPED elevation and fade the result by TwilightFactor, read from the TRUE
+    // elevation. The two terms then cross dusk on one curve, so the direct sun and
+    // the sky cannot disagree at the horizon.
+    //
+    // A fade of zero costs nothing, so return before allocating any model state.
+    const double twilight = TwilightFactor(elevation);
+    if (twilight <= 0.0)
+    {
+        m_SunIrradiance = DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f);
+        std::cout << "[Sky] Sun irradiance is zero: the sun is below the twilight floor"
+                  << " (elevation " << elevation << " rad)" << std::endl;
+        return;
+    }
+
+    // BOTH the coefficient solve and the angle are clamped, not just the solve.
+    // Measured: arhosekskymodel_solar_radiance is NaN for every thetaS beyond
+    // 90 degrees, so clamping only the coefficients still leaves a NaN, which the
+    // std::max(0, ...) below would silently turn into 0. That would make the fade
+    // decorative. Evaluated at the horizon and faded, the term is finite and
+    // continuous instead.
+    const double hwElevation = std::min(std::max(elevation, 0.0), XM_PI / 2.0);
+
+    double thetaS    = (XM_PI / 2.0) - hwElevation;  // zenith angle of sun centre
+    double gamma     = 0.0;                          // looking directly at sun centre
 
     // --- Allocate spectral sky states for all 11 wavelengths ---
     // NumSpectralSamples = 11 (320, 360, ..., 720 nm)
@@ -164,7 +221,7 @@ void Sky::ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, 
     ArHosekSkyModelState* skyStates[kNumSpectralSamples] = {};
     for (int i = 0; i < kNumSpectralSamples; ++i)
     {
-        skyStates[i] = arhosekskymodelstate_alloc_init(elevation, (double)turbidity, (double)groundAlbedo); // first param expect elevation, not zenith angle
+        skyStates[i] = arhosekskymodelstate_alloc_init(hwElevation, (double)turbidity, (double)groundAlbedo); // first param expect elevation, not zenith angle
         if (!skyStates[i])
         {
             // Free already-allocated states on failure
@@ -207,6 +264,13 @@ void Sky::ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, 
     G = std::max(0.0, G);
     B = std::max(0.0, B);
 
+    // Twilight fade, the same curve BakeCubemap uses, so the direct sun and the
+    // sky cross dusk together instead of stepping against each other. Exactly 1.0
+    // above +1 deg, and a multiply by 1.0 is exact, so daylight is unchanged.
+    R *= twilight;
+    G *= twilight;
+    B *= twilight;
+
     // --- Convert radiance (W·m⁻²·sr⁻¹) → irradiance (W·m⁻²) ---
     // Multiply by sun solid angle (sr). Surface perpendicular to the sun.
     R *= kSunSolidAngle;
@@ -247,7 +311,7 @@ void Sky::ComputeSunIrradiance(const LightConstants& sunLight, float turbidity, 
 // CreateResources
 // ---------------------------------------------------------------------------
 
-void Sky::CreateResources(ID3D12Device* device, uint32_t /*internalWidth*/, uint32_t /*internalHeight*/)
+void Sky::CreateResources(ID3D12Device* /*device*/, uint32_t /*internalWidth*/, uint32_t /*internalHeight*/)
 {
     m_ResourcesCreated = false;
 
@@ -342,6 +406,13 @@ bool Sky::BakeCubemap(ID3D12GraphicsCommandList* cmdList,
 
     double elevation = SunElevationFromDirection(sunLight);
 
+    // The model is daylight-only and its solve is a domain error at a negative
+    // angle: it returns NaN, not a dark sky. Hand it a CLAMPED elevation and fade
+    // the radiance it returns instead. The fade reads the TRUE elevation, so a
+    // setting sun still fades out even though the model no longer sees it.
+    const double hwElevation = std::min(std::max(elevation, 0.0), XM_PI / 2.0);
+    const double twilight    = TwilightFactor(elevation);
+
     // Compute TO-SUN direction for gamma angle computation.
     // sunLight.direction stores the light travel direction (downward in game
     // convention). Negate to get the celestial-sphere sun direction.
@@ -354,11 +425,11 @@ bool Sky::BakeCubemap(ID3D12GraphicsCommandList* cmdList,
 
     // Allocate HK model states for R, G, B channels.
     ArHosekSkyModelState* stateR = arhosek_rgb_skymodelstate_alloc_init(
-        (double)turbidity, (double)groundAlbedo, elevation);
+        (double)turbidity, (double)groundAlbedo, hwElevation);
     ArHosekSkyModelState* stateG = arhosek_rgb_skymodelstate_alloc_init(
-        (double)turbidity, (double)groundAlbedo, elevation);
+        (double)turbidity, (double)groundAlbedo, hwElevation);
     ArHosekSkyModelState* stateB = arhosek_rgb_skymodelstate_alloc_init(
-        (double)turbidity, (double)groundAlbedo, elevation);
+        (double)turbidity, (double)groundAlbedo, hwElevation);
 
     if (!stateR || !stateG || !stateB)
     {
@@ -412,9 +483,20 @@ bool Sky::BakeCubemap(ID3D12GraphicsCommandList* cmdList,
                 double radB = arhosek_tristim_skymodel_radiance(stateB, theta, gamma, 2);
 
                 // Clamp to reasonable range, avoid negative values.
+                // NOTE: std::max(0.0, NaN) returns 0.0 on MSVC, so this clamp also
+                // swallows a NaN from the model. That is why the pre-fix symptom
+                // was a BLACK sky and not a poisoned one. It is not a fix: the sky
+                // was still wrong. The elevation clamp above is the fix.
                 float fr = (float)std::max(0.0, radR);
                 float fg = (float)std::max(0.0, radG);
                 float fb = (float)std::max(0.0, radB);
+
+                // Twilight fade, from the TRUE elevation. Exactly 1.0f above +1 deg,
+                // and multiplying by 1.0f is exact, so daylight radiance is
+                // bit-identical to before this fade existed.
+                fr *= (float)twilight;
+                fg *= (float)twilight;
+                fb *= (float)twilight;
 
                 // Pre-scale for fp16 HDR range — see SharedTypes.h FP16Scale.
                 fr *= (kSkyRadianceScale * FP16Scale);

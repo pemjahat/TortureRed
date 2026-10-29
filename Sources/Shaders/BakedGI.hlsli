@@ -7,12 +7,16 @@
 // Representation :
 //   Per probe and per delta direction W_i (16 fibonacci-hemisphere dirs), the
 //   bake stores the INDIRECT-ONLY directional-irradiance SH9 RGB response to a
-//   unit delta light at W_i, plus the direct-delta visibility V_i. Both the sun
-//   and the sky recombine from the same table at runtime:
+//   unit delta light at W_i, plus the direct-delta visibility V_i. The 16 records
+//   are the SKY quadrature basis:
 //     e_sky = sum_i wq * L_sky(W_i) * [ R_i  +  A_l Y_lm(W_i) V_i ]
 //             (sky bounces)              (occluded first-bounce sky)
-//     e_sun = E_sun * interp_j(R_j)      (sun bounces only — receiver direct
-//                                          sun stays with the runtime-exact path)
+//   Per probe and per SUN HOUR STATE k (17 states along the equinox arc), the
+//   bake stores the same kind of response for a unit light at the sun's direction
+//   at hour 6 + 0.75 k. The fold interpolates TWO of them:
+//     e_sun = E_sun * lerp(R[i0], R[i0+1], t)   (sun bounces only — the
+//                                               receiver's direct sun stays with
+//                                               the runtime-exact path)
 //   Step 3 adds a per-probe octahedral 16x16 depth-moment map (see the
 //   visibility section below): the deferred fetch weights the probe blend by
 //   a Chebyshev occlusion bound from those moments (geometry stored between a
@@ -24,12 +28,45 @@
 #define BAKED_GI_RESPONSE_F4   10  // float4s per (probe, dir): [0..8] = SH9 RGB lm coeffs, [9].x = V_i
 
 // Fibonacci-hemisphere direction set (deterministic — bake and update MUST agree).
+// These 16 directions are the SKY QUADRATURE basis. They are not the sun: the sun
+// has its own 17 hour states below. The two sets coexist on purpose.
 float3 BakedGIDeltaDirection(uint i)
 {
     float y = ((float)i + 0.5f) / (float)BAKED_GI_DIRECTIONS;
     float phi = (float)i * 2.39996323f; // golden angle
     float r = sqrt(max(0.0f, 1.0f - y * y));
     return normalize(float3(r * cos(phi), y, r * sin(phi)));
+}
+
+// ---------------------------------------------------------------------------
+// Equinox hour states — the sun direction set.
+//
+// The sun is not a free direction. The date is fixed at the equinox, so the sun
+// path is a great circle and the arc above the horizon is exactly 180 degrees at
+// every latitude. One parameter covers it: the hour of TRUE SOLAR TIME, where
+// hour 12 is solar noon by definition. The equation of time, the longitude and
+// the timezone are therefore not inputs.
+//
+//   H = 15 * (hour - 12) degrees        (the hour angle; Unreal SunPosition
+//                                        uses the same expression)
+//   dir = ( -sin H,  cos(lat) cos H,  sin(lat) cos H )
+//
+// Unit length by construction: sin^2 H + cos^2 H = 1, and the y and z terms are
+// one cosine split over two axes. No normalize, so there is no near-zero
+// denominator and no NaN case.
+//
+// MUST match BakedGI::SunDirectionAtHour in BakedGI.cpp. One formula, one CPU
+// mirror. A drift between the two puts the bake and the fold on different arcs,
+// and nothing reports it.
+// ---------------------------------------------------------------------------
+#define BAKED_GI_SUN_STATES      17
+#define BAKED_GI_SUN_STATE_HOUR0 6.0f   // state 0 is at sunrise
+#define BAKED_GI_SUN_STATE_STEP  0.75f  // 17 states over 12 hours, 11.25 degrees apart
+
+float3 BakedGISunDirectionAtHour(float hour, float latRad)
+{
+    const float H = radians(15.0f * (hour - 12.0f));
+    return float3(-sin(H), cos(latRad) * cos(H), sin(latRad) * cos(H));
 }
 
 // Lambertian cosine-convolution band factors (Ramamoorthi 2001): A0 = pi,

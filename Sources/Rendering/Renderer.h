@@ -51,33 +51,26 @@ public:
     // Baked GI probe system (task017 step 1) — EXCLUSIVE indirect source with
     // ReSTIR GI (bakedGIMode in FrameConstants arbitrates).
     void CreateBakedGIPipelines();
-    // singleDirectionSun: method 3. Also bakes the sun's response toward sunToDir
-    // (the TO-SUN unit direction) so the runtime fold has a single sun term.
-    // seedDir: BakedGI::kSunSeedOwnDir keeps the shipped RNG stream. Any bin
-    // index makes the sun pass reuse that bin's gather directions (diagnostic).
-    bool BakeGIProbes(class Model* model, float spacing, bool singleDirectionSun = false,
-                      const DirectX::XMFLOAT3& sunToDir = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f),
-                      uint32_t seedDir = BakedGI::kSunSeedOwnDir);
+    // singleDirectionSun: also bake the sun's response for every hour state, so
+    // the runtime fold has a pair of records to interpolate. The state directions
+    // come from BakedGI::SunDirectionAtHourCPU, not from a caller argument: the
+    // sun is the hour, so a live direction must not reach the bake.
+    bool BakeGIProbes(class Model* model, float spacing, bool singleDirectionSun = false);
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
-    // sunToDir is required. Pass the to-sun direction to name the sun-dominant
-    // direction in the readout. Pass nullptr for a scene with no sun. Do not add
-    // a default value, for the reason in BakedGI.h.
-    // seedDir must be the value BakeGIProbes was given, or the method-3 self-check
-    // compares two different trace sets and reports MISMATCH.
+    // sunToDir is required. Pass the to-sun direction to name the state the
+    // readout describes. Pass nullptr for a scene with no sun. Do not add a
+    // default value, for the reason in BakedGI.h.
+    // sunState must be the state the bake was asked for, or the replay traces
+    // another state's rays and the self-check reports MISMATCH.
     bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
                          const DirectX::XMFLOAT3* sunToDir,
                          bool singleDirectionSun = false,
-                         uint32_t seedDir = BakedGI::kSunSeedOwnDir);
+                         uint32_t sunState = 8u);
 
-    // Read back ONE probe's response table for the sun-bin panel, then wait.
-    // Debug only, on demand. Runs on a synced GPU like RayDebugBakedGI, so the
-    // caller must invoke it OUTSIDE the frame recording — Application::Render,
-    // not the ImGui build — or the reset discards the frame in flight.
-    bool ReadbackBakedGIProbeTable(uint32_t probeIndex);
-    // singleDirectionSun: method 3's sun branch — one baked term, no 16-bin kernel.
+    // singleDirectionSun: the sun column is the two-record hour blend.
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
-                               bool singleDirectionSun = false);
+                               float giHour);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
     BakedGI& GetBakedGI() { return m_BakedGI; }
 
