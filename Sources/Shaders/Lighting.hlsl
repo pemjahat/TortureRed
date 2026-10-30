@@ -95,21 +95,18 @@ float4 PSMain(PSInput input) : SV_Target {
     // interchange composition, and the indirect specular. Placed before the
     // shadow trace, so holding the view open also costs less than a full frame.
     //
-    // The view covers the two indirect sources that store a separable indirect
-    // field: the baked probe grid (which additionally carries the sun/sky
-    // split) and DDGI. Under ReSTIR GI the interchange textures mix the
-    // direct and the indirect producers, so the flag is inert there and the
-    // normal image is drawn — an "indirect" label on a mixed buffer would be
-    // misleading.
-    if ((FrameCB.giIndirectOnly != 0u) && (bakedGIActive || ddgiActive))
+    // Probe and DDGI store a separable indirect field. ReSTIR GI stores its
+    // diffuse result in GIDiffuseIntermediate before DI joins FinalDiffuse.
+    if ((FrameCB.giIndirectOnly != 0u) &&
+        (bakedGIActive || ddgiActive || FrameCB.enableRestirGI))
     {
         float3 indirect = float3(0.0f, 0.0f, 0.0f);
 
         // Albedo override. With the albedo flattened to white the shaded image
         // is the indirect light field itself, with no texture detail on top of
         // it — the way to tell an albedo modulation apart from a lighting
-        // change when reading the image. The Lambert 1/PI below is kept in both
-        // modes, so the two views differ only by the albedo factor.
+        // change when reading the image. Probe and DDGI keep the Lambert 1/PI
+        // below, so those two views differ only by the albedo factor.
         const float3 debugAlbedo = (FrameCB.giIndirectOnlyAlbedo != 0u)
             ? float3(1.0f, 1.0f, 1.0f)
             : albedo.rgb;
@@ -127,11 +124,22 @@ float4 PSMain(PSInput input) : SV_Target {
 
             indirect = debugAlbedo / PI * SampleBakedGIProbeFrom(litIdx, worldPos.xyz, N, V);
         }
-        else
+        else if (ddgiActive)
         {
             // DDGI keeps no sun/sky split: the atlas holds one indirect field,
             // because sun light enters the probes through frontface hits only.
             indirect = debugAlbedo / PI * DDGISampleIrradiance(worldPos.xyz, N, V);
+        }
+        else
+        {
+            // Match the normal ReSTIR composition, but read the GI-only input.
+            // The resolve pass already divided out this material factor.
+            Texture2D<float4> giDiffuseTex = ResourceDescriptorHeap[g_Indices.InputIdx2];
+            const float3 giDiffuse = giDiffuseTex.SampleLevel(g_LinearSampler, input.texCoord, 0).rgb;
+            const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), debugAlbedo, metallic);
+            float3 diffuseFactor, specularFactor;
+            NRD_MaterialFactors(N, V, debugAlbedo, F0, roughness, diffuseFactor, specularFactor);
+            indirect = giDiffuse * diffuseFactor;
         }
 
         if (FrameCB.taaEnabled)

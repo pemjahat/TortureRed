@@ -1923,9 +1923,9 @@ void Application::RenderImGui()
                                   "the local lights, the reservoir composition and indirect specular are all\n"
                                   "skipped, and sky pixels render black. Use it to see what the indirect path\n"
                                   "actually adds to the scene.\n"
-                                  "Covers the two sources that keep a separate indirect field: the baked probe\n"
-                                  "grid and DDGI. Under ReSTIR GI the interchange textures mix direct and\n"
-                                  "indirect, so the view is inert there and the normal image is drawn.");
+                                  "Probe, DDGI and ReSTIR GI are supported. ReSTIR GI reads its resolved\n"
+                                  "diffuse intermediate before ReSTIR DI is added, so the direct and indirect\n"
+                                  "reservoir contributions stay separate.");
 
             if (m_GIIndirectOnly)
             {

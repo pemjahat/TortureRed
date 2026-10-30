@@ -195,6 +195,15 @@ void DeferredLighting::Execute(ID3D12GraphicsCommandList* cmdList, Renderer* ren
         GraphicsHelper::TransitionResource(cmdList, renderer->GetFinalSpecularTex(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         indices.InputIdx0 = renderer->GetFinalDiffuseTex().srvIndex;
         indices.InputIdx1 = renderer->GetFinalSpecularTex().srvIndex;
+
+        // The indirect-only view reads GI before DI is added. FinalDiffuse cannot
+        // supply that term because the interchange texture combines both sources.
+        if (frame.enableRestirGI && frame.giIndirectOnly)
+        {
+            GraphicsHelper::TransitionResource(cmdList, renderer->GetGIDiffuseIntermediate(),
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            indices.InputIdx2 = renderer->GetGIDiffuseIntermediate().srvIndex;
+        }
     }
 
     if (debugActive)

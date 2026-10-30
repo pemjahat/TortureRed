@@ -6,9 +6,9 @@
 //   e_lm = sum_i wq * L_sky(W_i) * [ R_i_lm  +  A_l Y_lm(W_i) V_i ]   (sky)
 //        + E_sun * lerp(R[i0], R[i0+1], t)                            (sun, 2 records)
 //
-//   sky: wq = 2pi/16 hemisphere quadrature; L_sky sampled from the baked
-//        Hosek-Wilkie cubemap (Tier 1); R = bounces, A_l Y V = occluded
-//        first-bounce sky (remedy for the disabled Tier-2 ambient).
+//   sky: wq = 2pi/16 hemisphere quadrature; live SkySH9 stores C_lm = A_l L_lm.
+//        L_sky = sum_lm (C_lm / A_l) Y_lm reconstructs incident radiance.
+//        R = bounces, A_l Y V = occluded first-bounce sky (Tier-2 ambient remedy).
 //   sun: the 17 baked hour states bracket the current hour, and the fold reads
 //        exactly the two that do. The response is INDIRECT-ONLY, so there is no
 //        double count with the runtime-exact direct sun.
@@ -37,6 +37,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // The sky quadrature reads the 16-record table below; the sun term reads the
     // separate 17-state sun table. Two tables, one thread.
     StructuredBuffer<float4> response = ResourceDescriptorHeap[Upd.responseSRVIdx];
+    StructuredBuffer<float4> skySH9   = ResourceDescriptorHeap[FrameCB.skySH9BufferIndex];
     RWStructuredBuffer<float4> lit     = ResourceDescriptorHeap[Upd.litUAVIdx];
     RWStructuredBuffer<float4> litSky  = ResourceDescriptorHeap[Upd.litSkyUAVIdx];
     RWStructuredBuffer<float4> litSun  = ResourceDescriptorHeap[Upd.litSunUAVIdx];
@@ -51,12 +52,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
     [unroll]
     for (uint i = 0; i < BAKED_GI_DIRECTIONS; ++i)
     {
-        float3 wi   = BakedGIDeltaDirection(i);
-        float3 Lsky = SampleSky(wi, FrameCB.skyCubemapIndex);
-
-        uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F4;
+        float3 wi = BakedGIDeltaDirection(i);
         float basis[9];
         EvalSH9Basis(wi, basis);
+
+        // The buffer stores A_l * L_lm. Divide by A_l to recover radiance;
+        // the transport below owns the only cosine convolution.
+        float3 Lsky = float3(0.0f, 0.0f, 0.0f);
+        [unroll]
+        for (uint skyLm = 0; skyLm < 9; ++skyLm)
+            Lsky += skySH9[skyLm].rgb * basis[skyLm] / BakedGIA_l(skyLm);
+
+        uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F4;
         float V = response[slot + 9].x;
 
         [unroll]
