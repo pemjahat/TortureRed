@@ -833,8 +833,7 @@ void Application::Render()
         // The sun states are baked for every hour, so the bake needs no direction
         // from the UI: each state's direction comes from
         // BakedGI::SunDirectionAtHourCPU and the RNG seed from the state index.
-        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing,
-                                                   SingleDirectionSun());
+        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
         // Trigger 2: a completed bake rewrote the tables, so the resident lit
         // table describes the previous one. Fold again on the next opportunity.
         // A failed bake leaves the tables alone, and the fold gate already checks
@@ -875,7 +874,7 @@ void Application::Render()
         // record the frame actually reads. A different state replays a different
         // bake and the self-check reports MISMATCH — a true report.
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
-                                   haveSunToDir ? &sunToDir : nullptr, SingleDirectionSun(),
+                                   haveSunToDir ? &sunToDir : nullptr,
                                    (uint32_t)m_BakedGISunState);
         // The dump replaced the ray-debug buffer and cached a new verdict. Fill
         // the dump-derived constants again so the fan reads the new buffer, probe
@@ -1512,8 +1511,8 @@ void Application::Render()
 // the tooltip: the tooltip literals stay untouched, so the remaining methods'
 // output is byte-identical by construction, not by careful editing.
 static const char* kMethod3WordingCaveat =
-    "Method 3 traces ONE direction -- the real sun. The help text below describes "
-    "the removed 16-direction fold and does not apply to this method.";
+    "Probe (Baked Sun) bakes 17 hour states and blends the two that bracket Hour. "
+    "The help text below describes the removed 16-direction SUN fold and does not apply to this method.";
 
 // The to-sun direction, negated from the light's travel direction exactly as the
 // sky bake and the direct lighting read it. One definition for every reader: the
@@ -2185,7 +2184,7 @@ void Application::RenderImGui()
                 const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays",
                                              "Lit Sky Source", "Lit Sun Source", "Ray Fan", "Efb Contribution",
                                              "Cage Trace" };
-                if (SingleDirectionSun())
+                if (ProbeMethodActive())
                 {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
                     ImGui::TextWrapped("%s", kMethod3WordingCaveat);
@@ -2312,7 +2311,7 @@ void Application::RenderImGui()
                     // it to choose the geometry. Three places, one value.
                     const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Efb",
                                                      "Hit Distance", "Direct vs Efb", "DeltaDirections" };
-                    if (SingleDirectionSun())
+                    if (ProbeMethodActive())
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
                         ImGui::TextWrapped("%s", kMethod3WordingCaveat);

@@ -385,19 +385,21 @@ struct BakedGIBakeParams {
                             // read is visibility-weighted (backface + Chebyshev) so
                             // series light cannot cross walls/roofs (ProbeGI4 leak)
 
-    // ---- Single-direction sun transport (method 3) ----
-    // sunMode 0: the thread's `dir` selects one of the 16 fibonacci bins. Unchanged.
-    // sunMode 1: the delta light is the SUN AT ONE HOUR STATE. Only dir 0 works,
-    //            `wDelta` comes from sunToDir below, sunState names the state, and
-    //            responseUAVIdx / responsePrevSRVIdx point at the per-probe SUN
-    //            table (stride BAKED_GI_SUN_STATES, indexed by sunState) instead of
-    //            the 16-bin table. ONE pair of indices, interpreted per mode: a
-    //            second pair would be two places to get wrong.
-    // The sun table is a separate buffer on purpose: extra fibonacci bins would
-    // change BakedGIDeltaDirection's geometry for all 16 existing bins, and those
-    // 16 are the live sky quadrature, not a spare direction set.
-    uint  sunMode;
-    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
+    // ---- Delta-light source: sky transport, or one sun hour state ----
+    // isSunPass 0: the thread's `dir` selects one of the 16 fibonacci bins, and the
+    //              pass writes the 16-direction table. Unchanged.
+    // isSunPass 1: the delta light is the SUN AT ONE HOUR STATE. Only dir 0 works,
+    //              `wDelta` comes from sunDirX/Y/Z below, sunState names the state,
+    //              and responseUAVIdx / responsePrevSRVIdx point at the per-probe
+    //              SUN table (stride BAKED_GI_SUN_STATES, indexed by sunState)
+    //              instead of the 16-direction table. ONE pair of indices,
+    //              interpreted per pass: a second pair would be two places to get
+    //              wrong.
+    // This is NOT the removed SingleDirectionSun switch. BOTH passes run on every
+    // bake: the 16-direction table is the live sky quadrature, and the sun table
+    // is what the hour fold interpolates. Removing either one breaks the frame.
+    uint  isSunPass;
+    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, isSunPass 1 only
 
     // ---- Diagnostic: pair the sun seed with a fibonacci bin ----
     // The bake's RNG seed depends on the direction index, so the sun pass (which
@@ -418,7 +420,7 @@ struct BakedGIBakeParams {
     // dxc reports the member at 68 and the struct at 72.
     uint  seedDir;
     // ---- Equinox hour states: which state this dispatch bakes ----
-    // 0..BakedGI::kSunStates-1. sunMode 1 only. The sun record stride is
+    // 0..BakedGI::kSunStates-1. isSunPass 1 only. The sun record stride is
     // BAKED_GI_SUN_STATES, so the shader indexes
     // slot = (probe * 17 + sunState) * kResponseFloat4s.
     // APPENDED again, so the offsets above are unchanged: 72, sizeof 76 (19
@@ -471,12 +473,11 @@ struct BakedGIRayDebugParams {
     uint  rayRecUAVIdx;        // RW: ray records, then the re-accumulated table
     uint  responsePrevSRVIdx;  // SRV: previous bake iteration's table (the Efb source)
     uint  visSRVIdx;           // SRV: per-probe octahedral depth moments
-    // Method-3 replay. sunMode 0: the binned 16-direction trace, unchanged.
-    // sunMode 1: ONE trace toward the sun at hour state `sunState`, exactly as the
-    // bake's sun pass runs it, so the self-check compares against that state's
-    // record of the sun response table.
-    uint  sunMode;
-    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, sunMode 1 only
+    // The fan replays ONE trace toward the sun at hour state `sunState`, exactly as
+    // the bake's sun pass runs it, so the self-check compares against that state's
+    // record of the sun response table. There is no binned variant: the 16 sky
+    // directions are not something the fan traces.
+    float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction
 
     // Same field, same meaning, same expression as BakedGIBakeParams::seedDir.
     // The replay reproduces the bake's RNG stream by construction, so a bake that
@@ -486,9 +487,10 @@ struct BakedGIRayDebugParams {
     // 64 B = 16 dwords. Measured: dxc reports this member at 60 and the struct at
     // 64, and offsetof agrees.
     uint  seedDir;
-    // Which hour state to replay, sunMode 1 only: 0..BakedGI::kSunStates-1.
-    // APPENDED, so offsets 0..63 are unchanged: 64, sizeof 68 (17 dwords). The
-    // root-constant slot is sized by the 30-dword DDGIParams, so it still fits.
+    // Which hour state to replay, 0..BakedGI::kSunStates-1.
+    // Measured with dxc after sunMode was removed: seedDir 56, sunState 60,
+    // sizeof 64 (16 dwords). The root-constant slot is sized by the 30-dword
+    // DDGIParams, so it still fits.
     uint  sunState;
 };
 

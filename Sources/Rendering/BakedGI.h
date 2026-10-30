@@ -163,12 +163,7 @@ public:
                     D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                    float spacing,
-                    // Method 3: also bake the sun's response for every hour state,
-                    // into the per-probe sun table. The directions come from
-                    // SunDirectionAtHourCPU, not from a caller argument: the sun
-                    // is the hour, so a live direction must not reach the bake.
-                    bool singleDirectionSun = false);
+                    float spacing);
 
     // Per-frame: fold the live sun/sky state into the lit-probe buffer.
     // hour selects the two baked sun states that bracket it. The sky term reads
@@ -196,10 +191,10 @@ public:
     uint32_t          GetVisibilitySRVIndex() const { return (uint32_t)m_Visibility.srvIndex; }
     uint32_t          GetResponseSRVIndex() const { return (uint32_t)m_Response[m_FinalResponse].srvIndex; }
 
-    // Per-probe SUN response table (method 3 only): kSunStates x kResponseFloat4s
-    // float4 for each probe, indexed by hour state. Populated by RecordBake when
-    // singleDirectionSun is set. Separate from the 16-bin table on purpose — see
-    // BakedGIBakeParams::sunMode. Returns 0 when no sun table exists.
+    // Per-probe SUN response table: kSunStates x kResponseFloat4s float4 for each
+    // probe, indexed by hour state. RecordBake always fills it. Separate from the
+    // 16-direction sky table on purpose — see BakedGIBakeParams::isSunPass.
+    // Returns 0 when the buffer could not be created.
     uint32_t          GetSunResponseSRVIndex() const
     {
         return m_SunResponseValid ? (uint32_t)m_SunResponse[m_FinalSunResponse].srvIndex : 0u;
@@ -368,13 +363,12 @@ public:
                         D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                         D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                         uint32_t probeIndex,
-                        // Method 3: replay ONE sun hour state instead of the 16
-                        // bins. sunState selects the state, and the direction and
-                        // the RNG seed both follow from it, exactly as the bake
+                        // Replays ONE sun hour state, not the 16 sky directions.
+                        // sunState selects the state, and the direction and the
+                        // RNG seed both follow from it, exactly as the bake
                         // derives them. A different state here replays a
                         // different bake and the self-check reports MISMATCH —
                         // which is a true report, not a defect to route around.
-                        bool singleDirectionSun = false,
                         uint32_t sunState = 8u);
     // Names the sun state the fan draws. Pass nullptr for a scene with no sun.
     // Do not add a default value: a forgotten argument would print "no sun" while
@@ -558,11 +552,11 @@ public:
     bool LoadedFromCache() const { return m_LoadedFromCache; }
 
 private:
-    // Shared by the bake and the cache-load paths: (re)creates the seven
-    // probe buffers for the current grid (dims/spacing/probeCount members).
-    // wantSunTable: also create the per-probe sun response pair. Off for a bake
-    // that does not need the sun, so its payload is byte-for-byte what it was.
-   bool CreateProbeBuffers(bool wantSunTable = false);
+    // Shared by the bake and the cache-load paths: (re)creates the eight
+    // probe buffers for the current grid (dims/spacing/probeCount members),
+    // including the per-probe sun response pair. There is no variant that skips
+    // the sun: the fold always has two hour states to interpolate.
+   bool CreateProbeBuffers();
     // Debug-only outputs of the bake: the per-term transport snapshots
     // (m_ResponseIter, kIterSnapshotCount tables) and the folded per-probe
     // response balls (m_EfbBall, kBakeIterations). Created on the DISPATCH path
@@ -579,13 +573,11 @@ private:
     // Called inside RecordBake after the grid is computed; on a hit RecordBake
     // returns true immediately.
     //
-    // The cache holds FOUR sections now: the 16-record response table, the meta
-    // words, the visibility moments, and — appended, one file for all 17 states —
-    // the per-probe sun table. wantSunTable is the same flag RecordBake was given:
-    // it decides whether the sun buffer exists to copy into, so a caller that did
-    // not ask for the sun term does not pay 2720 B for each probe of VRAM.
+    // The cache holds FOUR sections: the 16-record sky table, the meta words, the
+    // visibility moments, and — appended, one file for all 17 states — the
+    // per-probe sun table. The sun section is always present and always restored.
     bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
-                      const std::string& scenePath, bool wantSunTable);
+                      const std::string& scenePath);
 
     // Ping-pong transport table: probeCount x kDirections x kResponseFloat4s float4s.
     GPUBuffer m_Response[2];
@@ -629,9 +621,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_RayDebugReadback; // CPU: debug buffer | stored table
     GPUBuffer m_RayDebugBuf;                                   // GPU: records + re-accumulated table
     uint32_t m_RayDebugProbe = 0;
-    // Which table the last dump replayed. The readout runs separately and later,
-    // so it needs the method to compare against the right table.
-    bool     m_RayDebugSunMode = false;
+    // The readout compares against the SUN table, and it runs separately and later
+    // than the dump. It gates on m_SunResponseValid directly: a bake cannot
+    // interleave with a dump plus its readout, so the flag cannot change in
+    // between and a second copy of it would only be a value to keep in sync.
     // Which hour state the last dump replayed, so the readout compares against
     // the right record of the sun table.
     uint32_t m_RayDebugSunState = 0u;

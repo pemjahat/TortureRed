@@ -155,14 +155,6 @@ private:
     {
         return m_IndirectGIMethod == kIndirectMethodProbe;
     }
-    // True when the sun column comes from the baked hour states, which is now the
-    // only probe method there is. Kept as a separate predicate because the call
-    // sites read better against it and because a future probe method that does
-    // NOT bake the sun would flip this one alone.
-    bool SingleDirectionSun() const
-    {
-        return m_IndirectGIMethod == kIndirectMethodProbe;
-    }
     // The GI sun input: TRUE SOLAR TIME in hours, 0..24, where hour 12 is solar
     // noon. The sun is not a free direction any more — the 17 baked hour states
     // bracket this value and the fold interpolates the pair.

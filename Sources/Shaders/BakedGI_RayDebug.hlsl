@@ -82,10 +82,10 @@ groupshared int   g_slot[BAKE_RAYS]; // record slot for each source ray; -1 = no
 // is the reference. This copy exists so the debug pass can reproduce the
 // feedback term (Efb) of the final iteration without a change to the bake.
 // ---------------------------------------------------------------------------
-// stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: 16 bins for the
-// binned transport, BAKED_GI_SUN_STATES and the dispatch's sunState for the sun
-// pass. A hardcoded 16 here would read the wrong record under sunMode and the
-// self-check would report a MISMATCH that is purely an addressing difference.
+// stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: this pass always
+// reads the sun table, BAKED_GI_SUN_STATES and the dispatch's sunState. A
+// hardcoded 16 here would read the wrong record and the self-check would report a
+// MISMATCH that is purely an addressing difference.
 float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
                             uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
@@ -296,31 +296,21 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     const uint3 cell = uint3(probe % dims.x, (probe / dims.x) % dims.y, probe / (dims.x * dims.y));
     const float3 probePos = gridMin + float3(cell) * spacing;
-    // Method 3 replays ONE hour state. Every group would otherwise trace the same
-    // sun and produce sixteen identical record sets, so only group 0 works.
-    if (RayDbg.sunMode != 0u && dir != 0u)
+    // This pass replays ONE sun hour state. Every group would otherwise trace the
+    // same sun and produce sixteen identical record sets, so only group 0 works.
+    if (dir != 0u)
         return;
 
-    const bool sunMode = RayDbg.sunMode != 0u;
-    // Record addressing per method: 16 bins, or one of the 17 sun hour states.
-    const uint kRespStride = sunMode ? BAKED_GI_SUN_STATES : BAKED_GI_DIRECTIONS;
-    const uint kRespIdx    = sunMode ? RayDbg.sunState : dir;
+    // Record addressing: one of the 17 sun hour states, in the sun table.
+    const uint kRespStride = BAKED_GI_SUN_STATES;
+    const uint kRespIdx    = RayDbg.sunState;
 
-    // wDelta. Under sunMode this is BakedGI_Bake.hlsl's sun expression VERBATIM,
-    // including the +Y fallback for a zero sun. A different fallback traces a
-    // different ray, and the self-check would then report a MISMATCH with no
-    // visible cause.
-    float3 wDelta;
-    if (sunMode)
-    {
-        const float3 sunDir = float3(RayDbg.sunDirX, RayDbg.sunDirY, RayDbg.sunDirZ);
-        const float  sunLen = length(sunDir);
-        wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
-    }
-    else
-    {
-        wDelta = BakedGIDeltaDirection(dir);
-    }
+    // wDelta is BakedGI_Bake.hlsl's sun expression VERBATIM, including the +Y
+    // fallback for a zero sun. A different fallback traces a different ray, and
+    // the self-check would then report a MISMATCH with no visible cause.
+    const float3 sunDir = float3(RayDbg.sunDirX, RayDbg.sunDirY, RayDbg.sunDirZ);
+    const float  sunLen = length(sunDir);
+    const float3 wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
 
     RWStructuredBuffer<float4> debug    = ResourceDescriptorHeap[RayDbg.rayRecUAVIdx];
     StructuredBuffer<float4>   respPrev = ResourceDescriptorHeap[RayDbg.responsePrevSRVIdx];

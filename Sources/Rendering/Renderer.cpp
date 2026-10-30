@@ -962,7 +962,7 @@ void Renderer::CreateBakedGIPipelines()
     m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 }
 
-bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun)
+bool Renderer::BakeGIProbes(Model* model, float spacing)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -980,7 +980,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, bool singleDirectionSun
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing, singleDirectionSun);
+                                    spacing);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.
@@ -1024,7 +1024,7 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
 // waits for the GPU, exactly like BakeGIProbes, so the caller runs it on a
 // synced GPU (before BeginFrame). The readout is printed after the sync.
 bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
-                               const DirectX::XMFLOAT3* sunToDir, bool singleDirectionSun,
+                               const DirectX::XMFLOAT3* sunToDir,
                                uint32_t sunState)
 {
     if (!m_RayTracingSupported || !model || !m_BakedGI.IsValid())
@@ -1040,7 +1040,7 @@ bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
                                              model->GetDrawNodeBufferAddress(),
                                              model->GetGlobalIndexBufferAddress(),
                                              model->GetGlobalVertexBufferAddress(),
-                                             probeIndex, singleDirectionSun, sunState);
+                                             probeIndex, sunState);
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
         m_BakedGI.LogRayDebugReadout(sunToDir);

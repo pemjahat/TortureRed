@@ -51,11 +51,12 @@ public:
     // Baked GI probe system (task017 step 1) — EXCLUSIVE indirect source with
     // ReSTIR GI (bakedGIMode in FrameConstants arbitrates).
     void CreateBakedGIPipelines();
-    // singleDirectionSun: also bake the sun's response for every hour state, so
-    // the runtime fold has a pair of records to interpolate. The state directions
-    // come from BakedGI::SunDirectionAtHourCPU, not from a caller argument: the
-    // sun is the hour, so a live direction must not reach the bake.
-    bool BakeGIProbes(class Model* model, float spacing, bool singleDirectionSun = false);
+    // Bakes the 16-direction sky basis AND the response for every one of the 17
+    // hour states, so the runtime fold always has a pair of records to
+    // interpolate. The state directions come from
+    // BakedGI::SunDirectionAtHourCPU, not from a caller argument: the sun is the
+    // hour, so a live direction must not reach the bake.
+    bool BakeGIProbes(class Model* model, float spacing);
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
     // sunToDir is required. Pass the to-sun direction to name the state the
@@ -65,10 +66,9 @@ public:
     // another state's rays and the self-check reports MISMATCH.
     bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
                          const DirectX::XMFLOAT3* sunToDir,
-                         bool singleDirectionSun = false,
                          uint32_t sunState = 8u);
 
-    // singleDirectionSun: the sun column is the two-record hour blend.
+    // The sun column is the two-record hour blend. There is no other mode.
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
                                float giHour);
     void DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outputWidth, uint32_t outputHeight);
