@@ -44,8 +44,8 @@
 //                      are uniform now, so every box reads white: the 16 boxes are
 //                      a hemisphere quadrature, which weights all of them
 //                      equally. The sun is not among them any more — it is 17
-//                      baked hour states, and the Sun Hour States panel is where
-//                      that fold is reported.
+//                      baked hour states, and FrameConstants::bakedGISunDir
+//                      carries that fold to the views.
 //                      One more instance is drawn from the same origin: a
 //                      THICKER ORANGE box along the sun's direction at the current
 //                      HOUR (FrameConstants::bakedGISunDir), at the same length as
@@ -321,7 +321,7 @@ float3 RayFanRegimeColor(float direct, float efb)
 // channel still draws what it is for: the 16 quadrature directions of the fan's
 // probe, plus the sun marker at the current hour. The per-bin sun weight it used
 // to show died with the 16-bin sun kernel; the sun is 17 hour states now, and the
-// Sun Hour States panel is the place that reports them.
+// runtime fold reports them through FrameConstants::bakedGISunDir.
 //
 // The MAXIMUM rather than the sum is kept so a future non-uniform weight set
 // still ramps to white on its winner instead of never reaching it.
@@ -867,8 +867,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
             return o;
 
         const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
-        if (!(meta[probe] & 1u))
-            return o; // invalid probes have zeroed transport — nothing to show
+        if (!(meta[probe] & BAKED_GI_META_VALID))
+            return o; // visibility rays belong only to geometrically valid origins
         if (distance(probePos, FrameCB.cameraPosition.xyz) > spacing * 8.0f)
             return o; // near-camera window keeps the ray count readable
 
@@ -892,12 +892,16 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         return o;
 
     const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
-    const bool   valid    = (meta[probe] & 1u) != 0u;
+    const uint   metaWord = meta[probe];
+    const bool   valid    = (metaWord & BAKED_GI_META_VALID) != 0u;
+    const bool   hasData  = BakedGIProbeHasData(metaWord);
 
     if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN ||
         mode == BAKED_GI_DEBUG_EFB)
     {
-        if (!valid)
+        // Lit views show donor-backed runtime data. Efb remains a raw bake view
+        // and admits only geometrically valid probes.
+        if (mode == BAKED_GI_DEBUG_EFB ? !valid : !hasData)
             return o;
 
         // UV-sphere vertex: unit sphere position doubles as the eval normal.
@@ -1063,12 +1067,15 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         // criteria vs the old 1cm test, so the criteria swap's flips are
         // visible in place. BLUE is the experiment's headline — probes the
         // old test called valid that DDGI's classification kills.
-        const uint  m         = meta[probe];
+        const uint  m         = metaWord;
         const bool  ddgiValid = (m & BAKED_GI_META_VALID)     != 0u;
         const bool  oldValid  = (m & BAKED_GI_META_OLD_VALID) != 0u;
+        const bool  filled    = (m & BAKED_GI_META_FILLED)    != 0u;
         if (ddgiValid)
             o.color = oldValid ? float4(0.1f, 0.9f, 0.2f, 1.0f)   // valid under both
                                : float4(0.9f, 0.9f, 0.2f, 1.0f);  // newly valid (old test killed it)
+        else if (filled)
+            o.color = float4(0.1f, 0.85f, 0.95f, 1.0f);            // donor-backed runtime data
         else
             o.color = oldValid ? float4(0.2f, 0.4f, 1.0f, 1.0f)   // NEWLY BAD (old test kept it)
                                : float4(0.95f, 0.15f, 0.15f, 1.0f); // bad under both

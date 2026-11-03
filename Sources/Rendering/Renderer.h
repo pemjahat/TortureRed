@@ -56,7 +56,7 @@ public:
     // interpolate. The state directions come from
     // BakedGI::SunDirectionAtHourCPU, not from a caller argument: the sun is the
     // hour, so a live direction must not reach the bake.
-    bool BakeGIProbes(class Model* model, float spacing);
+    bool BakeGIProbes(class Model* model, float spacing, uint32_t dilationIterations);
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
     // sunToDir is required. Pass the to-sun direction to name the state the

@@ -576,6 +576,10 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeVisSRVIndex   = gi.IsValid() ? gi.GetVisibilitySRVIndex() : 0u;
         m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
+        // Runtime FILLED eligibility follows the same effective getter that selects
+        // the tables. Raw A/B mode publishes zero even when meta holds FILLED.
+        const bool useFilled = gi.IsUsingDilatedTransport();
+        m_FrameConstants.bakedGIUseFilled          = useFilled ? 1u : 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
         FillEfbBallConstants();
@@ -763,7 +767,7 @@ void Application::FillEfbBallConstants()
 //
 // All of it comes from ONE BakedGI::SunBlendForHour and ONE
 // BakedGI::SunDirectionAtHour, so the box colours, the orange marker and the
-// panel table cannot describe different hours.
+// Ray Fan label cannot describe different hours.
 //
 // THE 16 WEIGHTS ARE NOW UNIFORM. They described a kernel that no longer exists.
 // The 16 directions are the SKY QUADRATURE, and a hemisphere quadrature weights
@@ -833,7 +837,8 @@ void Application::Render()
         // The sun states are baked for every hour, so the bake needs no direction
         // from the UI: each state's direction comes from
         // BakedGI::SunDirectionAtHourCPU and the RNG seed from the state index.
-        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
+        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing,
+                                                   (uint32_t)std::max(0, m_BakedGIDilationIterations));
         // Trigger 2: a completed bake rewrote the tables, so the resident lit
         // table describes the previous one. Fold again on the next opportunity.
         // A failed bake leaves the tables alone, and the fold gate already checks
@@ -1970,6 +1975,45 @@ void Application::RenderImGui()
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Grid spacing used by the next \"Rebuild GI Probes\" (auto-grows to fit the probe cap).");
 
+                ImGui::InputInt("Dilation Iterations", &m_BakedGIDilationIterations);
+                m_BakedGIDilationIterations = std::max(0, m_BakedGIDilationIterations);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Six-neighbor transport dilation for the next bake.\n"
+                                      "One iteration is the default.\n"
+                                      "Zero disables dilation and allocates no dilation buffers.\n"
+                                      "Positive counts fill invalid probes from valid or earlier filled neighbors.\n"
+                                      "The bake clamps the count to the grid's Manhattan diameter.");
+
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Use Dilated Transport (A/B)", &m_BakedGIUseDilatedTransport))
+                {
+                    BakedGI& abGI = m_Renderer.GetBakedGI();
+                    abGI.SetUseDilatedTransport(m_BakedGIUseDilatedTransport);
+                    m_ProbeFoldWanted = true;
+                    m_ProbeFoldHour = -1.0f;
+                    m_FrameConstants.bakedGIUseFilled = abGI.IsUsingDilatedTransport() ? 1u : 0u;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Runtime A/B selection. It does not trigger a bake.\n"
+                                      "Dilated uses the separate bake-time dilation tables and admits FILLED probes.\n"
+                                      "Raw uses the raw tables and ignores FILLED probes in runtime receiver cages.\n"
+                                      "A positive bake keeps this selection. Zero iterations always use raw transport.");
+
+                {
+                    const BakedGI& abGI = m_Renderer.GetBakedGI();
+                    const bool tablesResident = abGI.HasDilatedTransport();
+                    const char* runtimeSource = abGI.IsUsingDilatedTransport()
+                                              ? "Dilated"
+                                              : (tablesResident ? "Raw A/B" : "Raw (no dilation tables)");
+                    ImGui::Text("Runtime transport: %s", runtimeSource);
+                    if (abGI.IsValid())
+                        ImGui::Text("Last bake dilation: %u iterations", abGI.GetDilationIterations());
+                    if (!tablesResident)
+                    {
+                        ImGui::TextDisabled("The current bake has no dilation tables. Zero always uses raw transport.");
+                    }
+                }
+
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
@@ -1993,69 +2037,6 @@ void Application::RenderImGui()
                     ImGui::SetTooltip("Re-traces one probe's gather rays and prints the readout to the console.\n"
                                       "Debug only, on demand — no per-frame cost. See the log section\n"
                                       "[BakedGI RayDebug].");
-
-                // --- Sun hour states ---
-                // The answer to "which states does this hour interpolate, and by
-                // how much". Every row is a state, so the table is the whole fold.
-                // The weight depends on the hour alone, so it is the same for
-                // every probe: there is no per-probe column and nothing to read
-                // back from the GPU.
-                ImGui::Separator();
-                ImGui::Text("Sun Hour States");
-                {
-                    BakedGI::SunStatePanel panel;
-                    BakedGI::BuildSunStatePanel(m_GIHour, panel);
-
-                    ImGui::Text("Hour %.3f  ->  states %u and %u, blend t = %.4f",
-                                panel.hour, panel.i0, panel.i0 + 1u, panel.t);
-                    if (!panel.inDaylight)
-                    {
-                        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                                           "Outside daylight (hour 6 to 18): the sun irradiance is "
-                                           "zero, so the sun term contributes nothing.");
-                    }
-                    ImGui::Text("Sun at this hour  elev %.2f deg   azim %.2f deg",
-                                panel.elevationDeg, panel.azimuthDeg);
-
-                    if (ImGui::BeginTable("SunStateTable", 4,
-                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
-                                              | ImGuiTableFlags_SizingStretchProp))
-                    {
-                        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 56.0f);
-                        ImGui::TableSetupColumn("Hour");
-                        ImGui::TableSetupColumn("Angle to hour deg");
-                        ImGui::TableSetupColumn("Weight");
-                        ImGui::TableHeadersRow();
-
-                        for (uint32_t r = 0; r < BakedGI::kSunStates; ++r)
-                        {
-                            const BakedGI::SunStateRow& row = panel.rows[r];
-                            // Only the two brackets carry weight, so only they can
-                            // answer "which states interpolate". Hide the other
-                            // fifteen rows unless the user wants the whole arc —
-                            // the count in the header keeps the total honest.
-                            ImGui::TableNextRow();
-                            ImGui::TableSetColumnIndex(0);
-                            if (row.active)
-                                ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.55f, 1.0f), "%2u *", row.state);
-                            else
-                                ImGui::TextDisabled("%2u", row.state);
-                            ImGui::TableSetColumnIndex(1);
-                            ImGui::Text("%6.2f", row.hour);
-                            ImGui::TableSetColumnIndex(2);
-                            ImGui::Text("%7.3f", row.angleDeg);
-                            ImGui::TableSetColumnIndex(3);
-                            if (row.active)
-                                ImGui::Text("%7.4f  (%.1f %%)", row.weight, row.weight * 100.0f);
-                            else
-                                ImGui::TextDisabled("0");
-                        }
-                        ImGui::EndTable();
-                    }
-                    ImGui::TextDisabled("* = one of the two states this hour interpolates. "
-                                        "Adjacent states are %.2f deg apart.",
-                                        BakedGI::kSunStateStepHours * 15.0f);
-                }
 
                 // --- Probes near the camera ---
                 // The answer to "which probe index am I standing in?". The index
@@ -2199,13 +2180,15 @@ void Application::RenderImGui()
                                       "BLUE = newly bad: the old 1cm test said valid, DDGI's rule\n"
                                       "(>= 25% backfaces among 32 stable rays) kills it.\n"
                                       "Yellow = newly valid (old test killed it, DDGI keeps it).\n"
+                                      "Cyan = FILLED: invalid origin with donor-backed runtime transport.\n"
                                       "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
                                       "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
                                       "sky = sky bounces + occluded sky direct (V_i-gated), sun = sun bounces only (direct sun never enters probes).\n"
                                       "The three lit views always sum: total = sky + sun.\n"
                                       "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
-                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, invalid probes skipped).\n"
+                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, VALID origins only; FILLED probes skipped).\n"
                                       "Ray Fan: the 64 gather rays of ONE direction of one probe (the Ray Debug Probe above), as thin boxes.\n"
+                                      "Ray Fan stays raw when runtime dilation fills the selected probe.\n"
                                        "  Probe (Baked): the SUN-DOMINANT direction, i.e. the bin the fold's kernel weights most.\n"
                                        "  Probe (Baked Sun): the REAL SUN DIRECTION. That method traces a single direction\n"
                                        "  toward the sun at bake time, so there is no dominant bin and the 16 delta\n"
@@ -2220,6 +2203,7 @@ void Application::RenderImGui()
                                       "the Efb term added, and where. The ball's DC reads as the feedback's share of that term's\n"
                                       "transport. Term 1 is black by construction: the bake gates feedback off there. Needs a bake\n"
                                       "from the dispatch path; a Probes/ cache load has no per-term tables and draws nothing.\n"
+                                      "Efb stays raw and VALID-only when runtime dilation fills a probe.\n"
                                       "Cage Trace: ONE probe (the Ray Debug Probe above). It derives the chain — the sun-dominant\n"
                                       "direction, that direction's largest FEEDBACK-DOMINATED ray (a shaded ray whose Efb term\n"
                                       "beats its NdotD*Vhit term), a line from the probe to that ray's hit, and the 8 trilinear\n"
@@ -2367,7 +2351,7 @@ void Application::RenderImGui()
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
                             ImGui::TextWrapped("Warning: the dumped probe is INVALID. Channels 4 "
                                                "(Efb) and 6 (Direct vs Efb) are degenerate and drawn "
-                                               "dimmed.");
+                                               "dimmed. Runtime FILLED data does not change this raw replay.");
                             ImGui::PopStyleColor();
                         }
 

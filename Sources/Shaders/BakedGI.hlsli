@@ -126,11 +126,31 @@ uint BakedGIRayRecSourceRay(float packed)
 //   bit 3: dead by DDGI rule 2 — nearest frontface beyond 3x spacing
 //          (unreachable while depths clamp at 2x spacing — DDGI's own code
 //          neuters this rule identically; kept for fidelity)
+//   bit 4: FILLED by bake-time donor dilation; runtime data exists, but the
+//          fixed-origin depth moments remain untrusted for Chebyshev weights
 // ---------------------------------------------------------------------------
 #define BAKED_GI_META_VALID         0x1u
 #define BAKED_GI_META_OLD_VALID     0x2u
 #define BAKED_GI_META_DEAD_BACKFACE 0x4u
 #define BAKED_GI_META_DEAD_FAR      0x8u
+#define BAKED_GI_META_FILLED        0x10u
+
+// Bake, dilation, and debug consumers use this helper: data exists when either
+// geometric validity or donor-backed fill is present.
+bool BakedGIProbeHasData(uint meta)
+{
+    return (meta & (BAKED_GI_META_VALID | BAKED_GI_META_FILLED)) != 0u;
+}
+
+// Runtime receiver eligibility. VALID always qualifies. FILLED qualifies only
+// when the Application publishes raw-versus-dilated runtime mode as dilated.
+// Raw A/B mode therefore ignores every FILLED bit without changing the meta buffer.
+bool BakedGIProbeHasRuntimeData(uint meta)
+{
+    if ((meta & BAKED_GI_META_VALID) != 0u)
+        return true;
+    return (FrameCB.bakedGIUseFilled != 0u) && ((meta & BAKED_GI_META_FILLED) != 0u);
+}
 
 // DDGI's classification ray set (D3D12_Research DDGICommon.hlsli,
 // DDGI_NUM_STABLE_RAYS = 32): fixed full-sphere spherical-fibonacci
@@ -360,8 +380,10 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         float w = w3.x * w3.y * w3.z;
 
         uint flat = BakedGIFlatten(base + off, dims);
-        if (!(meta[flat] & 1u))
+        const uint metaWord = meta[flat];
+        if (!BakedGIProbeHasRuntimeData(metaWord))
             continue;
+        const bool filled = (metaWord & BAKED_GI_META_FILLED) != 0u;
         wTri[k] = w;
 
         if (!visOn)
@@ -372,9 +394,9 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         float  dist    = length(toProbe);
         if (dist < 1e-4f)
         {
-            // Receiver sits on the probe: trivially visible.
+            // A filled origin has no trusted moments, even at zero distance.
             wBF[k] = w;
-            wFull[k] = w;
+            wFull[k] = filled ? 0.0f : w;
             continue;
         }
 
@@ -392,7 +414,9 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         float  dSurf  = length(toSurf);
         float  back   = (dSurf < 1e-4f) ? 1.0f : saturate(dot(N, toSurf / dSurf));
         wBF[k] = w * back;
-        if (back > 0.0f)
+        // Filled probes keep trilinear and backface weights but never read their
+        // fixed-origin moments. They cannot enter the full Chebyshev tier.
+        if (back > 0.0f && !filled)
         {
             // Moment lookup: the map stores rays fired FROM the probe, so the
             // occlusion test needs the probe->receiver direction — the NEGATION
@@ -488,7 +512,7 @@ float2 BakedGICageContamination(float3 worldPos, float3 N)
         float w = w3.x * w3.y * w3.z;
 
         uint flat = BakedGIFlatten(base + off, dims);
-        if (meta[flat] & 1u)
+        if (BakedGIProbeHasRuntimeData(meta[flat]))
         {
             wValid += w;
             // Sign test only — normalization cannot flip the sign.

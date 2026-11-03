@@ -661,14 +661,14 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
     // DDGIParams (30 DWORDs — the largest consumer of this slot).
-    // BakedGIRayDebugParams (16 DWORDs) and BakedGIIterFoldParams (3 DWORDs) are
-    // listed for completeness: both are smaller than DDGIParams, so neither
-    // changes the slot size.
+    // BakedGIRayDebugParams (16 DWORDs), BakedGIDilationParams (10 DWORDs), and
+    // BakedGIIterFoldParams (3 DWORDs) are smaller than DDGIParams. They do not
+    // change the slot size.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
         std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
         std::max(sizeof(BakedGIUpdateParams), std::max(sizeof(BakedGIVisParams),
         std::max(sizeof(BakedGIRayDebugParams), std::max(sizeof(BakedGIIterFoldParams),
-        sizeof(DDGIParams))))))));
+        std::max(sizeof(BakedGIDilationParams), sizeof(DDGIParams)))))))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
@@ -962,7 +962,7 @@ void Renderer::CreateBakedGIPipelines()
     m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 }
 
-bool Renderer::BakeGIProbes(Model* model, float spacing)
+bool Renderer::BakeGIProbes(Model* model, float spacing, uint32_t dilationIterations)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -980,7 +980,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing)
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing);
+                                    spacing, dilationIterations);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.

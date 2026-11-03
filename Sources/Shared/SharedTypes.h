@@ -350,8 +350,8 @@ struct FrameConstants {
     //       w = 0 the xyz is written as zero too, so no stale direction survives.
     //
     // Ownership: Application::FillSunFoldConstants writes it every frame, from the
-    // same BakedGI::SunBlendForHour call that fills the hour-state panel. One
-    // source, so the panel text and the 3D marker cannot disagree.
+    // same BakedGI::SunBlendForHour call that fills the Ray Fan labels. One
+    // source, so the label text and the 3D marker cannot disagree.
     //
     // LAYOUT — this is a float4 appended after a uint, so it needs explicit pads
     // in C++ only. HLSL will not split a vector across a 16-byte register: it
@@ -368,6 +368,14 @@ struct FrameConstants {
     uint   _sunDirPad0;             // 1144, 1148: the 8 bytes HLSL leaves before the
     uint   _sunDirPad1;             //           16-byte boundary this field needs
     float4 bakedGISunDir;           // 1152: xyz = to-sun unit direction, w = sun exists
+
+    // Runtime data eligibility for FILLED probes. The receiver shaders accept
+    // FILLED only when this flag is one. Raw A/B mode publishes zero, so FILLED
+    // meta bits stay on disk but cannot enter a runtime cage.
+    // Appended after the float4. Measured on both sides: offset 1168 and size
+    // 1172. The upload buffer rounds the byte count to 256, so the constant-buffer
+    // binding covers this field.
+    uint bakedGIUseFilled;          // 1168: 1 = runtime cage accepts FILLED probes
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -517,6 +525,21 @@ struct BakedGIIterFoldParams {
     uint probeCount;        // probes in the grid; threads at or past it return
     uint tableSRVIdx;       // SRV: the transport table of ONE bake term (probeCount x 16 x 10 float4)
     uint ballUAVIdx;        // RW: probeCount x 9 float4 SH9 — one response ball for each probe
+};
+
+// Root constants for one bake-time dilation dispatch. One thread handles one
+// (probe, record) pair and copies or averages all 10 float4 values in that record.
+// The sky dispatch writes meta through record zero. The sun dispatch reuses the
+// same donor weights without writing meta. Every field is a 4-byte scalar.
+struct BakedGIDilationParams {
+    uint dimX, dimY, dimZ;
+    uint probeCount;
+    uint recordCount;       // 16 sky records or 17 sun records
+    uint tableSRVIdx;       // raw final table on iteration zero, then dilated input
+    uint tableUAVIdx;       // dilated destination only; never a raw transport table
+    uint metaSRVIdx;
+    uint metaUAVIdx;
+    uint writeMeta;         // one for sky, zero for sun
 };
 
 // -----------------------------------------------------------------------------

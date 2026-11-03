@@ -76,6 +76,8 @@ private:
     bool m_DebugDepthLabels        = false;  // Depth-duel labels for occluded records
     bool m_CullStatsOverlay        = false;  // Meshlet culling stats on-screen table
     float m_BakedGISpacing      = 1.0f;  // BakedGI probe grid spacing (m) — used at the next rebuild
+    int   m_BakedGIDilationIterations = 1; // Six-neighbor dilation count for the next bake; default is one, zero disables it
+    bool  m_BakedGIUseDilatedTransport = true; // Runtime A/B selection; persists across bakes and never triggers one
     bool  m_PendingGIProbeBake  = false; // BakedGI bake request (auto-set after scene load / Rebuild button)
     int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility,
                                          // 4 visibility rays, 5 lit sky source, 6 lit sun source, 7 ray fan,
