@@ -36,9 +36,10 @@ private:
 
     // Fills the ray-debug FrameConstants from the live BakedGI getters. Called
     // from Application::Update and again from Application::Render right after
-    // the dump, so the two fill sites cannot drift. It does NOT touch the sun
-    // fold: FillSunFoldConstants owns that, and the post-dump call must not
-    // re-derive a pick the dump did not change.
+    // the dump, so the two fill sites cannot drift. It publishes everything the
+    // fan reads from the DUMP — the buffer, the probe, the verdict, the ray
+    // override, the record group, the delta source and the sky bin — because all of
+    // them describe the resident records.
     void FillRayDebugConstants();
 
     // Publishes the two per-bake-term response balls the "Efb Contribution" view
@@ -56,6 +57,9 @@ private:
     // (FrameConstants::bakedGISunDir, the 17th box that same channel draws). All of
     // it comes from one BakedGI::SunBlendForHour, so the channel, the UI and the
     // panel all describe one computation.
+    //
+    // It no longer publishes bakedGIRayDebugDir: that field is dump-derived state
+    // and FillRayDebugConstants owns it.
     void FillSunFoldConstants();
 
     bool m_IsRunning;
@@ -78,6 +82,13 @@ private:
     float m_BakedGISpacing      = 1.0f;  // BakedGI probe grid spacing (m) — used at the next rebuild
     int   m_BakedGIDilationIterations = 1; // Six-neighbor dilation count for the next bake; default is one, zero disables it
     bool  m_BakedGIUseDilatedTransport = true; // Runtime A/B selection; persists across bakes and never triggers one
+    // Sky-visibility mode: 0 = SH9 (the default: the raw SH9 field the visibility
+    // bake projects), 1 = V = 0 (the No Sky Visibility diagnostic). Runtime
+    // selection only: it persists across bakes, triggers no bake, and asks for a
+    // probe fold. The combo greys out SH9 when the bake holds no SH9 data, and
+    // No Sky Visibility stays usable with no bake at all. The per-bin cone source
+    // that used to be entry 0 is removed.
+    int   m_BakedGISkyVisMode   = (int)BakedGI::SkyVisMode::SH9;
     bool  m_PendingGIProbeBake  = false; // BakedGI bake request (auto-set after scene load / Rebuild button)
     int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility,
                                          // 4 visibility rays, 5 lit sky source, 6 lit sun source, 7 ray fan,
@@ -94,30 +105,59 @@ private:
                                          // index is the direction + 1, so entry 0 is "All"; the fill helper
                                          // clamps anything outside -1..15 back to "All".
     int   m_BakedGIRayDebugChannel = 1;  // Ray Fan (view 7) colour channel: 0 status, 1 albedo, 2 NdotD,
-                                         // 3 Vhit, 4 Efb, 5 distance, 6 direct-vs-Efb, 7 DeltaDirections.
-                                         // Channel 7 swaps the geometry to the 16 delta directions of the fan's
-                                         // probe (grayscale, white = most weighted), adds one orange marker box
-                                         // for the real sun, and reads no record.
-                                         // BakedGI::kRayFanChannelDeltaDirs is the C++ spelling of that 7.
-    float m_BakedGIRayDebugLength  = 8.0f; // Ray Fan ray length cap, in probe spacings (channels 0..6 only)
+                                         // 3 Vhit, 4 Efb, 5 distance, 6 direct-vs-Efb, 7 DeltaDirections,
+                                         // 8 VHit Ray.
+                                         // Channel 7 swaps the geometry to the 16 sky-quadrature directions of
+                                         // the fan's probe (grayscale, uniform weight), adds one orange marker
+                                         // box for the real sun and, in the SKY source, one thicker cyan box for
+                                         // the DISPLAYED bin (the Sky Bin control). It reads no record.
+                                         // Channel 8 also swaps the geometry, and it READS records: one thin
+                                         // segment for each shaded gather ray, from that ray's hit toward the
+                                         // active delta direction. Cyan = the secondary ray is open, red = it
+                                         // stopped at the recorded first RT hit.
+                                         // The Sky V_i channel that used to be entry 9 is REMOVED with the
+                                         // per-bin cone visibility it coloured.
+                                         // BakedGI::kRayFanChannelDeltaDirs and kRayFanChannelVHitRay are the
+                                         // C++ spellings of 7 and 8.
+    float m_BakedGIRayDebugLength  = 8.0f; // Ray Fan ray length cap, in probe spacings (channels 0..6, and the
+                                           // open VHit Ray segment of channel 8)
     int   m_BakedGIRayDebugRay     = -1;   // Cage Trace (view 9) gather-ray OVERRIDE: -1 = the shader's own
                                          // argmax (largest feedback-dominated ray), else the RECORD INDEX
                                          // (0..63) of the ray to trace, picked out of the pool the dump
                                          // built — the rays where direct < Efb (BakedGI::GetRayCandidates).
                                          // The combo's rows are that pool, so the pick is always a ray the
                                          // rule admits. It survives a dump on purpose: the index is
-                                         // per-direction, so it keeps tracking one ray while the probe
-                                         // changes. A pick from another direction's pool (the sun moved) is
+                                         // per-record-group, so it keeps tracking one ray while the probe
+                                         // changes. A pick that the current dump's pool does not contain is
                                          // drawn in magenta and reported in the panel.
                                          // BakedGI::kNoRayPick is the published spelling of -1.
     int   m_BakedGISunState     = 0;     // The first of the two hour states the fold
                                          // interpolates (BakedGI::SunHourBlend::i0).
                                          // Refreshed each frame by
-                                         // FillSunFoldConstants, so the labels that
-                                         // name it can never describe another hour.
+                                         // FillSunFoldConstants, and handed to the dump
+                                         // as the sun state to replay. The UI labels do
+                                         // NOT read it: they read the state the dump
+                                         // stored (BakedGI::GetRayDebugSunState), so a
+                                         // label cannot describe another hour.
     bool  m_BakedGIVisCheck     = true;  // A/B: step-3 fetch weights (bias + backface + Chebyshev) vs plain step-1 trilinear
     int   m_RayDebugProbeIndex  = 0;     // Probe index for the "Dump Probe Ray Debug" tool
     bool  m_PendingRayDebug     = false; // Ray-debug dump request (set by the button)
+    // Which baked delta table the NEXT dump replays. The selection only; it never
+    // claims what is already in the buffer — BakedGI::GetRayDebugSource reports the
+    // source the resident records came from, and every label reads THAT.
+    //
+    //   0 = SUN (the shipped replay: one hour state of the sun table)
+    //   1 = SKY (all 16 fibonacci bins of the sky quadrature table, in one dump)
+    //
+    // The UI index is the BakedGI::RayDebugSource value, so the two cannot drift.
+    // A dump never changes these members and these members never trigger a bake.
+    int   m_BakedGIRayDebugSource  = (int)BakedGI::RayDebugSource::Sun;
+    // The sky bin ON DISPLAY: the initial display bin of the next SKY dump, and the
+    // bin the Ray Fan's Sky Bin browser writes. ONE sky dump records every bin, so
+    // this is a view choice and not a filter. The browser also writes it into
+    // BakedGI::SetRayDebugSkyDirection, which is where every label reads it, so the
+    // two cannot disagree. No value here ever triggers a dump or a bake.
+    int   m_BakedGIRayDebugSkyDir  = 0;
 
     // "Probes Near Camera" list — the answer to "which probe index am I standing
     // in?". Filled by BakedGI::FindNearestValidProbes from the live camera

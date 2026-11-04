@@ -54,6 +54,49 @@ static const float PI           = 3.14159265358979f;
 #define RESTIR_DI_DEBUG_WEIGHT         3u
 #define RESTIR_DI_DEBUG_VISIBILITY_AGE 4u
 
+// ---------------------------------------------------------------------------
+// Ray-debug RECORD layout. ONE definition for three readers: the writer
+// (BakedGI_RayDebug.hlsl), the viewer (BakedGI_Debug.hlsl) and the CPU readback
+// (BakedGI::kRayRecordF4 in BakedGI.h). This header is compiled from source on
+// both sides, so the GPU and the CPU cannot disagree about the stride.
+//
+// A record is 8 float4 = 128 B. The first six float4 keep the offsets and the
+// meanings they had at the 6-float4 layout, so every existing reader is
+// unchanged. rec6 and rec7 carry the SECONDARY ray — the shadow ray that the
+// gather hit fires toward the active delta direction W:
+//
+//   rec0 = (gather direction.xyz, hit distance; 1e4 = miss)
+//   rec1 = (diffuse albedo.rgb, NdotD)
+//   rec2 = (L.rgb, Vhit)
+//   rec3 = (Efb.rgb, status + 4 * sourceRayIndex)   status packed, see BakedGI.hlsli
+//   rec4 = (hit normal.xyz, hit instance index; -1 = no surface)
+//   rec5 = (hit world pos.xyz, hit primitive index; -1 = no surface)
+//   rec6 = (secondary ray payload.xyz, secondary ray status)
+//   rec7 = (secondary distance, secondary instance, secondary primitive, 0)
+//
+// rec6.xyz depends on the secondary status:
+//   NONE     zero. No secondary ray was traced: the record is not shaded, or
+//            NdotD <= 0, so the bake fires no shadow ray (BakedGI_Bake.hlsl).
+//   OPEN     the unit active delta direction W, the direction the ray was traced
+//            toward. Vhit is 1. Nothing was hit.
+//   BLOCKED  the world position of the first committed hit. Vhit is 0.
+//
+// rec7 uses -1 in all three slots when it carries no value (NONE and OPEN).
+// -1 rather than 0: instance 0 is a legal instance, distance 0 is a legal
+// distance, and a reader must be able to tell "none" from "the first one".
+//
+// The payload exists so a white Vhit can be checked without trusting it. W is
+// STORED, not re-derived in the viewer, because the SUN source's W comes from
+// the replayed hour state, which the viewer does not receive; a derivation
+// there would need a new FrameConstants field.
+#define BAKED_GI_RAY_RECORD_F4 8u
+
+// Secondary ray status, in rec6.w. Plain float, no packing: the field has room.
+// One definition for the writer, the viewer, the CPU readback and the log.
+#define BAKED_GI_RAY_SHADOW_NONE    0u
+#define BAKED_GI_RAY_SHADOW_OPEN    1u
+#define BAKED_GI_RAY_SHADOW_BLOCKED 2u
+
 // Core Frame Constants
 struct FrameConstants {
     ROW_MAJOR float4x4 viewProj;
@@ -142,7 +185,16 @@ struct FrameConstants {
                                     // 5 lit sky source, 6 lit sun source, 7 ray fan (one probe's gather rays),
                                     // 8 efb contribution (per-probe SH ball of R^k - R^0 for one bake term;
                                     //   the term is the UI's "Iteration" 1..3 — see bakedGIEfbIterSRVIndex)
-    uint   bakedGIResponseSRVIndex; // response table SRV (visibility rays / mean-V views)
+    // Per-probe raw SH9 SKY VISIBILITY: 9 floats for each probe, stride 4 B.
+    // StructuredBuffer<float>, written by the visibility bake and read by the two
+    // V views (bakedGIDebugView 3 and 4). It is the ONE source of the V the fold
+    // multiplies, so no response-table slot carries a visibility any more.
+    //
+    // 0xFFFFFFFF means "no SH data": no bake has run, or a Probes/ cache load
+    // restored the tables without this section. 0 is a legal descriptor index, so
+    // it cannot mean "none" — both views early-out on the sentinel before they
+    // declare the SRV. BakedGI::kSkyVisNoSRV is the C++ spelling.
+    uint   bakedGISkyVisSRVIndex;
     float  bakedGIDebugScale;       // lit-ball gain (DC-normalized shading multiplier)
 
     // Fullscreen backface-contamination map (BakedGI_Debug.hlsl LeakPS,
@@ -196,22 +248,33 @@ struct FrameConstants {
                                     // the white view stays directly comparable with
                                     // the normal-albedo one.
 
-    // Ray Fan debug view (bakedGIDebugView == 7): the 64 gather rays of the
-    // SUN-DOMINANT direction of ONE probe, read from the ray-debug buffer.
-    // These are the same records the text dump ranks, so the fan and the dump
-    // always describe one probe. Appended last on purpose: every earlier offset
-    // is unchanged.
+    // Ray Fan debug view (bakedGIDebugView == 7): the 64 gather rays of ONE delta
+    // record of ONE probe, read from the ray-debug buffer. The record is one the
+    // dump replayed: the sun hour state, or one of the fibonacci sky bins
+    // (bakedGIRayDebugSource names which). A SKY dump records ALL bins, so the sky
+    // bin is chosen for display and needs no second dump. These are the same records
+    // the text dump ranks, so the fan and the dump always describe one probe.
+    // Appended last on purpose: every earlier offset is unchanged.
     uint  bakedGIRayDebugSRVIndex;  // StructuredBuffer<float4>: the ray records, then the re-accumulated table.
                                     // 0xFFFFFFFF = no ray-debug buffer yet. 0 is a legal descriptor index,
                                     // so it cannot mean "none": the fan shader early-outs on the sentinel.
     uint  bakedGIRayDebugProbe;     // the probe the fan belongs to (matches the dump)
     uint  bakedGIRayDebugChannel;   // 0 status, 1 albedo, 2 NdotD, 3 Vhit, 4 Efb, 5 distance,
-                                    // 6 direct-vs-Efb, 7 DeltaDirections. Channel 7 also swaps the
-                                    // GEOMETRY: the 16 fibonacci delta directions at this probe
-                                    // instead of the 64 gather rays, grayscale by the sun fold's
-                                    // weight, white = the direction the fan itself draws. It reads
-                                    // no record, so it needs no dump. See
-                                    // BakedGI::kRayFanChannelDeltaDirs.
+                                    // 6 direct-vs-Efb, 7 DeltaDirections, 8 VHit Ray.
+                                    // Channel 7 also swaps the GEOMETRY: the 16 fibonacci delta
+                                    // directions at this probe instead of the 64 gather rays,
+                                    // grayscale by the sun fold's weight, white = the direction
+                                    // the fan itself draws. It reads no record, so it needs no
+                                    // dump. See BakedGI::kRayFanChannelDeltaDirs.
+                                    // Channel 8 also swaps the geometry, but it READS records: one
+                                    // thin segment for each shaded gather ray, from that ray's hit
+                                    // toward the active delta direction its shadow ray was traced
+                                    // toward. It draws rec5, rec6 and rec7. Cyan = the secondary
+                                    // ray is open, red = it stopped at the recorded first hit. See
+                                    // BakedGI::kRayFanChannelVHitRay.
+                                    // The Sky V_i channel that used to sit at 9 is REMOVED with
+                                    // the per-bin cone visibility it coloured. 0..8 are the
+                                    // whole set, and their numbers did not change.
     float bakedGIRayDebugLength;    // ray length cap, in probe spacings
     uint  bakedGIRayDebugValid;     // 1 = do not dim. The probe is valid, or its validity is
                                     // unknown (the meta read failed). 0 = the probe is KNOWN
@@ -220,10 +283,14 @@ struct FrameConstants {
                                     // carries to a later probe. The Application fills this again
                                     // right after the dump, so the bound frame has the verdict.
     uint  bakedGIRayDebugDir;       // which record GROUP of the ray-debug buffer the fan draws.
-                                    // The sun replay writes group 0 only, so this is always 0.
-                                    // It stays a field because the fan still selects a group and
-                                    // the binned replay path uses it. The per-bin argmax that used
-                                    // to pick it died with the 16-bin sun kernel.
+                                    // This is the DISPLAYED group, not the dump's request: SUN
+                                    // always 0 (the sun table holds one record for each probe),
+                                    // SKY the displayed fibonacci bin, which the panel's bin
+                                    // browser can move without a dump. 0xFFFFFFFF means "no
+                                    // dump", and the fan rejects it the same way it rejects a
+                                    // group out of range. Published by
+                                    // Application::FillRayDebugConstants from BakedGI, never from
+                                    // the UI selection directly.
 
     // Sky-quadrature weights, read by the Ray Fan's DeltaDirections channel
     // (bakedGIRayDebugChannel == 7). One entry for each BakedGI::kDirections /
@@ -306,17 +373,18 @@ struct FrameConstants {
 
     // Cage Trace (bakedGIDebugView == 9) gather-ray OVERRIDE.
     //
-    // By itself the view derives its ray from the records: the sun-dominant
-    // direction's largest carried feedback among the rays the feedback DOMINATES.
-    // That derivation is a ranking, and a ranking is the wrong tool when the ray
-    // being hunted is not the brightest one. This field lets the UI name the ray
-    // instead.
+    // By itself the view derives its ray from the records: the largest carried
+    // feedback among the rays the feedback DOMINATES, inside the record group the
+    // dump wrote. That derivation is a ranking, and a ranking is the wrong tool when
+    // the ray being hunted is not the brightest one. This field lets the UI name the
+    // ray instead.
     //
     // 0..BakedGI::kDebugGatherRays-1 = draw that gather-ray RECORD INDEX of the
-    // sun-dominant direction. BakedGI::kNoRayPick (0xFFFFFFFF) = no override: the
-    // shader keeps its own argmax. A ray index may be 0, so 0 cannot mean "none".
-    // This is a RECORD index, not a source gather-ray index: the debug pass
-    // replays BakedGI::kBakeGatherRays rays and keeps kDebugGatherRays records.
+    // dumped record group (bakedGIRayDebugDir). BakedGI::kNoRayPick (0xFFFFFFFF) =
+    // no override: the shader keeps its own argmax. A ray index may be 0, so 0
+    // cannot mean "none". This is a RECORD index, not a source gather-ray index: the
+    // debug pass replays BakedGI::kBakeGatherRays rays and keeps kDebugGatherRays
+    // records.
     //
     // The pool the UI enumerates is built on the CPU from the dump's own
     // readback and holds exactly the rays where the feedback term beats the
@@ -328,8 +396,8 @@ struct FrameConstants {
     // disagree on the last bit of a luminance and silently draw nothing. The
     // regime is reported in the colour instead: WHITE probe->hit segment = the
     // feedback dominates at that hit, MAGENTA = it does not, which is what an
-    // override from another direction's pool (the sun moved since the dump)
-    // looks like.
+    // override out of another dump's pool (the probe, the source or the bin changed
+    // since the dump) looks like.
     //
     // Appended last on purpose: every earlier offset is unchanged.
     uint bakedGIRayDebugRay;
@@ -372,10 +440,36 @@ struct FrameConstants {
     // Runtime data eligibility for FILLED probes. The receiver shaders accept
     // FILLED only when this flag is one. Raw A/B mode publishes zero, so FILLED
     // meta bits stay on disk but cannot enter a runtime cage.
-    // Appended after the float4. Measured on both sides: offset 1168 and size
-    // 1172. The upload buffer rounds the byte count to 256, so the constant-buffer
-    // binding covers this field.
+    // Appended after the float4. Measured on both sides: offset 1168. The upload
+    // buffer rounds the byte count to 256, so the constant-buffer binding covers
+    // this field.
     uint bakedGIUseFilled;          // 1168: 1 = runtime cage accepts FILLED probes
+
+    // The delta source the last dump replayed, and the sky bin ON DISPLAY. These
+    // describe the RECORDS IN THE BUFFER, not the UI selection, so a label can
+    // never name a source other than the one the bytes came from. A UI change of
+    // the source selection does not touch them; only a completed dump does.
+    //
+    //   bakedGIRayDebugSource  0 = SUN (the shipped replay), 1 = SKY. Any other
+    //                          value is read as SUN.
+    //   bakedGIRayDebugSkyDir  0..BAKED_GI_DIRECTIONS-1 in SKY mode. 0xFFFFFFFF
+    //                          means "no dump", or "the SUN source", and the
+    //                          DeltaDirections channel then highlights no bin.
+    //
+    // A SKY dump records all BAKED_GI_DIRECTIONS bins, so the displayed bin is a
+    // VIEW choice, not a property of the dump. The panel's bin browser moves it,
+    // and the cyan marker of the DeltaDirections channel follows it, so the marker
+    // and the records on screen always name one bin.
+    // Read by the Ray Fan's DeltaDirections channel (bakedGIRayDebugChannel == 7)
+    // and by the UI text. These uints are appended after the 4-byte scalar at 1168,
+    // so none of them needs a pad: HLSL places a scalar on a 4-byte boundary and no
+    // vector crosses a 16-byte boundary here. Measured on both sides:
+    // bakedGIUseFilled 1168, bakedGIRayDebugSource 1172, bakedGIRayDebugSkyDir
+    // 1176, sizeof 1180. The Sky V_i cursor that used to sit at 1180 is REMOVED
+    // with the channel it marked. Re-measure both sides when a field BEFORE these
+    // changes size or count.
+    uint bakedGIRayDebugSource;     // 1172: 0 = SUN, 1 = SKY — the dumped source
+    uint bakedGIRayDebugSkyDir;     // 1176: the displayed sky bin, or 0xFFFFFFFF
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -462,17 +556,35 @@ struct BakedGIUpdateParams {
     float spacing;
     uint  dimX, dimY, dimZ;
     uint  sunResponseSRVIdx; // SRV: per-probe sun response, stride BAKED_GI_SUN_STATES
+
+    // ---- Sky visibility source for the fold's V ----
+    //
+    // APPENDED after the fields above, so every earlier offset is unchanged.
+    // Measured on both sides: skyVisSHSRVIdx 68, skyVisMode 72, sizeof 76 (19
+    // dwords). The shared root slot 12 is sized by the 30-dword DDGIParams, so
+    // this struct does not grow the slot.
+    //
+    // The buffer holds 9 raw SH9 coefficients for each probe, stride 4 bytes, so
+    // 36 B for each probe. It is the sky visibility projected from the SAME
+    // 16x16x4 rays the depth-moment map uses, with no cosine A_l factor. Read it
+    // only when skyVisMode is 0: the CPU sends 0 only when the buffer exists, so
+    // index 0 never reaches a read.
+    uint  skyVisSHSRVIdx; // SRV: per-probe sky-visibility SH9, stride 9 floats
+    uint  skyVisMode;     // 0 = SH9 buffer (the default), 1 = V = 0 (no buffer read).
+                          // These are BakedGI::SkyVisMode's values. There is no third
+                          // mode: the per-bin cone fraction it used to select is gone.
 };
 
 
 // Root constants for the on-demand ray-debug dispatch. DEBUG ONLY — this pass
 // never runs in a normal frame. One 64-thread group for each direction of ONE
 // probe; lane 0 replays the 64 gather rays of BakedGI_Bake.hlsl and writes one
-// 64 B record for each ray. The re-accumulated table shares the same buffer,
-// after the records. See Shaders/BakedGI_RayDebug.hlsl.
+// 128 B record for each ray. The re-accumulated table shares the same buffer,
+// after the records. See Shaders/BakedGI_RayDebug.hlsl and
+// BAKED_GI_RAY_RECORD_F4 above for the record layout.
 //
 // The shared root-constants slot (root parameter 12) is sized by DDGIParams,
-// which is 30 dwords. This struct is 17 dwords, so the slot does not change.
+// which is 30 dwords. This struct is 18 dwords, so the slot does not change.
 struct BakedGIRayDebugParams {
     float gridMinX, gridMinY, gridMinZ;
     float spacing;
@@ -481,10 +593,10 @@ struct BakedGIRayDebugParams {
     uint  rayRecUAVIdx;        // RW: ray records, then the re-accumulated table
     uint  responsePrevSRVIdx;  // SRV: previous bake iteration's table (the Efb source)
     uint  visSRVIdx;           // SRV: per-probe octahedral depth moments
-    // The fan replays ONE trace toward the sun at hour state `sunState`, exactly as
-    // the bake's sun pass runs it, so the self-check compares against that state's
-    // record of the sun response table. There is no binned variant: the 16 sky
-    // directions are not something the fan traces.
+    // The fan replays ONE trace toward ONE delta source, exactly as the bake runs
+    // it, so the self-check compares against that source's record: the sun table's
+    // hour state when source = SUN, the sky table's fibonacci bin when source =
+    // SKY. `sunDir` is read only by the SUN source.
     float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction
 
     // Same field, same meaning, same expression as BakedGIBakeParams::seedDir.
@@ -492,14 +604,44 @@ struct BakedGIRayDebugParams {
     // seeds from a bin while the replay seeds from dir 0 traces other rays and the
     // self-check reports MISMATCH for a reason that is not a defect. Both sides
     // read one caller variable, never two copies.
-    // 64 B = 16 dwords. Measured: dxc reports this member at 60 and the struct at
-    // 64, and offsetof agrees.
+    //
+    // SUN source: the hour state index. SKY source: the field is inert. The sky
+    // bake seeds bin j from j, and each group of a SKY dispatch IS one bin, so the
+    // shader seeds every group from its own group index. A single shared index
+    // would seed all 16 groups from one bin, and 15 of them would report MISMATCH
+    // for a reason that is not a defect.
     uint  seedDir;
-    // Which hour state to replay, 0..BakedGI::kSunStates-1.
-    // Measured with dxc after sunMode was removed: seedDir 56, sunState 60,
-    // sizeof 64 (16 dwords). The root-constant slot is sized by the 30-dword
-    // DDGIParams, so it still fits.
+    // Which hour state to replay, 0..BakedGI::kSunStates-1. READ ONLY WHEN
+    // `source` IS SUN. It is still written on a SKY dump, so the value is never
+    // an uninitialised field.
     uint  sunState;
+
+    // --- WHICH DELTA SOURCE THE DUMP REPLAYS ---
+    //
+    // The bake stores TWO response tables for each probe. The SKY table has
+    // BAKED_GI_DIRECTIONS (16) records, one for each fibonacci quadrature
+    // direction. The SUN table has BAKED_GI_SUN_STATES (17) records, one for each
+    // equinox hour state. A replay must name the table it reads, because the same
+    // numeric index means a different record in each one.
+    //
+    //   source = 0  SUN  the shipped replay: one hour state, its own direction and
+    //                    its own seed. Bits-for-bit the behaviour before this field.
+    //   source = 1  SKY  EVERY fibonacci direction: group d traces toward
+    //                    BakedGIDeltaDirection(d) and compares against that bin's
+    //                    sky record. One dispatch therefore fills all 16 record
+    //                    groups, so the UI can show any bin without a new dump.
+    //
+    // Any value other than 1 is read as SUN, so the default struct (all zero)
+    // keeps the shipped path.
+    //
+    // The two spellings are BAKED_GI_RAYDEBUG_SOURCE_SUN / _SKY (BakedGI.hlsli)
+    // in the shaders and BakedGI::RayDebugSource (BakedGI.h) in C++.
+    uint  source;
+
+    // 68 B = 17 dwords. Measured with dxc: seedDir 56, sunState 60, source 64,
+    // sizeof 68. The root-constant slot is sized by the 30-dword DDGIParams, so it
+    // still fits. There is no sky-bin field: a SKY dispatch takes the bin from the
+    // group index, which is why one dispatch can fill all 16 groups.
 };
 
 // Root constants for the visibility-moment bake dispatch (step 3). One
@@ -512,6 +654,11 @@ struct BakedGIVisParams {
     uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
     uint  metaUAVIdx;       // RW output: per-probe validity bits (DDGI classification
                             // + old-criteria diagnostic bit — see BakedGI.hlsli)
+    // APPENDED: RW output for the sky-visibility SH9 A/B, 9 floats for each probe
+    // (stride 4 bytes, probeCount * 9 elements). The visibility pass writes it
+    // from the same rays that fill the moments, so it costs no extra traversal.
+    // Measured with dxc: offset 40, sizeof 44 (11 dwords) — under the shared slot.
+    uint  skyVisSHUAVIdx;
 };
 
 // Root constants for the per-term response-ball fold (debug view 8). One

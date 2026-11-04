@@ -14,6 +14,11 @@
 // neighbor — BakedGIWrapVisTexel) makes the query's manual bilinear
 // continuous across the octahedral fold.
 //
+// The same 4 rays also fill the SKY-VISIBILITY SH9 A/B buffer: a binary
+// open/blocked value for each ray, projected into 9 raw SH9 coefficients for the
+// probe (see BAKED_GI_SKYVIS_SH_COEFFS in BakedGI.hlsli). The projection reuses
+// the traversal below, so it costs no extra ray and no extra alpha-mask draw.
+//
 // Pure geometry — no lighting, no TOD dependence, baked once alongside the
 // transport bake (dispatched from BakedGI::RecordBake on the same list).
 // =============================================================================
@@ -27,7 +32,17 @@ ConstantBuffer<BakedGIVisParams>  Vis     : register(b2);
 
 #define VIS_RAYS_PER_TEXEL 4
 
+// 4pi / N with equal weight for each of the 16x16x4 rays. A fully open probe
+// then reconstructs to 1: (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2 = 1.
+#define SKYVIS_SH_NORMALIZE \
+    (4.0f * PI / (float)(BAKED_GI_VIS_RES * BAKED_GI_VIS_RES * VIS_RAYS_PER_TEXEL))
+
 groupshared float2 g_Moments[BAKED_GI_VIS_RES][BAKED_GI_VIS_RES];
+
+// One row for each of the 256 threads, one column for each raw SH coefficient.
+// 256 * 9 * 4 B = 9,216 B of groupshared, a fixed size that no probe count
+// changes.
+groupshared float g_SkyVisSH[BAKED_GI_VIS_RES * BAKED_GI_VIS_RES][BAKED_GI_SKYVIS_SH_COEFFS];
 
 [numthreads(BAKED_GI_VIS_RES, BAKED_GI_VIS_RES, 1)]
 void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
@@ -146,6 +161,8 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
     };
 
     float m1 = 0.0f, m2 = 0.0f;
+    // Raw SH9 sums of the binary sky visibility of these same 4 rays.
+    float shSum[BAKED_GI_SKYVIS_SH_COEFFS] = (float[BAKED_GI_SKYVIS_SH_COEFFS])0;
     [loop]
     for (uint r = 0; r < VIS_RAYS_PER_TEXEL; ++r)
     {
@@ -168,13 +185,28 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
         // a 0.5% sky weight on a seam texel explodes the variance and the
         // Chebyshev bound passes the probe (jagged seam leak, ProbeGI3.rdc).
         const float skyDist = BAKED_GI_SKY_DISTANCE_SPACINGS * Vis.spacing;
-        float d = (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
-                    ? min(q.CommittedRayT(), skyDist)
-                    : skyDist;
+        const bool  blocked = (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT);
+        float d = blocked ? min(q.CommittedRayT(), skyDist) : skyDist;
         m1 += d;
         m2 += d * d;
+
+        // Sky visibility of the SAME ray, as a binary value with the cone V_i
+        // rule: any committed triangle blocks. The scene holds triangle geometry
+        // only, so this equals the cone test's `COMMITTED_NOTHING` here. The
+        // moment distance clamp above takes no part in this decision, and no
+        // second traversal happens.
+        const float vis = blocked ? 0.0f : 1.0f;
+        float shBasis[BAKED_GI_SKYVIS_SH_COEFFS];
+        EvalSH9Basis(dir, shBasis);
+        [unroll]
+        for (uint lm = 0; lm < BAKED_GI_SKYVIS_SH_COEFFS; ++lm)
+            shSum[lm] += vis * shBasis[lm];
     }
     g_Moments[gt.y][gt.x] = float2(m1, m2) / (float)VIS_RAYS_PER_TEXEL;
+
+    [unroll]
+    for (uint sl = 0; sl < BAKED_GI_SKYVIS_SH_COEFFS; ++sl)
+        g_SkyVisSH[gt.y * BAKED_GI_VIS_RES + gt.x][sl] = shSum[sl];
 
     GroupMemoryBarrierWithGroupSync();
 
@@ -189,5 +221,26 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
         int2 c  = int2((int)(i % BAKED_GI_VIS_PAD) - 1, (int)(i / BAKED_GI_VIS_PAD) - 1); // [-1,16]
         int2 ic = BakedGIWrapVisTexel(c);
         visOut[probeBase + i] = g_Moments[ic.y][ic.x];
+    }
+
+    // --- Sky-visibility SH9: one lane for each coefficient ---
+    //
+    // Lanes (0,0)..(0,8) each own ONE coefficient, sum the 256 groupshared rows
+    // and write their element once. No element is written twice, so the write is
+    // race-free without an atomic, and every probe gets all 9 values — a probe
+    // with no visible ray writes 9 zeros rather than nothing.
+    //
+    // The barrier above orders the groupshared writes. The `probe >= probeCount`
+    // return is group-uniform, so no group reaches this line with a partly
+    // written table.
+    RWStructuredBuffer<float> skyVisSHOut = ResourceDescriptorHeap[Vis.skyVisSHUAVIdx];
+    if (gt.x == 0u && gt.y < BAKED_GI_SKYVIS_SH_COEFFS)
+    {
+        const uint  lm  = gt.y;
+        float acc = 0.0f;
+        [loop]
+        for (uint t = 0; t < BAKED_GI_VIS_RES * BAKED_GI_VIS_RES; ++t)
+            acc += g_SkyVisSH[t][lm];
+        skyVisSHOut[probe * BAKED_GI_SKYVIS_SH_COEFFS + lm] = acc * SKYVIS_SH_NORMALIZE;
     }
 }

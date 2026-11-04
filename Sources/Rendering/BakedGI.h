@@ -12,20 +12,24 @@ class Model;
 // Exclusive indirect-GI source (either this or ReSTIR GI, never both). The
 // bake computes, per probe and per delta direction (16 fibonacci-hemisphere
 // dirs), the INDIRECT-ONLY directional-irradiance SH9 response to a unit
-// delta light plus the direct-delta visibility V_i (multi-bounce via a
-// series-expansion ping-pong with exact direct light at every trace hit —
-// the retrace-sun discipline). Per frame, a cheap update pass folds the live
-// sky (cubemap quadrature) and sun (direction-kernel interpolation) into a
-// lit-probe buffer. The deferred pass fetches it with a DDGI-style weighted
-// blend: trilinear x backface x Chebyshev occlusion from per-probe octahedral
-// depth-moment maps (step 3), with the unified self-shadow bias. See
-// docs/task017-baked-gi-probe-system-design.md.
+// delta light (multi-bounce via a series-expansion ping-pong with exact direct
+// light at every trace hit — the retrace-sun discipline). The DIRECT sky
+// visibility the fold needs is a separate per-probe SH9 field, projected by the
+// same visibility pass that builds the depth moments. Per frame, a cheap update
+// pass folds the live sky (cubemap quadrature) and sun (direction-kernel
+// interpolation) into a lit-probe buffer. The deferred pass fetches it with a
+// DDGI-style weighted blend: trilinear x backface x Chebyshev occlusion from
+// per-probe octahedral depth-moment maps (step 3), with the unified self-shadow
+// bias. See docs/task017-baked-gi-probe-system-design.md.
 // =============================================================================
 class BakedGI
 {
 public:
     static constexpr uint32_t kDirections      = 16; // delta/sky-quadrature directions
-    static constexpr uint32_t kResponseFloat4s = 10; // per (probe, dir): 9 SH9 RGB + V_i
+    // float4s for each (probe, direction) record: 9 SH9 RGB and nothing else.
+    // It was 10 until 2026-11-04; slot 9 held the per-bin cone visibility V_i.
+    // That scalar is gone, and so is the 8-ray cone that produced it.
+    static constexpr uint32_t kResponseFloat4s = 9;
 
     // ---- Equinox hour states: the sun direction set ----
     //
@@ -123,11 +127,28 @@ public:
     // hit's IDENTITY (normal, world position, instance index, primitive index),
     // which this layout used to discard — so naming the surface behind a coloured
     // ray meant reproducing EvalResponseIndirect offline and inferring the normal
-    // from NdotD alone. rec0..rec3 keep their meaning AND their offsets; only the
-    // STRIDE changed. One stride, three files: this one, RAY_RECORD_F4
-    // (BakedGI_RayDebug.hlsl, the writer) and BAKED_GI_RAYFAN_REC_F4
-    // (BakedGI_Debug.hlsl, the viewer).
-    static constexpr uint32_t kRayRecordF4   = 6;   // float4s for each ray record (96 B)
+    // from NdotD alone. 6 -> 8 on 2026-11-03: rec6 and rec7 add the SECONDARY
+    // visibility ray (endpoint or direction, status, distance, instance,
+    // primitive), so a white Vhit can be checked instead of trusted.
+    // rec0..rec5 keep their meaning AND their offsets; only the STRIDE changed.
+    // BAKED_GI_RAY_RECORD_F4 (SharedTypes.h) is the ONE definition, and both
+    // shader files read it too, so the writer, the viewer and this readback cannot
+    // drift.
+    static constexpr uint32_t kRayRecordF4   = BAKED_GI_RAY_RECORD_F4; // 8 float4 = 128 B
+    static constexpr uint64_t kRayRecordBytes = (uint64_t)kRayRecordF4 * 16u;
+
+    // Float4 index of each record field the CPU readback names. The readout used
+    // to spell these as `rec + 8`, `rec + 16`, `rec + 20`; one table here means a
+    // stride or field change has one place to land, and a reader can see which
+    // float4 it is looking at.
+    static constexpr uint32_t kRayRecF4GatherDir  = 0u; // (gdir.xyz, hit distance)
+    static constexpr uint32_t kRayRecF4Albedo     = 1u; // (diffAlbedo.rgb, NdotD)
+    static constexpr uint32_t kRayRecF4L          = 2u; // (L.rgb, Vhit)
+    static constexpr uint32_t kRayRecF4Efb        = 3u; // (Efb.rgb, packed status + 4 * ray)
+    static constexpr uint32_t kRayRecF4HitNormal  = 4u; // (hit normal.xyz, instance; -1 = none)
+    static constexpr uint32_t kRayRecF4HitPos     = 5u; // (hit world pos.xyz, primitive; -1 = none)
+    static constexpr uint32_t kRayRecF4Shadow     = 6u; // (payload.xyz, secondary status)
+    static constexpr uint32_t kRayRecF4ShadowInfo = 7u; // (distance, instance, primitive, 0)
     // The re-accumulated table sits after the records in the same buffer, so one
     // UAV serves both outputs. Layout: [records][table], both float4.
     // The record stride is the DEBUG count: keeping the buffer at its old size
@@ -212,6 +233,100 @@ public:
         return m_UseDilatedTransport && m_DilatedTransportValid;
     }
 
+    // ---------------------------------------------------------------------
+    // SKY VISIBILITY MODE: what supplies the V in the runtime fold's
+    // `A_l Y_lm(W_i) V(W_i)` term.
+    //
+    //   SH9           raw SH9 visibility for each probe, projected from the
+    //                 SAME 16x16x4 = 1024 rays the depth-moment bake already
+    //                 traces, and reconstructed at W_i. Free in ray cost. The
+    //                 DEFAULT, and the only mode that produces a V.
+    //   NoVisibility  V = 0. A diagnostic: it removes only the direct
+    //                 first-bounce sky term and keeps the bounces R_i and the
+    //                 sun term. The image difference isolates how much the V
+    //                 term contributes.
+    //
+    // The per-bin cone estimator that used to be the default is REMOVED: one
+    // scalar for each (probe, bin) from 8 shadow rays, stored in response slot
+    // 9. It cost 8 rays for each bin and could not resolve an aperture inside a
+    // cell. The response record is 9 float4 now.
+    //
+    // The selection is runtime state, so a switch needs no rebake — only a probe
+    // fold, which is the Application's call because the live lit table depends on
+    // it (the same contract as SetUseDilatedTransport).
+    //
+    // The SH buffer exists only after a bake that ran the visibility dispatch.
+    // A Probes/ cache load restores no SH section, so HasSkyVisSH() is false
+    // there and GetEffectiveSkyVisMode() falls back to NoVisibility.
+    // NoVisibility needs no bake data and never falls back.
+    //
+    // 36 B for each probe = 418,176 B at 11,616 probes, 4.72 MB at the
+    // kMaxProbeCount cap.
+    // ---------------------------------------------------------------------
+    static constexpr uint32_t kSkyVisSHCoeffs = 9; // raw SH9 scalars for each probe
+
+    // "No SH data" sentinel for FrameConstants::bakedGISkyVisSRVIndex. 0 is a
+    // legal descriptor index, so it cannot mean "none": the two V debug views
+    // early-out on this value before they declare the SRV.
+    static constexpr uint32_t kSkyVisNoSRV = 0xFFFFFFFFu;
+
+    // The values are also the shader's `skyVisMode` dwords, so one numbering
+    // serves the enum, the constant buffer and BakedGI_Update.hlsl. Keep the
+    // three in step: the shader tests 0 for the SH buffer.
+    enum class SkyVisMode : uint32_t
+    {
+        SH9          = 0u, // BakedGISkyVisSH (BakedGI_Visibility.hlsl). The default.
+        NoVisibility = 1u, // V = 0 for the direct sky term, diagnostic only
+    };
+
+    // The same spelling for the UI and for a log line. One helper, so the text
+    // and the number cannot drift.
+    static const char* SkyVisModeName(SkyVisMode mode)
+    {
+        switch (mode)
+        {
+        case SkyVisMode::NoVisibility: return "No Sky Visibility";
+        case SkyVisMode::SH9:
+        default:                       return "SH9";
+        }
+    }
+
+    static constexpr uint32_t kSkyVisModeCount = 2u;
+
+    // Changes only the selection. The Application owns fold invalidation.
+    void              SetSkyVisMode(SkyVisMode mode) { m_SkyVisMode = mode; }
+    SkyVisMode        GetSkyVisMode() const { return m_SkyVisMode; }
+    // True when the resident bake carries SH coefficients. False before any
+    // bake, after a cache load, and after a bake whose buffer could not be
+    // created.
+    bool              HasSkyVisSH() const { return m_SkyVisSHValid; }
+    // The mode the FOLD will actually use, and the mode the UI must report.
+    // A selected SH9 with no data degrades to V = 0 rather than reading an
+    // absent buffer, and there is no other source left to degrade to.
+    // NoVisibility always survives: it reads no bake data at all.
+    SkyVisMode        GetEffectiveSkyVisMode() const
+    {
+        if (m_SkyVisMode == SkyVisMode::SH9 && !m_SkyVisSHValid)
+            return SkyVisMode::NoVisibility;
+        return m_SkyVisMode;
+    }
+    // True only when the fold reads the SH buffer.
+    bool              IsUsingSkyVisSH() const
+    {
+        return GetEffectiveSkyVisMode() == SkyVisMode::SH9;
+    }
+    // The SRV index of the SH buffer, or kSkyVisNoSRV when the resident bake has
+    // no SH section. Callers must test for the sentinel: 0 is a legal descriptor.
+    uint32_t          GetSkyVisSHSRVIndex() const
+    {
+        return m_SkyVisSHValid ? (uint32_t)m_SkyVisSH.srvIndex : kSkyVisNoSRV;
+    }
+    // Bytes the SH buffer costs for the current grid. 0 before a bake.
+    uint64_t          GetSkyVisSHBytes() const
+    {
+        return m_SkyVisSHValid ? (uint64_t)m_ProbeCount * kSkyVisSHCoeffs * sizeof(float) : 0ull;
+    }
+
     // Raw getters above serve ray debug and Efb. Only the runtime fold uses
     // these two update getters. They select dilated finals only when the user
     // selected dilated transport and a positive-count bake created the tables.
@@ -239,6 +354,74 @@ public:
     // "is the sun term available for the frame I am about to draw" keep one
     // expression, and a future partial-coverage table has a place to say so.
     bool              HasSunResponseFor(float hour) const;
+    // ---------------------------------------------------------------------
+    // WHICH BAKED DELTA SOURCE a ray-debug dump replays.
+    //
+    // The bake stores TWO response tables for each probe. The sky table has
+    // kDirections (16) records, one for each fibonacci quadrature direction. The sun
+    // table has kSunStates (17) records, one for each equinox hour state. The two
+    // have different strides, so the same integer means a different record in each
+    // one, and a replay must name the table it reads.
+    //
+    //   Sun  the shipped replay. ONE hour state of the sun table, traced toward
+    //        that state's own direction, seeded from the state index. This was the
+    //        only path before the source split.
+    //   Sky  the SKY quadrature, ALL 16 fibonacci directions in one dispatch, each
+    //        traced toward BakedGIDeltaDirection(d) and seeded from d — the
+    //        expressions the sky transport bake itself uses. One dump therefore
+    //        fills all 16 record groups, and the panel's bin browser can show any
+    //        of them with no further dump.
+    //
+    // One value, not four: the source decides the table, the stride, the record
+    // index, the delta direction and the RNG seed TOGETHER.
+    //
+    // The numeric values are the shader's BAKED_GI_RAYDEBUG_SOURCE_SUN / _SKY
+    // (BakedGI.hlsli) and BakedGIRayDebugParams::source (SharedTypes.h). Do not
+    // renumber: 0 must stay the shipped sun behaviour.
+    // ---------------------------------------------------------------------
+    enum class RayDebugSource : uint32_t
+    {
+        Sun = 0u,
+        Sky = 1u,
+    };
+
+    // The same spelling for a log line or a UI label. One helper, so the text and
+    // the number cannot drift.
+    static const char* RayDebugSourceName(RayDebugSource source)
+    {
+        return (source == RayDebugSource::Sky) ? "SKY" : "SUN";
+    }
+
+    // The same spelling for the SECONDARY ray status of a record (rec6.w). The
+    // three numbers are BAKED_GI_RAY_SHADOW_NONE / _OPEN / _BLOCKED
+    // (SharedTypes.h), which the shader writer and the shader viewer read too, so
+    // the log, the geometry and the pixels name one state. An unknown value is
+    // reported as "?" rather than folded into NONE: a record whose status is
+    // neither of the three is a writer defect and must not read as "no ray".
+    static const char* RayDebugShadowStatusName(float status)
+    {
+        if (status < 0.5f) return "none";
+        if (status < 1.5f) return "open";
+        if (status < 2.5f) return "blocked";
+        return "?";
+    }
+
+    // "No direction recorded" for the sky bin and for the fan's record group.
+    // 0xFFFFFFFF, because every index in 0..kDirections-1 is a real direction.
+    static constexpr uint32_t kRayDebugNoDir = 0xFFFFFFFFu;
+
+    // The fibonacci sky-quadrature direction set, mirrored from
+    // BakedGIDeltaDirection (BakedGI.hlsli:33-39). The replay passes the bin index
+    // to the shader and the shader computes the direction, so this mirror is not on
+    // the trace path. It exists to PRINT the direction the shader traces, and to
+    // hold the formula to the reference values that the assert below checks.
+    static DirectX::XMFLOAT3 DeltaDirection(uint32_t i);
+
+    // True when DeltaDirection reproduces the shader's own folded constants for
+    // direction 0 and direction 12. RecordRayDebug asserts it, so a formula drift
+    // fails the dump loudly instead of printing a direction the shader never used.
+    static bool VerifyDeltaDirectionMirror();
+
     // Ray-debug buffer (records + re-accumulated table). The Ray Fan view reads
     // the records. The buffer exists only after a dump.
     bool              HasRayDebugBuffer() const { return m_RayDebugBuf.resource != nullptr; }
@@ -247,6 +430,35 @@ public:
     // takes its probe from here, not from the UI field, so the fan and the text
     // always describe one probe.
     uint32_t          GetRayDebugProbe() const { return m_RayDebugProbe; }
+    // The delta source the last dump REPLAYED, and the sky bin ON DISPLAY. These
+    // name the records that are in the buffer now. The UI source selection is not
+    // an input to them: a changed source applies to the next dump, and until then
+    // the labels keep naming the source the bytes came from.
+    //
+    // The sky bin is different, and that is why it has a setter below. A SKY dump
+    // records EVERY bin, so the bin is a view choice on resident records, not a
+    // property of the dump.
+    RayDebugSource    GetRayDebugSource() const { return m_RayDebugSource; }
+    uint32_t          GetRayDebugSkyDirection() const { return m_RayDebugSkyDirection; }
+    // Shows another sky bin of the records already in the buffer. CPU state only:
+    // no dispatch, no readback, no wait, and no bake. Returns false when the call
+    // would describe records that do not exist — no SKY dump has run, or the bin is
+    // out of range — and leaves the displayed bin unchanged in that case.
+    bool              SetRayDebugSkyDirection(uint32_t dir);
+    // The hour state the last SUN dump replayed. Read by the labels so a label can
+    // not name a state the records were not traced from.
+    uint32_t          GetRayDebugSunState() const { return m_RayDebugSunState; }
+    // The record GROUP the fan, the labels and the Cage Trace must read: the
+    // DISPLAYED bin group for a SKY dump, group 0 for a SUN dump (the sun table
+    // holds one record for each probe, so the dump writes one group).
+    // kRayDebugNoDir when nothing is recorded, and the shader's direction guard
+    // rejects that value.
+    uint32_t          GetRayDebugDir() const
+    {
+        if (m_RayDebugSource != RayDebugSource::Sky)
+            return 0u;
+        return (m_RayDebugSkyDirection < kDirections) ? m_RayDebugSkyDirection : kRayDebugNoDir;
+    }
     // True only when the meta bit was READ and the dump's probe is invalid, so
     // the Ray Fan dims the L, Efb and regime channels. The verdict is bound to
     // the probe it describes, and RecordRayDebug clears it on every dump, so it
@@ -274,9 +486,12 @@ public:
     // the picture: the shader reads the records straight from its SRV, and a
     // disagreement between the two would be a defect, not a rounding.
     //
-    // The pool covers ALL kDirections, not just the direction of the moment, so
-    // moving the sun after a dump cannot leave the combo describing a direction
-    // the trace no longer draws.
+    // Its entries are read from the records of ONE group: the sun table's group 0
+    // for a SUN dump, and the displayed fibonacci bin's own group for a SKY dump
+    // (GetRayDebugDir). A SKY dump writes ALL 16 groups, so every sky bin has a
+    // filled pool. A SUN dump writes group 0 only, so groups 1..15 hold a fresh
+    // zeroed buffer and their lists are empty by construction, not by a failed
+    // rule.
     struct RayCandidate
     {
         uint32_t ray;       // the RECORD index inside that direction's fan (0..kDebugGatherRays-1)
@@ -370,17 +585,17 @@ public:
     // ---------------------------------------------------------------------
     // Ray-debug tool. DEBUG ONLY, on demand, off the normal frame path.
     //
-    // RecordRayDebug re-traces the 64 gather rays of ONE probe, for all 16
-    // directions, and appends a copy of that probe's stored table. It also
-    // appends the two copies to a readback buffer. The caller executes the
-    // list and waits (the BakeGIProbes pattern), then calls
-    // LogRayDebugReadout on the idle GPU.
+    // RecordRayDebug re-traces the gather rays of ONE probe and appends a copy of
+    // the stored records it replays. It also appends the two copies to a readback
+    // buffer. The caller executes the list and waits (the BakeGIProbes pattern),
+    // then calls LogRayDebugReadout on the idle GPU.
     //
-    // LogRayDebugReadout ranks the 16 directions by stored DC luminance and the
-    // 64 rays of that winner. Under method 3 it ranks the replayed sun state's
-    // rays and names no bin winner, because the 16 bins carry no sun weight.
-    // It also runs the self-check that compares the re-accumulated table with
-    // the stored table.
+    // ONE source at a time, from the two baked delta sources declared above, but a
+    // different NUMBER of records: a SUN dump replays one hour state and writes
+    // record group 0. A SKY dump replays EVERY fibonacci bin, so one dispatch fills
+    // all 16 groups and the panel can then show any bin with no second dump. Every
+    // record, label and self-check names its source, so a reader can not take a sky
+    // record for a sun record or the reverse.
     // ---------------------------------------------------------------------
     bool RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
                         ID3D12RootSignature* rootSignature,
@@ -391,14 +606,23 @@ public:
                         D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                         D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                         uint32_t probeIndex,
-                        // Replays ONE sun hour state, not the 16 sky directions.
-                        // sunState selects the state, and the direction and the
-                        // RNG seed both follow from it, exactly as the bake
-                        // derives them. A different state here replays a
-                        // different bake and the self-check reports MISMATCH —
-                        // which is a true report, not a defect to route around.
+                        // Which table to replay. Required, no default: a forgotten
+                        // argument must be a compile error, because the two sources
+                        // read different tables with different strides.
+                        RayDebugSource source,
+                        // The sky bin to SHOW when the dump finishes, 0..kDirections-1.
+                        // Read only when source is Sky, and clamped here. It does not
+                        // limit what is traced: a SKY dump records all kDirections
+                        // bins, so this is the initial display bin, not a filter.
+                        uint32_t skyDirection,
+                        // SUN source only: the hour state to replay,
+                        // 0..kSunStates-1. The direction and the RNG seed both
+                        // follow from it, exactly as the bake derives them. A
+                        // different state here replays a different bake and the
+                        // self-check reports MISMATCH — which is a true report, not
+                        // a defect to route around.
                         uint32_t sunState = 8u);
-    // Names the sun state the fan draws. Pass nullptr for a scene with no sun.
+    // Names the delta source the fan draws. Pass nullptr for a scene with no sun.
     // Do not add a default value: a forgotten argument would print "no sun" while
     // the fan draws a real one, and the log and the picture would disagree.
     void LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const;
@@ -425,6 +649,22 @@ public:
     // there, and both derive the count from the same basis count, so the draw
     // call cannot disagree with the geometry. Same shape as kCageInstances.
     static constexpr uint32_t kRayFanDeltaDirInstances = kDirections + 1u;
+
+    // Ray Fan colour channel that draws the SECONDARY visibility ray of each
+    // shaded gather ray instead of the gather ray: one segment from the hit toward
+    // the active delta direction W, CYAN when open (Vhit 1) and RED when blocked
+    // (Vhit 0, ending at the recorded first RT hit). It READS records, so it needs
+    // a dump. Its instance count is the record count, the same as every other
+    // record channel.
+    // Must match BAKED_GI_RAYFAN_CH_VHITRAY (BakedGI_Debug.hlsl) and the "VHit
+    // Ray" entry of the Ray Fan Channel combo (Application.cpp). Appended AFTER
+    // DeltaDirections on purpose: the renderer's instance-count branch tests 7, and
+    // renumbering would change a shipped draw path.
+    static constexpr uint32_t kRayFanChannelVHitRay = 8u;
+
+    // The Sky V_i channel that used to sit at 9 is REMOVED, together with the
+    // per-bin cone visibility it coloured and its cursor marker. Channels 0..8
+    // keep their numbers, so no shipped draw path moves.
 
     // ---------------------------------------------------------------------
     // Sun fold: the ONE definition of the hour -> two-state blend.
@@ -521,7 +761,7 @@ public:
     // from the format itself, so it is left as the human set it.
     static constexpr bool kProbeCacheEnabled = false;
 
-    // Disk cache (Probes/ — the ShaderCache pattern), format version 3.
+    // Disk cache (Probes/ — the ShaderCache pattern), format version 4.
     //
     // After a bake, FOUR outputs are read back on the same list
     // (RecordCacheReadback, before executing) and written to
@@ -532,7 +772,8 @@ public:
     //   4. the per-probe SUN table, all 17 hour states, appended.
     // Positive dilation counts append the final dilated sky and sun tables.
     // One file for all 17 states, which is the human's decision. Section 4 costs
-    // 17 x 10 float4 x 16 B = 2720 B for each probe.
+    // 17 x 9 float4 x 16 B = 2448 B for each probe. Version 4 dropped the tenth
+    // float4 of both response tables, so a version-3 file is rejected.
     //
     // A later RecordBake with the same grid config, the same state count and the
     // same latitude restores the state with plain buffer copies instead of 51
@@ -578,7 +819,7 @@ private:
     GPUBuffer m_Response[2];
     // Sun hour-state series. Ping-pong for the same reason as m_Response: each
     // iteration's feedback reads the previous one. Stride is kSunStates records
-    // per probe, so 17 x 160 B = 2720 B per probe per buffer.
+    // per probe, so 17 x 144 B = 2448 B per probe per buffer.
     GPUBuffer m_SunResponse[2];
     bool      m_SunResponseValid = false;
     uint32_t  m_FinalSunResponse = 0;
@@ -597,6 +838,16 @@ private:
     GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)
     GPUBuffer m_Meta;      // per-probe validity (bit 0)
     GPUBuffer m_Visibility; // per-probe octahedral 16x16 depth moments (padded 18x18, float2 (M1, M2))
+    // Sky-visibility SH9 mode (see SkyVisMode): 9 raw SH coefficients for each
+    // probe, stride 4 B. The visibility pass writes it from the same rays that
+    // fill the moments, so it shares that pass's lifetime: it is created with the
+    // probe buffers and a cache load marks it invalid, because the cache format
+    // carries no SH section.
+    GPUBuffer m_SkyVisSH;
+    bool      m_SkyVisSHValid = false;
+    // The SELECTION. The fold uses GetEffectiveSkyVisMode(), which can differ
+    // while an SH9 selection waits for a bake.
+    SkyVisMode m_SkyVisMode = SkyVisMode::SH9;
 
     // Per-bake-term capture, debug-only (see HasEfbBalls). m_ResponseIter holds
     // terms 0..kBakeIterations-2 — the LAST term's table is m_Response
@@ -628,10 +879,21 @@ private:
     GPUBuffer m_RayDebugBuf;                                   // GPU: records + re-accumulated table
     uint32_t m_RayDebugProbe = 0;
     // The readout compares against the SUN table, and it runs separately and later
-    // than the dump. It gates on m_SunResponseValid directly: a bake cannot
+    // than the dump. It gates on m_RayDebugSource directly: a bake cannot
     // interleave with a dump plus its readout, so the flag cannot change in
     // between and a second copy of it would only be a value to keep in sync.
-    // Which hour state the last dump replayed, so the readout compares against
+    //
+    // Which source the dump replayed, so the record, the readout and the fan all
+    // describe one table. Set on every dump, INCLUDING on the paths that fail
+    // after this point, so the member always names the buffer's semantics.
+    RayDebugSource m_RayDebugSource = RayDebugSource::Sun;
+    // The sky bin ON DISPLAY. A SKY dump records every bin, so this is a view
+    // choice: SetRayDebugSkyDirection moves it with CPU state only, and
+    // RecordRayDebug sets it to the bin the caller asked for so the display does
+    // not jump after a re-dump. kRayDebugNoDir before the first SKY dump, so a
+    // label cannot claim a bin that no record describes.
+    uint32_t m_RayDebugSkyDirection = kRayDebugNoDir;
+    // Which hour state the last SUN dump replayed, so the readout compares against
     // the right record of the sun table.
     uint32_t m_RayDebugSunState = 0u;
     // Written by LogRayDebugReadout, which is const, so these members are

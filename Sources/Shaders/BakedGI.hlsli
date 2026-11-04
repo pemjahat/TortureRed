@@ -7,10 +7,14 @@
 // Representation :
 //   Per probe and per delta direction W_i (16 fibonacci-hemisphere dirs), the
 //   bake stores the INDIRECT-ONLY directional-irradiance SH9 RGB response to a
-//   unit delta light at W_i, plus the direct-delta visibility V_i. The 16 records
-//   are the SKY quadrature basis:
-//     e_sky = sum_i wq * L_sky(W_i) * [ R_i  +  A_l Y_lm(W_i) V_i ]
+//   unit delta light at W_i. One record holds 9 float4 and nothing else — there
+//   is no visibility scalar in it. The 16 records are the SKY quadrature basis:
+//     e_sky = sum_i wq * L_sky(W_i) * [ R_i  +  A_l Y_lm(W_i) V(W_i) ]
 //             (sky bounces)              (occluded first-bounce sky)
+//   V(W_i) is the DIRECT sky visibility. It comes from one per-probe raw SH9
+//   field, BAKED_GI_SKYVIS_SH, which the visibility pass projects from the same
+//   1024 rays it traces for the depth moments. The fold reconstructs that field
+//   at W_i. Nothing per-bin is stored for it.
 //   Per probe and per SUN HOUR STATE k (17 states along the equinox arc), the
 //   bake stores the same kind of response for a unit light at the sun's direction
 //   at hour 6 + 0.75 k. The fold interpolates TWO of them:
@@ -25,7 +29,7 @@
 // =============================================================================
 
 #define BAKED_GI_DIRECTIONS    16
-#define BAKED_GI_RESPONSE_F4   10  // float4s per (probe, dir): [0..8] = SH9 RGB lm coeffs, [9].x = V_i
+#define BAKED_GI_RESPONSE_F4   9   // float4s per (probe, dir): [0..8] = SH9 RGB lm coeffs. No slot 9.
 
 // Fibonacci-hemisphere direction set (deterministic — bake and update MUST agree).
 // These 16 directions are the SKY QUADRATURE basis. They are not the sun: the sun
@@ -86,12 +90,27 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 }
 
 // ---------------------------------------------------------------------------
+// Ray-debug delta source. ONE value, three spellings: these two, the C++
+// BakedGI::RayDebugSource (BakedGI.h), and the uint BakedGIRayDebugParams::source
+// (SharedTypes.h).
+//
+// The bake stores two response tables for each probe, with different strides. The
+// sky table has BAKED_GI_DIRECTIONS (16) records, indexed by the fibonacci bin.
+// The sun table has BAKED_GI_SUN_STATES (17) records, indexed by the hour state. A
+// replay that reads the wrong stride reads another probe's record, so the source
+// selects the table, the stride, the record index, the delta direction and the RNG
+// seed together. Do not renumber: 0 must stay the shipped sun behaviour.
+// ---------------------------------------------------------------------------
+#define BAKED_GI_RAYDEBUG_SOURCE_SUN 0u
+#define BAKED_GI_RAYDEBUG_SOURCE_SKY 1u
+
+// ---------------------------------------------------------------------------
 // Ray-debug record, rec3.w. ONE definition, two users: BakedGI_RayDebug.hlsl
 // encodes it and BakedGI_Debug.hlsl decodes it. It lives here so the two cannot
 // drift.
 //
-// The record is a fixed 6 float4 and no field is spare, so the STATUS and the
-// SOURCE RAY INDEX share rec3.w:
+// The 6-float4 record this packing was written against had no spare field, so
+// the STATUS and the SOURCE RAY INDEX share rec3.w:
 //
 //     rec3.w = status + 4 * sourceRayIndex
 //
@@ -103,6 +122,11 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 //
 // WARNING: rec3.w is NOT the status any more. Compare it to 0.5 or 2.0 direct
 // and you read the packed value. Always go through these two.
+//
+// rec6 and rec7 were APPENDED later (stride 6 -> 8 float4). They carry the
+// SECONDARY ray, so this packing was never reopened. See
+// BAKED_GI_RAY_RECORD_F4 in SharedTypes.h for the full layout, and
+// BakedGIRayRecShadowStatus below for the secondary status.
 // ---------------------------------------------------------------------------
 float BakedGIRayRecStatus(float packed)
 {
@@ -112,6 +136,20 @@ float BakedGIRayRecStatus(float packed)
 uint BakedGIRayRecSourceRay(float packed)
 {
     return (uint)((packed - fmod(packed, 4.0f)) * 0.25f + 0.5f);
+}
+
+// The secondary ray status, read from rec6.w. It is a PLAIN float, so a compare
+// is enough and no decode is needed. The names come from SharedTypes.h
+// (BAKED_GI_RAY_SHADOW_NONE / _OPEN / _BLOCKED), so the writer, the viewer and
+// the CPU readback test the same three values.
+//
+//   NONE     no shadow ray was traced: the record is not shaded, or NdotD <= 0
+//   OPEN     the shadow ray committed nothing, so Vhit is 1 and rec6.xyz is W
+//   BLOCKED  the shadow ray committed at least one opaque hit, so Vhit is 0 and
+//            rec6.xyz is that hit's world position
+float BakedGIRayRecShadowStatus(float rec6w)
+{
+    return rec6w;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +242,51 @@ float3 BakedGIClassifyDirection(uint i, uint n)
                                        // through around-the-corner cage members that pass the backface
                                        // test — the corner-band artifact. Raise only for A/B.)
 #define BAKED_GI_VIS_DISPATCH_X 4096u // visibility-bake dispatch X tile (C++ mirrors this)
+
+// ---------------------------------------------------------------------------
+// SKY-VISIBILITY SH9 — the ONE source of the V in the runtime fold's
+// `A_l Y_lm(W_i) V(W_i)` term.
+//
+// This buffer holds 9 RAW SH9 coefficients for each probe, projected from the
+// SAME 16x16x4 = 1024 visibility rays the moment map already traces, so it adds
+// no traversal and no ray budget:
+//
+//     L_lm = (4pi / 1024) * sum_s V_s * Y_lm(d_s)     V_s binary, 0 or 1
+//
+// The per-bin cone-fraction scalar that used to sit in response slot 9 was
+// removed: it cost 8 shadow rays for each (probe, bin) and carried one number
+// per cell, while this field costs no ray and carries the whole field. The
+// fold either reconstructs this field or zeros V — there is no third source.
+//
+// NO cosine A_l factor and NO normalisation by Y00: the runtime fold multiplies
+// V by a per-bin response, so it needs the visibility FIELD, and not an
+// irradiance. Reconstruct with plain EvalSH9Basis and clamp to [0, 1].
+//
+// WHY THE CLAMP IS MANDATORY. A band-limited reconstruction overshoots. The
+// sun-visibility thread measured a band-2 fit of a visibility field leaving
+// [0, 1] by +28 percent (ARCHITECTURE-TortureRed-Visibility: "A normalised
+// kernel is a convex combination; an SH projection is a reconstruction"). A mean
+// cannot leave [0, 1]. This field can, so the fold clamps it back into the range
+// the quantity must stay in.
+//
+// Accumulation is an equal-weight mean over the sample distribution, so a fully
+// open probe reconstructs to exactly 1: (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2
+// = 1. The octahedral sample density is not exactly uniform in solid angle, so
+// the fit is a low-order approximation of the field.
+//
+// WHAT TO EXPECT FROM THIS FIELD. Band 2 resolves about two to three bins, so a
+// LOCALISED aperture spreads over its neighbours instead of staying in one bin.
+// A CPU mirror of this projection reports a 20-degree aperture on one bin axis
+// as 0.40 on that bin and 0.14 on a neighbour. A ground plane reads 0.45..0.59
+// across the low bins. Smoothing of that size is the expected behaviour of a
+// band-2 field, not a defect.
+//
+// MEMORY. 9 floats = 36 B for each probe. 418,176 B at 11,616 probes and
+// 4.72 MB at the 131,072-probe cap. It is a bake output, not a per-frame
+// payload: the fold reads 36 B for each probe on a fold frame and nothing on a
+// clean one.
+// ---------------------------------------------------------------------------
+#define BAKED_GI_SKYVIS_SH_COEFFS 9u
 
 // --- Octahedral mapping (unit direction <-> [0,1]^2), Y-up on the xz plane ---
 float2 BakedGISignNotZero(float2 v)

@@ -5,8 +5,6 @@
 //   - Validity: READ from the meta bits classified by the visibility pass
 //     (DDGI criteria — >= 25% backfaces among 32 stable fibonacci rays;
 //     see BakedGI_Visibility.hlsl). Dead probes' responses are zeroed.
-//   - Direct-delta visibility V_i: one shadow ray toward W_i (stored in slot
-//     [9].x; the update pass uses it for the occluded first-bounce sky term).
 //   - INDIRECT-ONLY directional-irradiance SH9 RGB response R_i to a unit
 //     delta light at W_i: uniform-sphere gather rays; each hit's outgoing
 //     radiance = diffuseAlbedo/pi * ( exact direct delta at the hit  +
@@ -28,7 +26,8 @@
 // The delta's DIRECT arrival at the probe itself is deliberately NOT stored
 // in R_i: the receiver's direct sun stays with the runtime-exact shadowed
 // path (no double counting), and the sky's occluded first bounce is
-// reconstructed at runtime from V_i (see BakedGI_Update.hlsl).
+// reconstructed at runtime from the SH9 sky-visibility field (see
+// BakedGI_Update.hlsl).
 // =============================================================================
 #include "CommonTracing.hlsl"
 
@@ -231,18 +230,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
     rng.state = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
     rng.inc   = 1;
 
-    // --- Direct-delta visibility from the probe (V_i) ---
-    RayDesc visRay;
-    visRay.Origin    = probePos + wDelta * 0.001f;
-    visRay.Direction = wDelta;
-    visRay.TMin      = 0.001f;
-    visRay.TMax      = 1e4f;
-    RayQuery<RAY_FLAG_NONE> visQuery;
-    visQuery.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, visRay);
-    while (visQuery.Proceed()) { PROCESS_ALPHA_MASK(visQuery, rng); }
-    float V = (visQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
-
     // --- Gather: indirect field around the probe under the delta light ---
+    //
+    // The RNG stream starts here, at the seed above, with no draw spent before
+    // it. Until 2026-11-04 a V_i axis ray ran first on this stream, and it was
+    // kept for the SKY pass only to preserve the draw count of a still older
+    // bake. Both the axis ray and the V_i it produced are gone, so every R_i in
+    // this table is a NEW draw sequence: the tables do not match a build from
+    // before this change. That break is intended. The stream is now the natural
+    // one (seed, then the 256 gather directions), so a future change has no
+    // hidden draw to preserve. Reproduce it in BakedGI_RayDebug.hlsl exactly.
     StructuredBuffer<float4> responsePrev = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
     StructuredBuffer<float2> visMoments   = ResourceDescriptorHeap[BakeParams.visSRVIdx];
 
@@ -325,5 +322,4 @@ void main(uint3 dtid : SV_DispatchThreadID)
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
         response[slot + lm2] = float4(acc[lm2] * norm * BakedGIA_l(lm2), 0.0f);
-    response[slot + 9] = float4(V, 0.0f, 0.0f, 0.0f);
 }

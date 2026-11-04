@@ -12,23 +12,38 @@
 //                      scaled by bakedGIDebugScale (lit values are
 //                      FP16Scale'd scene HDR).
 //   5 Lit Sky Source  — same ball, reading the sky-sourced split buffer:
-//                      sky bounces + occluded sky-direct (zero where V_i = 0
+//                      sky bounces + occluded sky-direct (zero where V = 0
 //                      for the direct part).
 //   6 Lit Sun Source  — same ball, reading the sun-sourced split buffer:
 //                      sun bounces only (direct sun never enters the probes).
 //                      Modes 2/5/6 read the three update-pass outputs and
 //                      always sum: total = sky + sun.
-//   3 Sky Visibility — cube per cell, grayscale = mean of the 16 baked
-//                      directional visibilities V_i (sky-open fraction);
-//                      red = invalid.
+//   3 Sky Visibility — SH ball per probe, like the lit views: each sphere point
+//                      evaluates the probe's sky-visibility SH9 field at its own
+//                      normal, so the ball shows the DIRECTIONAL visibility and
+//                      not one number per probe. Grayscale = the reconstructed V
+//                      in [0, 1]. The DC term is that field's sphere MEAN and is
+//                      NOT the display value: a mean of a mostly blocked sphere
+//                      is small, so a DC-coloured ball reads almost black.
+//                      Red = invalid probe. Nothing draws when the bake holds no
+//                      SH9 data.
 //   4 Visibility Rays— thin oriented box per (probe, fibonacci direction):
-//                      green = open sky (V_i = 1), red = blocked. Camera-
-//                      distance culled (spacing * 8 window), invalid probes
-//                      skipped.
-//   7 Ray Fan        — thin oriented box for each of the 64 gather rays of the
-//                      SUN-DOMINANT direction (FrameConstants::bakedGIRayDebugDir)
-//                      of ONE probe (bakedGIRayDebugProbe), read from the
-//                      ray-debug buffer that the debug dump writes.
+//                      green = open sky (V = 1), red = blocked (V = 0), and the
+//                      mix between them, with V reconstructed from the SAME SH9
+//                      field at that bin direction.
+//                      Camera-distance culled (spacing * 8 window), invalid
+//                      probes skipped.
+//   7 Ray Fan        — thin oriented box for each of the 64 gather rays of ONE
+//                      delta record of ONE probe (bakedGIRayDebugProbe), read from
+//                      the ray-debug buffer that the debug dump writes. The record
+//                      is the one the dump replayed: the sun hour state
+//                      (FrameConstants::bakedGIRayDebugDir = 0, source SUN) or one
+//                      of the 16 fibonacci sky bins (group = the DISPLAYED bin,
+//                      source SKY; a SKY dump records every bin, so the group is a
+//                      view choice and this shader reads it straight from
+//                      FrameConstants). Which of the two the buffer holds is
+//                      published in FrameConstants::bakedGIRayDebugSource, and
+//                      every label in the UI names it.
 //                      Length = the recorded hit distance, capped at
 //                      bakedGIRayDebugLength spacings. Colour from
 //                      bakedGIRayDebugChannel. No camera-distance cull: there
@@ -51,6 +66,26 @@
 //                      HOUR (FrameConstants::bakedGISunDir), at the same length as
 //                      a bin box. The marker does not draw outside daylight,
 //                      where the sun term is zero.
+//                      In SKY mode the box of the DISPLAYED bin is drawn THICKER and
+//                      CYAN (FrameConstants::bakedGIRayDebugSkyDir, the same value as
+//                      the record group), so the bin the records describe is
+//                      identifiable. It is a different instance
+//                      from the sun marker and a different colour, because the sun
+//                      is not a quadrature bin and must never be read as one. With
+//                      no dump, or in SUN mode, no bin is marked.
+//
+//                      A SECOND channel swaps the geometry and READS records: VHit
+//                      Ray (BAKED_GI_RAYFAN_CH_VHITRAY). It draws, for each shaded
+//                      gather ray whose hit carries a secondary ray, the segment of
+//                      that secondary ray: from the hit toward the active delta
+//                      direction W. CYAN = the ray is open (Vhit 1, nothing hit),
+//                      ending at the length cap. RED = the ray stopped (Vhit 0),
+//                      ending at the recorded first RT hit. The record carries the
+//                      endpoint, the distance and the hit's instance and primitive
+//                      (rec6/rec7), so Vhit is verifiable instead of asserted. A
+//                      cyan line that crosses visible ceiling geometry is a
+//                      mismatch between the RT scene and the raster scene. The
+//                      probe's own Vhit channel (3) is unchanged.
 //   8 Efb Contribution — same SH ball as the lit views, but the value is
 //                      ball[selected term] - ball[term 1], read from the two
 //                      per-bake-term response balls that the bake's fold pass
@@ -71,10 +106,10 @@
 //   9 Cage Trace    — the Efb borrow drawn as geometry, for ONE probe
 //                      (bakedGIRayDebugProbe). Given that probe it DERIVES the
 //                      whole chain, in this order:
-//                        1. the delta direction = the sun fold's argmax
-//                           (FrameConstants::bakedGIRayDebugDir, the same pick
+//                        1. the delta record the dump replayed
+//                           (FrameConstants::bakedGIRayDebugDir, the same group
 //                           the Ray Fan draws);
-//                        2. of that direction's 64 gather rays, the one ray with
+//                        2. of that record's 64 gather rays, the one ray with
 //                           the largest CARRIED FEEDBACK among the rays the
 //                           feedback DOMINATES (a shaded ray whose Efb term
 //                           exceeds its NdotD*Vhit term) — the diagnostic found
@@ -150,12 +185,14 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 // DEBUG_RAYS in BakedGI_RayDebug.hlsl and BakedGI::kDebugGatherRays.
 #define BAKED_GI_RAYFAN_RAYS 64u
 
-// Float4s for each ray record — the stride this view walks. Must match
-// RAY_RECORD_F4 (BakedGI_RayDebug.hlsl, the writer) and BakedGI::kRayRecordF4
-// (BakedGI.h, the C++ readout). rec0..rec3 are the shading record this view
-// colours; rec4/rec5 carry the hit's normal, instance index, world position and
-// primitive index and are not drawn, only read back.
-#define BAKED_GI_RAYFAN_REC_F4 6u
+// Float4s for each ray record — the stride this view walks. BAKED_GI_RAY_RECORD_F4
+// (SharedTypes.h) is the ONE definition, and BakedGI::kRayRecordF4 (BakedGI.h)
+// is its C++ spelling, so the writer, this viewer and the CPU readback cannot
+// disagree. rec0..rec3 are the shading record the record channels colour;
+// rec4/rec5 carry the hit's normal, instance index, world position and primitive
+// index; rec6/rec7 carry the SECONDARY visibility ray and are drawn only by the
+// VHit Ray channel.
+#define BAKED_GI_RAYFAN_REC_F4 BAKED_GI_RAY_RECORD_F4
 
 // UV-sphere tessellation (same layout as IrCache_DebugSpheres: 8x8 quads).
 #define DBG_N_STACKS    8
@@ -254,6 +291,15 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // colour: the 16 bin boxes are greyscaled by fold weight, so no weight can ever
 // produce this hue and the marker cannot be mistaken for one.
 #define BAKED_GI_RAYFAN_SUNDIR_COLOR float3(0.95f, 0.55f, 0.15f)
+// Half-width and colour of the SELECTED SKY BIN box (DeltaDirections channel, SKY
+// source only). Same thickness as the sun marker, on purpose: both are single-box
+// callouts among sixteen greyscaled bins. Different colour, also on purpose — the
+// CYAN box is the quadrature bin the dumped records describe, and the ORANGE box is
+// where the real sun is. The two answer different questions, so no weight and no
+// hue can make one read as the other. Length stays a bin box's 0.35 spacings: a
+// different length would read as a magnitude, and this box reports a direction.
+#define BAKED_GI_RAYFAN_SKYBIN_HALF  0.03f
+#define BAKED_GI_RAYFAN_SKYBIN_COLOR float3(0.20f, 0.75f, 0.95f)
 // Ray Fan colour channel that swaps the GEOMETRY: it draws the 16 fibonacci
 // delta directions of the fan's probe, plus one marker for the real sun, and
 // reads no record. Must match BakedGI::kRayFanChannelDeltaDirs (BakedGI.h) and
@@ -265,6 +311,10 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // direction. BAKED_GI_DIRECTIONS stays 16: its value divides the fibonacci
 // lattice, so raising it would move every existing bin.
 //
+// The SKY source marks its DISPLAYED bin by REUSING that bin's instance — a
+// thicker cyan box in place of the grey one. It needs no extra instance, so the
+// draw count stays the same in both sources.
+//
 // Drawing the 17 SUN STATES along the arc is separate work. It needs a different
 // instance layout and a 17-slot weight array, which changes FrameConstants, so it
 // is not part of this change.
@@ -274,6 +324,88 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // takes its draw count from that mirror, so the draw call cannot disagree with
 // the geometry.
 #define BAKED_GI_RAYFAN_DELTADIRS_INSTANCES (BAKED_GI_DIRECTIONS + 1u)
+
+// Ray Fan colour channel that draws the SECONDARY visibility ray of each shaded
+// gather ray: one thin segment from the ray's recorded hit toward the active
+// delta direction W that the bake's shadow ray was traced toward (rec6/rec7).
+// CYAN = the ray is open, so Vhit = 1 and nothing was hit. RED = the ray stopped,
+// so Vhit = 0 and the segment ends at the recorded first hit.
+//
+// WHY IT EXISTS. Vhit is the recorded claim "nothing blocked this ray", and until
+// this channel it had no endpoint to check. A white Vhit is now a line the reader
+// can follow: if the cyan line crosses visible ceiling geometry, the RT scene and
+// the raster scene disagree, which is the one defect the Vhit channel cannot show.
+//
+// It READS records, so it needs a dump, like every channel except DeltaDirections.
+// It draws one segment for each shaded record with NdotD > 0 — exactly the records
+// whose shadow status is not NONE, so a record with no secondary ray draws
+// nothing. The existing Vhit channel (3) is unchanged. Its instance count is
+// BAKED_GI_RAYFAN_RAYS, the same as every other record channel, so the renderer's
+// draw path needs no branch for it.
+//
+// Must match BakedGI::kRayFanChannelVHitRay (BakedGI.h) and the "VHit Ray" entry
+// of the Ray Fan Channel combo in Application.cpp. Appended AFTER DeltaDirections
+// on purpose: the renderer's instance-count branch tests 7, and moving it would
+// change a shipped draw path.
+#define BAKED_GI_RAYFAN_CH_VHITRAY 8u
+
+// Half-width of a VHit Ray segment, in probe spacings. Thinner than the fan's own
+// 0.01 (BAKED_GI_RAYFAN_BOX_HALF) on purpose: the segment starts at the hit of a
+// box that is already drawn, so it must read as a second, subordinate ray and not
+// as another gather ray.
+#define BAKED_GI_RAYFAN_VHIT_HALF 0.005f
+// Distance the VHit Ray start is pushed off the recorded hit, in probe spacings,
+// along the hit normal. Without it the box starts inside the surface it leaves and
+// z-fights with the gather-ray box that ends there. 0.002 spacings is far below a
+// pixel at ordinary view distances and far above the depth buffer's resolution.
+#define BAKED_GI_RAYFAN_VHIT_PUSH 0.002f
+// CYAN, near white-blue: the secondary ray committed nothing. No other element of
+// this view uses this hue (the fan boxes are the channel's own colour, the sky-bin
+// marker is a deeper cyan at 0.20/0.75/0.95 and sits on the probe, not on a hit).
+#define BAKED_GI_RAYFAN_VHIT_OPEN_COLOR    float3(0.45f, 0.92f, 1.00f)
+// RED: the secondary ray stopped at the recorded first RT hit. The same red family
+// as the regime channel's "Efb dominates", because both report an obstruction; the
+// channels are never drawn together.
+#define BAKED_GI_RAYFAN_VHIT_BLOCK_COLOR   float3(0.95f, 0.25f, 0.20f)
+
+// The Sky V_i channel that used to sit at 9 is REMOVED with the per-bin cone
+// visibility it coloured: the response record has no slot 9 any more, so there
+// is no value for it to draw and no cursor to mark. Channels 0..8 keep their
+// numbers, so no shipped draw path moves.
+
+// ---------------------------------------------------------------------------
+// Direct sky visibility from the per-probe raw SH9 field.
+//
+// ONE expression, shared by the two views that show a V: view 3 evaluates it at
+// a sphere normal (a directional ball) and view 4 at one bin direction. Both use
+// the buffer the fold uses, so a view cannot show a V the frame does not.
+//
+// The DC term alone is the field's sphere MEAN: the mean of a band-limited field
+// over the sphere is L_00 * Y00 (0.28209479177387814), because every higher band
+// integrates to zero. No view displays that number any more — it is a scalar for
+// a directional quantity, and it reads almost black.
+//
+// The caller MUST test FrameCB.bakedGISkyVisSRVIndex against BAKED_GI_SKYVIS_NO_SRV
+// before it declares the SRV: 0 is a live descriptor of another resource, so a
+// read through it is undefined rather than empty.
+// ---------------------------------------------------------------------------
+#define BAKED_GI_SKYVIS_NO_SRV 0xFFFFFFFFu
+
+// Invalid-probe colour of view 3. The same red the other views use for "invalid
+// probe", so one colour means one thing across the whole overlay.
+static const float3 kBakedGISkyVisInvalidColor = float3(0.95f, 0.15f, 0.15f);
+
+// V reconstructed at dir, clamped to the [0, 1] range a visibility must stay in.
+float BakedGISkyVisAt(StructuredBuffer<float> sh, uint probe, float3 dir)
+{
+    float basis[BAKED_GI_SKYVIS_SH_COEFFS];
+    EvalSH9Basis(dir, basis);
+    float v = 0.0f;
+    [unroll]
+    for (uint c = 0; c < BAKED_GI_SKYVIS_SH_COEFFS; ++c)
+        v += sh[probe * BAKED_GI_SKYVIS_SH_COEFFS + c] * basis[c];
+    return saturate(v);
+}
 
 // Record component 3 of a ray: 0 = sky miss, 1 = backface reject, 2 = shaded.
 // rec3.w PACKS the status with the source ray index (BakedGI.hlsli), so decode
@@ -577,19 +709,21 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const float  spacing = FrameCB.bakedGISpacing;
     const uint   probeCount = dims.x * dims.y * dims.z;
 
-    StructuredBuffer<float4> response = ResourceDescriptorHeap[FrameCB.bakedGIResponseSRVIndex];
     StructuredBuffer<uint>   meta     = ResourceDescriptorHeap[FrameCB.bakedGIProbeMetaSRVIndex];
 
-    // --- Mode 7: the sun-dominant direction's 64 gather rays of ONE probe ---
-    // The record layout is the compute pass's: six float4 for each ray, all 64
-    // rays of direction 0 first, then direction 1, and so on. The box geometry
-    // is the mode-4 box with the RECORDED gather direction in place of the
-    // fibonacci direction — that swap is the whole point of the view.
-    // The direction is the sun fold's argmax (FrameConstants::bakedGIRayDebugDir),
-    // so the fan shows the rays that carry sun energy, and 64 boxes stay legible.
+    // --- Mode 7: THE DUMPED DELTA RECORD's 64 gather rays of ONE probe ---
+    // The record layout is the compute pass's: eight float4 for each ray, all 64
+    // rays of group 0 first, then group 1, and so on. The box geometry is the
+    // mode-4 box with the RECORDED gather direction in place of the fibonacci
+    // direction — that swap is the whole point of the view.
+    // The group is FrameConstants::bakedGIRayDebugDir, the record group ON SCREEN:
+    // group 0 for the SUN source (one sun hour state) and the DISPLAYED bin's group
+    // for the SKY source. Either way 64 boxes stay legible, and the group index
+    // equals the index the UI names.
     if (mode == BAKED_GI_DEBUG_RAYFAN)
     {
-        // --- DeltaDirections: the 16 fold directions of this probe, plus the sun ---
+        // --- DeltaDirections: the 16 quadrature directions of this probe, the sun,
+        //     and in SKY mode the displayed bin ---
         // Placed BEFORE the record path deliberately. This channel reads no
         // record, so it must not depend on the ray-debug buffer existing and
         // must not index the descriptor heap with the no-buffer sentinel. The
@@ -642,6 +776,26 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
                 return o;
             }
 
+            // --- The replayed SKY BIN (SKY source only) ---
+            // The one qualification this channel adds in SKY mode: WHICH of the 16
+            // bins the dumped records describe. Cyan and thicker, so it is told
+            // apart from a weighted bin AND from the orange sun marker.
+            //
+            // bakedGIRayDebugSkyDir is kRayDebugNoDir (0xFFFFFFFF) when no dump has
+            // run, so the guard leaves every bin grayscale then: no records exist,
+            // and marking a bin would claim a selection that was never traced.
+            if (FrameCB.bakedGIRayDebugSource == BAKED_GI_RAYDEBUG_SOURCE_SKY &&
+                instance == FrameCB.bakedGIRayDebugSkyDir)
+            {
+                o.color = float4(BAKED_GI_RAYFAN_SKYBIN_COLOR, 1.0f);
+                const float3 w = BakedGIDeltaDirection(instance);
+                const float3 world = OrientedBoxVertex(probePos, w, spacing * 0.35f,
+                                                       spacing * BAKED_GI_RAYFAN_SKYBIN_HALF,
+                                                       kCubeTris[vid % 36u]);
+                o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+                return o;
+            }
+
             // Grayscale, the NdotD channel's mapping: the value written
             // straight, no gain and no log ramp, so WHITE is 1.0 = the
             // most-weighted direction. Black is a zero weight — which includes
@@ -665,8 +819,10 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         // never index the descriptor heap.
         if (FrameCB.bakedGIRayDebugSRVIndex == BAKED_GI_RAYFAN_NO_SRV)
             return o;
-        // One instance is one ray: dir selects the direction's block in the
-        // record buffer, r the ray inside it. Guard both before the index math.
+        // One instance is one ray: dir selects the RECORD GROUP on screen, r
+        // the ray inside it. Guard both before the index math. The group is the
+        // displayed record index (0 for SUN, the sky bin for SKY), and kRayDebugNoDir
+        // (0xFFFFFFFF) when no dump has run, which this guard rejects.
         const uint dir = FrameCB.bakedGIRayDebugDir;
         const uint r   = instance;
         if (dir >= BAKED_GI_DIRECTIONS)
@@ -689,6 +845,79 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float status = BakedGIRayRecStatus(rec3.w);
         const bool  miss   = (status < 0.5f);
 
+        // Colour channel (FrameConstants::bakedGIRayDebugChannel). Channel 1
+        // (albedo) is the default and the fallback for an unknown value.
+        // Declared here because the VHit Ray branch below leaves before the colour
+        // ramp: that branch paints an endpoint state, not a record value.
+        const uint ch = FrameCB.bakedGIRayDebugChannel;
+
+        // --- VHit Ray: the SECONDARY visibility ray of this gather ray ---
+        //
+        // ONE segment for each record that carries a secondary ray. rec6.w is the
+        // authority: the writer stores NONE when it traced no shadow ray, which is
+        // exactly the non-shaded case and the NdotD <= 0 case. Testing the status
+        // therefore cannot drift from "shaded and NdotD > 0".
+        //
+        //   OPEN     start -> start + W * cap, CYAN. The ray leaves the RT scene
+        //            without a hit, which is the recorded claim Vhit = 1.
+        //   BLOCKED  start -> the recorded first hit position, RED.
+        //
+        // "start" is the recorded gather hit (rec5.xyz) pushed a little along the
+        // recorded hit normal, because the segment's own gather-ray box ends there
+        // and two boxes that share a point z-fight.
+        //
+        // The open ray uses the SAME length cap as the other channels
+        // (bakedGIRayDebugLength spacings), so a cyan line that runs to the cap is
+        // a ray with no hit, and a cyan line that crosses visible ceiling geometry
+        // is a mismatch between the RT scene and the raster scene.
+        if (ch == BAKED_GI_RAYFAN_CH_VHITRAY)
+        {
+            const float4 rec4 = dbg[recBase + 4u]; // (hit normal.xyz, instance)
+            const float4 rec5 = dbg[recBase + 5u]; // (hit world pos.xyz, primitive)
+            const float4 rec6 = dbg[recBase + 6u]; // (secondary payload.xyz, status)
+
+            const float shadow = BakedGIRayRecShadowStatus(rec6.w);
+            if (shadow < 0.5f)
+                return o; // no secondary ray was traced for this record
+
+            const float normalLen = length(rec4.xyz);
+            const float3 push     = (normalLen > 1e-6f)
+                                  ? (rec4.xyz / normalLen) * (spacing * BAKED_GI_RAYFAN_VHIT_PUSH)
+                                  : float3(0.0f, 0.0f, 0.0f);
+            const float3 start    = rec5.xyz + push;
+
+            float3 end;
+            float3 segColor;
+            if (shadow > 1.5f)
+            {
+                end      = rec6.xyz; // the recorded first hit
+                segColor = BAKED_GI_RAYFAN_VHIT_BLOCK_COLOR;
+            }
+            else
+            {
+                // rec6.xyz is W for an open ray. A zero payload would mean a record
+                // that never set it, so refuse instead of drawing a zero-length box
+                // at the hit — that reads as a blocked ray with no endpoint.
+                const float wLen = length(rec6.xyz);
+                if (wLen < 1e-6f)
+                    return o;
+                end      = start + (rec6.xyz / wLen) * max(spacing * FrameCB.bakedGIRayDebugLength, 1e-4f);
+                segColor = BAKED_GI_RAYFAN_VHIT_OPEN_COLOR;
+            }
+
+            const float3 seg     = end - start;
+            const float  segLen  = length(seg);
+            if (segLen < 1e-5f)
+                return o; // a blocked ray that stopped on its own origin: nothing to draw
+
+            o.color = float4(segColor, 1.0f);
+            const float3 world = OrientedBoxVertex(start, seg / segLen, segLen,
+                                                   spacing * BAKED_GI_RAYFAN_VHIT_HALF,
+                                                   kCubeTris[vid % 36u]);
+            o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+            return o;
+        }
+
         // MISSES DRAW AT THE CAP. Dropping them would be tidier, but then the
         // status channel could not show which way the probe sees open sky. The
         // cost is a full-length box in the albedo channel, and there it is black
@@ -696,9 +925,6 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float cap = max(spacing * FrameCB.bakedGIRayDebugLength, 1e-4f);
         const float len = saturate(t / cap) * cap; // t = 1e4 for a miss -> the cap
 
-        // Colour channel (FrameConstants::bakedGIRayDebugChannel). Channel 1
-        // (albedo) is the default and the fallback for an unknown value.
-        const uint ch = FrameCB.bakedGIRayDebugChannel;
         float3 col;
         if (ch == 0u)
             col = RayFanStatusColor(status);
@@ -734,11 +960,12 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     }
 
     // --- Mode 9: Cage Trace — the Efb borrow as geometry ---
-    // Everything above is derived from the probe index alone: the direction is
-    // the sun fold's argmax, the ray is that direction's largest carried
-    // feedback among the feedback-dominated rays, and the cage is the bake's
+    // Everything above is derived from the dump alone: the record group is the one
+    // the dump replayed (bakedGIRayDebugDir), the ray is that group's largest
+    // carried feedback among the feedback-dominated rays, and the cage is the bake's
     // own gather replay at that ray's hit point. Nothing here is a second
-    // computation of anything the bake does.
+    // computation of anything the bake does, and nothing here assumes the SUN
+    // source — the records carry the delta they were traced toward.
     //
     // ONE exception, and it is deliberate: bakedGIRayDebugRay lets the UI name
     // the ray instead of ranking for it, which is the only way to reach a ray
@@ -873,10 +1100,26 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
             return o; // near-camera window keeps the ray count readable
 
         const float3 w = BakedGIDeltaDirection(dir);
-        const uint slot = (probe * BAKED_GI_DIRECTIONS + dir) * BAKED_GI_RESPONSE_F4;
-        const float V   = response[slot + 9].x;
-        o.color = (V > 0.5f) ? float4(0.1f, 0.9f, 0.2f, 1.0f)      // open sky
-                             : float4(0.95f, 0.15f, 0.15f, 1.0f);   // blocked
+        // V — the direct sky visibility at this bin direction, reconstructed from
+        // the probe's raw SH9 field with the fold's own expression. Mix the two
+        // colours by V: a threshold here would paint a cell that is 7/8 open
+        // exactly as red as a cell that is fully blocked.
+        //
+        // A field that is a fraction of a cell is normal for a band-2 fit: one bin
+        // of a 16-bin hemisphere spans about 20 degrees, and band 2 resolves about
+        // two to three bins, so a localised aperture spreads over its neighbours.
+        // That spread is the expected behaviour, not a defect in this view.
+        //
+        // The sentinel test comes BEFORE the SRV declaration: the app publishes
+        // BAKED_GI_SKYVIS_NO_SRV when the resident bake holds no SH9 data, and 0 is
+        // a live descriptor of another resource.
+        if (FrameCB.bakedGISkyVisSRVIndex == BAKED_GI_SKYVIS_NO_SRV)
+            return o;
+        StructuredBuffer<float> skyVis = ResourceDescriptorHeap[FrameCB.bakedGISkyVisSRVIndex];
+        const float V = BakedGISkyVisAt(skyVis, probe, w);
+        o.color = float4(lerp(float3(0.95f, 0.15f, 0.15f),   // blocked  (V = 0)
+                              float3(0.10f, 0.90f, 0.20f),   // open sky (V = 1)
+                              V), 1.0f);
 
         // Thin oriented box from the probe center along w (local z -> w).
         const float3 world = OrientedBoxVertex(probePos, w, spacing * 0.35f, spacing * 0.015f,
@@ -897,11 +1140,14 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const bool   hasData  = BakedGIProbeHasData(metaWord);
 
     if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN ||
-        mode == BAKED_GI_DEBUG_EFB)
+        mode == BAKED_GI_DEBUG_EFB || mode == BAKED_GI_DEBUG_SKYVIS)
     {
         // Lit views show donor-backed runtime data. Efb remains a raw bake view
-        // and admits only geometrically valid probes.
-        if (mode == BAKED_GI_DEBUG_EFB ? !valid : !hasData)
+        // and admits only geometrically valid probes. Sky Visibility draws EVERY
+        // probe: an invalid probe is a red ball, which is the whole point of the
+        // view, so it is not gated here.
+        const bool skyVisView = (mode == BAKED_GI_DEBUG_SKYVIS);
+        if (mode == BAKED_GI_DEBUG_EFB ? !valid : (!skyVisView && !hasData))
             return o;
 
         // UV-sphere vertex: unit sphere position doubles as the eval normal.
@@ -916,6 +1162,35 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float sph   = (float)si / (float)DBG_N_STACKS * PI;         // [0, PI]
         const float theta = (float)li / (float)DBG_N_SLICES * 2.0f * PI;  // [0, 2PI]
         const float3 n = float3(sin(sph) * cos(theta), cos(sph), sin(sph) * sin(theta));
+
+        // --- Sky Visibility (3): grayscale = V at this sphere normal ---
+        // The SH9 field is directional, so this ball shows the visibility of each
+        // direction instead of one number per probe. Raw saturated V: white = 1
+        // (open sky), black = 0 (blocked), grey = a partly open direction. No gain
+        // is applied, so the ramp keeps V's own units and a grey pixel is read as
+        // a fraction without a scale factor.
+        if (skyVisView)
+        {
+            // The sentinel test comes BEFORE the SRV declaration: 0 is a live
+            // descriptor of another resource, so a read through it is undefined.
+            // With no SH9 data the view draws nothing rather than a false colour.
+            if (FrameCB.bakedGISkyVisSRVIndex == BAKED_GI_SKYVIS_NO_SRV)
+                return o;
+
+            if (!valid)
+            {
+                o.color = float4(kBakedGISkyVisInvalidColor, 1.0f);
+            }
+            else
+            {
+                StructuredBuffer<float> skyVis = ResourceDescriptorHeap[FrameCB.bakedGISkyVisSRVIndex];
+                o.color = float4(BakedGISkyVisAt(skyVis, probe, n).xxx, 1.0f);
+            }
+
+            const float3 world = probePos + n * (spacing * 0.12f);
+            o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+            return o;
+        }
 
         float basis[9];
         EvalSH9Basis(n, basis);
@@ -1047,39 +1322,25 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         return o;
     }
 
-    // Cube modes: pick the color source.
-    if (mode == BAKED_GI_DEBUG_SKYVIS)
-    {
-        float vMean = 0.0f;
-        [unroll]
-        for (uint i = 0; i < BAKED_GI_DIRECTIONS; ++i)
-        {
-            const uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F4;
-            vMean += response[slot + 9].x;
-        }
-        vMean /= (float)BAKED_GI_DIRECTIONS;
-        o.color = valid ? float4(vMean.xxx, 1.0f)                    // sky-open fraction
-                        : float4(0.95f, 0.15f, 0.15f, 1.0f);         // invalid
-    }
-    else // BAKED_GI_DEBUG_PLACEMENT
-    {
-        // Classification A/B (meta bits, see BakedGI.hlsli): the DDGI
-        // criteria vs the old 1cm test, so the criteria swap's flips are
-        // visible in place. BLUE is the experiment's headline — probes the
-        // old test called valid that DDGI's classification kills.
-        const uint  m         = metaWord;
-        const bool  ddgiValid = (m & BAKED_GI_META_VALID)     != 0u;
-        const bool  oldValid  = (m & BAKED_GI_META_OLD_VALID) != 0u;
-        const bool  filled    = (m & BAKED_GI_META_FILLED)    != 0u;
-        if (ddgiValid)
-            o.color = oldValid ? float4(0.1f, 0.9f, 0.2f, 1.0f)   // valid under both
-                               : float4(0.9f, 0.9f, 0.2f, 1.0f);  // newly valid (old test killed it)
-        else if (filled)
-            o.color = float4(0.1f, 0.85f, 0.95f, 1.0f);            // donor-backed runtime data
-        else
-            o.color = oldValid ? float4(0.2f, 0.4f, 1.0f, 1.0f)   // NEWLY BAD (old test kept it)
-                               : float4(0.95f, 0.15f, 0.15f, 1.0f); // bad under both
-    }
+    // The only remaining per-probe view is Placement (1). Sky Visibility (3)
+    // draws a sphere above, with the other ball views.
+    //
+    // Classification A/B (meta bits, see BakedGI.hlsli): the DDGI criteria vs the
+    // old 1cm test, so the criteria swap's flips are visible in place. BLUE is the
+    // experiment's headline — probes the old test called valid that DDGI's
+    // classification kills.
+    const uint  m         = metaWord;
+    const bool  ddgiValid = (m & BAKED_GI_META_VALID)     != 0u;
+    const bool  oldValid  = (m & BAKED_GI_META_OLD_VALID) != 0u;
+    const bool  filled    = (m & BAKED_GI_META_FILLED)    != 0u;
+    if (ddgiValid)
+        o.color = oldValid ? float4(0.1f, 0.9f, 0.2f, 1.0f)   // valid under both
+                           : float4(0.9f, 0.9f, 0.2f, 1.0f);  // newly valid (old test killed it)
+    else if (filled)
+        o.color = float4(0.1f, 0.85f, 0.95f, 1.0f);            // donor-backed runtime data
+    else
+        o.color = oldValid ? float4(0.2f, 0.4f, 1.0f, 1.0f)   // NEWLY BAD (old test kept it)
+                           : float4(0.95f, 0.15f, 0.15f, 1.0f); // bad under both
 
     const float3 c = kCubeTris[vid % 36u];
     const float3 world = probePos + c * (spacing * 0.04f);

@@ -28,11 +28,27 @@
 //
 // REPRODUCTION RULE. Both passes must reproduce the bake's RNG stream EXACTLY.
 // The stream is sequential (pcg state, next_float), so the direction of ray r
-// depends on the alpha-mask draws of the V_i ray, rays 0..r-1, and their shadow
-// rays. Each pass therefore replays the whole sequence from the same seed, in the
-// same order, with the same ray flags, and draws for nothing else. Efb draws no
-// random numbers, so pass 1 skips EvalResponseIndirect and the two streams still
-// agree. Lane 0 of each group does all the work.
+// depends on rays 0..r-1 and their shadow rays. Nothing draws from the stream
+// before the gather loop: the V_i axis ray that used to run first is gone. Each
+// pass therefore starts at the same seed, in the same order, with the same ray
+// flags, and draws for nothing else. Efb draws no random numbers, so pass 1
+// skips EvalResponseIndirect and the two streams still agree. Lane 0 of each
+// group does all the work.
+//
+// ONE DELTA SOURCE at a time, chosen by RayDbg.source. The bake writes two tables
+// for each probe: the sky quadrature (16 fibonacci bins, stride
+// BAKED_GI_DIRECTIONS) and the sun hour states (17 states, stride
+// BAKED_GI_SUN_STATES). The source selects the table, the stride, the record
+// index, the delta direction AND the seed together, because each of those follows
+// from the other two. The group that does the work is the record index itself, so
+// a reader of the raw buffer sees the index its label reports:
+//   SUN  group 0 only. The sun table has one record for each probe, so one group
+//        traces it; the direction is the state's own, from RayDbg.sunDir.
+//   SKY  EVERY group. Group d traces bin d, toward BakedGIDeltaDirection(d), and
+//        its feedback reads the sky table's record d. One dump therefore fills
+//        all 16 record groups, and the UI can then show any bin without a
+//        second dump. The price is 16 traced directions instead of 1, which is
+//        a real cost for one debug click and zero cost per frame.
 //
 // The gather loop stays rolled ([loop]). An unrolled RayQuery loop makes the
 // driver's PSO compilation appear to hang (see RENDERCORE-MEMORY.md), and at 256
@@ -56,17 +72,33 @@ ConstantBuffer<BakedGIRayDebugParams> RayDbg  : register(b2);
 //   rec0 = (gather direction.xyz, hit distance)   rec1 = (diffuse albedo.rgb, NdotD)
 //   rec2 = (L.rgb, Vhit)                          rec3 = (Efb.rgb, packed)
 //   rec4 = (hit normal.xyz, instance index)       rec5 = (hit world pos.xyz, primitive index)
+//   rec6 = (secondary ray payload.xyz, secondary status)
+//   rec7 = (secondary distance, secondary instance, secondary primitive, 0)
 // rec4/rec5 are the hit's identity. w = -1 marks "no surface", NOT 0: instance 0
 // is a legal instance and a dump must not confuse the two. They are stored as
 // plain FLOATS, not asfloat bit patterns, so a float-typed buffer dump prints an
 // index as a number; instance counts are far below the 2^24 exact-integer limit.
 //
+// rec6/rec7 are the SECONDARY visibility ray of that hit: the shadow ray the bake
+// fires from the hit toward the active delta direction W. The payload depends on
+// the status in rec6.w (SharedTypes.h owns the whole layout and the three status
+// values):
+//   NONE     rec6.xyz = 0, rec7 = (-1, -1, -1, 0)
+//   OPEN     rec6.xyz = W, rec7 = (-1, -1, -1, 0)     Vhit = 1
+//   BLOCKED  rec6.xyz = the first committed hit position
+//            rec7 = (distance, instance, primitive, 0) Vhit = 0
+//
+// Why the payload exists: a white Vhit is otherwise unverifiable. The record said
+// "nothing blocked this ray" and carried no endpoint, so a floor that draws white
+// could not be told apart from a ray that leaves the RT scene. With rec6/rec7 the
+// viewer draws the segment and the reader sees WHERE the open ray goes.
+//
 // rec3.w packs  status + 4 * sourceRayIndex. BakedGI.hlsli owns the description
 // and the decode (BakedGIRayRecStatus / BakedGIRayRecSourceRay).
-// Must match BakedGI::kRayRecordF4 (BakedGI.h) and BAKED_GI_RAYFAN_REC_F4
-// (BakedGI_Debug.hlsl) — one stride, three files.
+// BAKED_GI_RAY_RECORD_F4 (SharedTypes.h) is the ONE stride definition: this file,
+// BakedGI_Debug.hlsl and BakedGI::kRayRecordF4 all read it.
 #define RAY_RECORDS_BASE   0u
-#define RAY_RECORD_F4      6u
+#define RAY_RECORD_F4      BAKED_GI_RAY_RECORD_F4
 #define RAY_DEBUG_TABLE_BASE (BAKED_GI_DIRECTIONS * DEBUG_RAYS * RAY_RECORD_F4)
 
 // Selection state for ONE direction's group. Only lane 0 touches these, so they
@@ -82,10 +114,11 @@ groupshared int   g_slot[BAKE_RAYS]; // record slot for each source ray; -1 = no
 // is the reference. This copy exists so the debug pass can reproduce the
 // feedback term (Efb) of the final iteration without a change to the bake.
 // ---------------------------------------------------------------------------
-// stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: this pass always
-// reads the sun table, BAKED_GI_SUN_STATES and the dispatch's sunState. A
-// hardcoded 16 here would read the wrong record and the self-check would report a
-// MISMATCH that is purely an addressing difference.
+// stride/idx, exactly as BakedGI_Bake.hlsl's copy takes them: the SUN source reads
+// the sun table with BAKED_GI_SUN_STATES and the dispatch's sunState, and the SKY
+// source reads the sky table with BAKED_GI_DIRECTIONS and this group's own bin. A
+// hardcoded 16 (or 17) here would read the wrong record and the self-check would
+// report a MISMATCH that is purely an addressing difference.
 float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
                             uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
@@ -149,24 +182,6 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
 }
 
 // ---------------------------------------------------------------------------
-// The V_i ray: one shadow ray from the probe toward the delta direction. Runs
-// once per pass, from the pass's own seed, so each pass is an independent full
-// replay of the bake.
-// ---------------------------------------------------------------------------
-float TraceVisRay(inout RNG rng, float3 probePos, float3 wDelta)
-{
-    RayDesc visRay;
-    visRay.Origin    = probePos + wDelta * 0.001f;
-    visRay.Direction = wDelta;
-    visRay.TMin      = 0.001f;
-    visRay.TMax      = 1e4f;
-    RayQuery<RAY_FLAG_NONE> visQuery;
-    visQuery.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, visRay);
-    while (visQuery.Proceed()) { PROCESS_ALPHA_MASK(visQuery, rng); }
-    return (visQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
-}
-
-// ---------------------------------------------------------------------------
 // One gather ray of the bake, replayed. Every RNG draw the bake makes for this
 // ray happens inside here and nowhere else, so both passes consume the stream
 // identically and cannot drift from the bake or from each other.
@@ -186,6 +201,17 @@ struct RayProbe
     float  Vhit;     // 1 when the shadow ray from the hit commits nothing
     float  status;   // 0 = miss, 1 = backface reject, 2 = shaded
     float  q;        // NdotD * Vhit: the direct term's weight, 0 when it has none
+
+    // The SECONDARY ray — the shadow ray that produces Vhit. rec6 and rec7 carry
+    // these four fields. shadowXyz means one thing per status:
+    //   NONE     zero
+    //   OPEN     W, the unit active delta direction the ray was traced toward
+    //   BLOCKED  the world position of the first committed hit
+    float3 shadowXyz;
+    float  shadowStatus; // BAKED_GI_RAY_SHADOW_NONE / _OPEN / _BLOCKED
+    float  shadowDist;   // BLOCKED: committed ray T from the pushed origin. Else -1
+    float  shadowInst;   // BLOCKED: committed instance index. Else -1
+    float  shadowPrim;   // BLOCKED: committed primitive index. Else -1
 };
 
 RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
@@ -202,6 +228,11 @@ RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
     p.Vhit     = 0.0f;
     p.status   = 0.0f;
     p.q        = 0.0f;
+    p.shadowXyz    = float3(0.0f, 0.0f, 0.0f);
+    p.shadowStatus = (float)BAKED_GI_RAY_SHADOW_NONE;
+    p.shadowDist   = -1.0f;
+    p.shadowInst   = -1.0f;
+    p.shadowPrim   = -1.0f;
 
     // Two draws first — the same order as BakedGI_Bake.hlsl:213-214.
     float u1 = next_float(rng);
@@ -253,16 +284,46 @@ RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
         RayQuery<RAY_FLAG_NONE> sq;
         sq.TraceRayInline(g_Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, sRay);
         while (sq.Proceed()) { PROCESS_ALPHA_MASK(sq, rng); }
-        p.Vhit = (sq.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
+
+        // Vhit is computed from the SAME committed status this branch always used.
+        // The record reads below only RE-READ that result, so the Vhit value the
+        // direct term L uses cannot change.
+        const bool open = (sq.CommittedStatus() == COMMITTED_NOTHING);
+        p.Vhit = open ? 1.0f : 0.0f;
+
+        if (open)
+        {
+            // Nothing was hit, so the payload is the direction the fan must draw.
+            // W is unit by construction in both sources (the sun branch divides by
+            // sunLen, and BakedGIDeltaDirection normalizes), so the viewer can
+            // multiply it by a length cap directly.
+            p.shadowXyz    = wDelta;
+            p.shadowStatus = (float)BAKED_GI_RAY_SHADOW_OPEN;
+        }
+        else
+        {
+            // The first committed hit. The position is the ray endpoint, which is
+            // the same expression ResolveHitSurface uses (ray.Origin + Direction *
+            // T), so the red line ends on the surface that stopped the ray. No
+            // vertex fetch: this is a debug pass and the exact point is already
+            // determined by the ray.
+            p.shadowXyz    = sRay.Origin + sRay.Direction * sq.CommittedRayT();
+            p.shadowStatus = (float)BAKED_GI_RAY_SHADOW_BLOCKED;
+            p.shadowDist   = sq.CommittedRayT();
+            p.shadowInst   = (float)sq.CommittedInstanceIndex();
+            p.shadowPrim   = (float)sq.CommittedPrimitiveIndex();
+        }
     }
     p.status = 2.0f;
     p.q      = p.NdotD * p.Vhit;
     return p;
 }
 
-// The six float4 of one record, assembled in ONE place so the three status cases
-// cannot disagree about a field. rec3.w packs the status and the SOURCE ray
-// index (BakedGI.hlsli): the record is a fixed 96 B and no field is spare.
+// The eight float4 of one record, assembled in ONE place so the three status
+// cases cannot disagree about a field. rec3.w packs the status and the SOURCE ray
+// index (BakedGI.hlsli). rec6/rec7 carry the secondary ray; ProbeRay fills all
+// five of their fields in the branch that matches rec6.w, so this macro only
+// copies them and never decides a value.
 //
 // A macro writes it, because a UAV object cannot be passed to a function
 // portably across shader compilers.
@@ -275,6 +336,8 @@ RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
         (dbg)[b_ + 3u] = float4((Efb), (p).status + 4.0f * (float)(srcRay));        \
         (dbg)[b_ + 4u] = float4((p).normal, (p).instance);                          \
         (dbg)[b_ + 5u] = float4((p).worldPos, (p).prim);                            \
+        (dbg)[b_ + 6u] = float4((p).shadowXyz, (p).shadowStatus);                   \
+        (dbg)[b_ + 7u] = float4((p).shadowDist, (p).shadowInst, (p).shadowPrim, 0.0f); \
     }
 
 [numthreads(64, 1, 1)]
@@ -296,21 +359,48 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     const uint3 cell = uint3(probe % dims.x, (probe / dims.x) % dims.y, probe / (dims.x * dims.y));
     const float3 probePos = gridMin + float3(cell) * spacing;
-    // This pass replays ONE sun hour state. Every group would otherwise trace the
-    // same sun and produce sixteen identical record sets, so only group 0 works.
-    if (dir != 0u)
+
+    // -------------------------------------------------------------------------
+    // WHICH DELTA SOURCE, and therefore which table, stride, record index,
+    // direction and seed. Any value other than SKY reads as SUN, so a
+    // zero-initialised parameter block keeps the shipped behaviour.
+    // -------------------------------------------------------------------------
+    const bool skySource = (RayDbg.source == BAKED_GI_RAYDEBUG_SOURCE_SKY);
+
+    // The ONE group that works, and the record index it belongs to.
+    //   SKY  every group works: group d IS bin d, so one dispatch fills all 16
+    //        record groups and the re-accumulated table's 16 slots.
+    //   SUN  group 0 only, as shipped. One hour state was traced, so the other
+    //        groups must stay untouched.
+    // The group index IS the record index, so the record block and the
+    // re-accumulated table land at the index the UI names.
+    if (!skySource && dtid.y != 0u)
         return;
 
-    // Record addressing: one of the 17 sun hour states, in the sun table.
-    const uint kRespStride = BAKED_GI_SUN_STATES;
-    const uint kRespIdx    = RayDbg.sunState;
+    // Record addressing. SUN: one of the 17 sun hour states, in the sun table.
+    // SKY: this group's own sky bin, in the sky table. The two tables have
+    // different strides, so this pair must move together with wDelta below.
+    const uint kRespStride = skySource ? BAKED_GI_DIRECTIONS : BAKED_GI_SUN_STATES;
+    const uint kRespIdx    = skySource ? dir : RayDbg.sunState;
 
-    // wDelta is BakedGI_Bake.hlsl's sun expression VERBATIM, including the +Y
-    // fallback for a zero sun. A different fallback traces a different ray, and
-    // the self-check would then report a MISMATCH with no visible cause.
-    const float3 sunDir = float3(RayDbg.sunDirX, RayDbg.sunDirY, RayDbg.sunDirZ);
-    const float  sunLen = length(sunDir);
-    const float3 wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
+    // wDelta. SUN is BakedGI_Bake.hlsl's sun expression VERBATIM, including the +Y
+    // fallback for a zero sun. A different fallback traces a different ray, and the
+    // self-check would then report a MISMATCH with no visible cause. SKY is the
+    // bake's sky-transport expression VERBATIM: the fibonacci bin's own direction,
+    // with no normalize of a passed-in vector, because the bake normalizes nothing
+    // there either. The bin is THIS GROUP's index, not a root constant: that is
+    // what lets one dispatch fill all 16 groups.
+    float3 wDelta;
+    if (skySource)
+    {
+        wDelta = BakedGIDeltaDirection(dir);
+    }
+    else
+    {
+        const float3 sunDir = float3(RayDbg.sunDirX, RayDbg.sunDirY, RayDbg.sunDirZ);
+        const float  sunLen = length(sunDir);
+        wDelta = (sunLen > 1e-6f) ? (sunDir / sunLen) : float3(0.0f, 1.0f, 0.0f);
+    }
 
     RWStructuredBuffer<float4> debug    = ResourceDescriptorHeap[RayDbg.rayRecUAVIdx];
     StructuredBuffer<float4>   respPrev = ResourceDescriptorHeap[RayDbg.responsePrevSRVIdx];
@@ -319,24 +409,33 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // The seed, twice. BakedGI_Bake.hlsl's exact expression, including the
     // seedDir resolve: 0xFFFFFFFF means "this thread's own direction", any other
     // value pairs the trace with one fibonacci bin. Each pass replays from it, so
-    // neither pass inherits the other's stream. When the bake pairs the sun with
-    // bin 14, THIS field must carry the same 14 or the self-check compares two
-    // different sets of rays and reports MISMATCH.
-    const uint seedDir = (RayDbg.seedDir == 0xFFFFFFFFu) ? dir : RayDbg.seedDir;
+    // neither pass inherits the other's stream.
+    //
+    // SUN: the bake seeds each hour state from its own state index, so this field
+    // carries that index. SKY: the bake seeds bin j from j and this group IS bin j,
+    // so the seed is the group index whatever the field holds. The sky branch reads
+    // `dir` directly for that reason: a leftover bin from an earlier single-bin
+    // dump would seed all 16 groups from one index and every group but one would
+    // compare two different sets of rays and report MISMATCH.
+    const uint seedDir = skySource ? dir
+                                   : ((RayDbg.seedDir == 0xFFFFFFFFu) ? dir : RayDbg.seedDir);
     const uint seed = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
 
     RNG rng;
     rng.state = seed;
     rng.inc   = 1;
-    const float V = TraceVisRay(rng, probePos, wDelta);
+
+    // No draw happens here. The bake also starts its gather loop at this seed,
+    // because the V_i axis ray that used to run first is gone. BakedGI_Bake.hlsl
+    // states the same rule.
 
     // -------------------------------------------------------------------------
     // PASS 1 — which rays carry a direct term?
     //
     // NdotD * Vhit is 0 for a miss, for a backface reject, and for any hit the
-    // sun does not reach. Only a non-zero product puts anything into the direct
-    // half of L, so those rays are the evidence. Keep the weight for every ray
-    // and decide the slots once the whole direction is known.
+    // traced delta direction does not reach. Only a non-zero product puts anything
+    // into the direct half of L, so those rays are the evidence. Keep the weight
+    // for every ray and decide the slots once the whole direction is known.
     // -------------------------------------------------------------------------
     [loop]
     for (uint r1 = 0; r1 < BAKE_RAYS; ++r1)
@@ -354,7 +453,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
         g_slot[r2] = -1;
     }
 
-    // Slots fill from 0 upward. Two cases, and slot 9's w records which ran.
+    // Slots fill from 0 upward. Two cases. Which case ran is no longer recorded
+    // anywhere: it used to ride slot 9's w, and slot 9 no longer exists. The
+    // case is visible in the output instead — case 1 leaves every slot holding a
+    // qualifier, so no context ray has a record.
     //   case 0: nQual <= DEBUG_RAYS — every qualifier keeps its ray order, and
     //           the free slots take context rays at an even stride.
     //   case 1: nQual >  DEBUG_RAYS — the DEBUG_RAYS largest weights win, in
@@ -433,7 +535,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // -------------------------------------------------------------------------
     rng.state = seed;
     rng.inc   = 1;
-    TraceVisRay(rng, probePos, wDelta); // V again: identical seed, identical ray
+    // The same starting state as the bake: no draw before the gather loop.
+    // BakedGI_Bake.hlsl states the same rule.
 
     float3 acc[9] = (float3[9])0;
     const uint recBase = RAY_RECORDS_BASE + (dir * DEBUG_RAYS) * RAY_RECORD_F4;
@@ -470,15 +573,17 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     // --- Self-check: store the same normalised SH9 the bake stores, with the
-    // bake's own divisor. ---
+    // bake's own divisor. The slot is `dir`, which is the record index this group
+    // traced, so the C++ side compares this slot against that same record index of
+    // the table it copied. A SUN dump fills slot 0 only; a SKY dump fills all 16,
+    // so the readout can hold every bin to its own stored record.
+    //
+    // The record is 9 float4 and that is the whole table: the bake writes no
+    // tenth slot, so this pass must not either. A build that wrote one would put
+    // its bytes on the next record's slot 0.
     const float norm = (4.0f * PI / (float)BAKE_RAYS);
     const uint tBase = RAY_DEBUG_TABLE_BASE + dir * BAKED_GI_RESPONSE_F4;
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
         debug[tBase + lm2] = float4(acc[lm2] * norm * BakedGIA_l(lm2), 0.0f);
-    // Slot 9: x = V_i, as the bake stores it. w carries the selection flag for
-    // this direction — 0 = every qualifier kept, 1 = the largest 64 kept. The
-    // self-check compares x, y and z only, and the bake writes 0 to w, so w is
-    // the one float in the table no comparison can see.
-    debug[tBase + 9u] = float4(V, 0.0f, 0.0f, (nQual > DEBUG_RAYS) ? 1.0f : 0.0f);
 }

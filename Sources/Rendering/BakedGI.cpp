@@ -27,8 +27,12 @@
 //
 // Measured 2026-10-29, after the dead-slot cleanup.
 //   BakedGIUpdateParams  (BakedGI_Update.hlsl): 0, 12, 16, 32, 60, 64, Size 68
+//     and, appended 2026-11-04 for the sky-visibility A/B: skyVisSHSRVIdx 68,
+//     skyVisMode 72, Size 76.
+//   BakedGIVisParams     (BakedGI_Visibility.hlsl): skyVisSHUAVIdx 40, Size 44
 //   BakedGIBakeParams    (BakedGI_Bake.hlsl):   seedDir 68, sunState 72, Size 76
-//   BakedGIRayDebugParams (BakedGI_RayDebug.hlsl): seedDir 56, sunState 60, Size 64
+//   BakedGIRayDebugParams (BakedGI_RayDebug.hlsl): seedDir 56, sunState 60,
+//                            source 64, Size 68
 //   BakedGIDilationParams (BakedGI_Dilate.hlsl): writeMeta 36, Size 40
 // Every field in these blocks is a 4-byte scalar, so these are plain cumulative
 // sums; the guards exist to catch a field inserted in the middle.
@@ -39,7 +43,16 @@ static_assert(offsetof(BakedGIUpdateParams, responseSRVIdx)    == 16, "update pa
 static_assert(offsetof(BakedGIUpdateParams, litSunUAVIdx)      == 32, "update params: lit sun UAV moved");
 static_assert(offsetof(BakedGIUpdateParams, dimZ)              == 60, "update params: dimZ moved");
 static_assert(offsetof(BakedGIUpdateParams, sunResponseSRVIdx) == 64, "update params: sun response SRV moved");
-static_assert(sizeof(BakedGIUpdateParams)                      == 68, "update params: size changed");
+static_assert(offsetof(BakedGIUpdateParams, skyVisSHSRVIdx)    == 68, "update params: sky-vis SH SRV moved");
+static_assert(offsetof(BakedGIUpdateParams, skyVisMode)        == 72, "update params: sky-vis mode moved");
+static_assert(sizeof(BakedGIUpdateParams)                      == 76, "update params: size changed");
+
+// BakedGIVisParams: offsets measured with `dxc -Fc` too. skyVisSHUAVIdx 40,
+// sizeof 44. The shared root slot 12 is sized by the 30-dword DDGIParams, so
+// 11 dwords leave room for the next field as well.
+static_assert(offsetof(BakedGIVisParams, metaUAVIdx)           == 36, "vis params: meta UAV moved");
+static_assert(offsetof(BakedGIVisParams, skyVisSHUAVIdx)       == 40, "vis params: sky-vis SH UAV moved");
+static_assert(sizeof(BakedGIVisParams)                         == 44, "vis params: size changed");
 
 static_assert(offsetof(BakedGIBakeParams, seedDir)             == 68, "bake params: seedDir moved");
 static_assert(offsetof(BakedGIBakeParams, sunState)            == 72, "bake params: sunState moved");
@@ -47,7 +60,8 @@ static_assert(sizeof(BakedGIBakeParams)                        == 76, "bake para
 
 static_assert(offsetof(BakedGIRayDebugParams, seedDir)         == 56, "ray-debug params: seedDir moved");
 static_assert(offsetof(BakedGIRayDebugParams, sunState)        == 60, "ray-debug params: sunState moved");
-static_assert(sizeof(BakedGIRayDebugParams)                    == 64, "ray-debug params: size changed");
+static_assert(offsetof(BakedGIRayDebugParams, source)          == 64, "ray-debug params: source moved");
+static_assert(sizeof(BakedGIRayDebugParams)                    == 68, "ray-debug params: size changed");
 
 static_assert(offsetof(BakedGIDilationParams, recordCount)     == 16, "dilation params: recordCount moved");
 static_assert(offsetof(BakedGIDilationParams, tableSRVIdx)     == 20, "dilation params: table SRV moved");
@@ -55,8 +69,88 @@ static_assert(offsetof(BakedGIDilationParams, metaSRVIdx)      == 28, "dilation 
 static_assert(offsetof(BakedGIDilationParams, writeMeta)       == 36, "dilation params: writeMeta moved");
 static_assert(sizeof(BakedGIDilationParams)                    == 40, "dilation params: size changed");
 
+// -----------------------------------------------------------------------------
+// Sky-visibility SH9 normalization (the A/B's other V source).
+//
+// The visibility bake projects a binary visibility into raw SH9 with equal
+// weight for each of its 16x16x4 = 1024 rays and the factor 4*pi/N
+// (SKYVIS_SH_NORMALIZE, BakedGI_Visibility.hlsl):
+//
+//     L_lm = (4pi / N) * sum_s V_s * Y_lm(d_s)
+//
+// The reconstruction is then sum_lm L_lm Y_lm(d) with no cosine factor. For a
+// FULLY OPEN probe (V = 1 on every ray) only the DC term survives, and it must
+// reconstruct to exactly 1 at every direction:
+//
+//     (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2 = 1
+//
+// Y00 = 0.28209479177387814 comes from EvalSH9Basis (Shaders/PBR.hlsl). This
+// check holds that identity, so a change to the normalization constant or to
+// the basis scale fails the build instead of biasing every probe's V.
+// -----------------------------------------------------------------------------
+namespace
+{
+constexpr double kSH9Y00       = 0.28209479177387814; // EvalSH9Basis, band 0
+constexpr double kSH9OpenValue = 4.0 * 3.14159265358979323846 * kSH9Y00 * kSH9Y00;
+}
+static_assert(kSH9OpenValue > 0.999999999 && kSH9OpenValue < 1.000000001,
+              "sky-vis SH9: the 4pi normalization does not reconstruct a fully open probe to 1");
+
 static_assert(offsetof(FrameConstants, bakedGIUseFilled)       == 1168, "runtime FILLED flag moved");
-static_assert(sizeof(FrameConstants)                           == 1172, "FrameConstants size changed");
+// The two ray-debug source fields are appended after the last 4-byte scalar,
+// so no pad is needed on either side. Measured with dxc as well: 1172, 1176,
+// and the struct size 1180. The Sky V_i cursor that used to occupy 1180 is
+// removed with the channel it marked.
+static_assert(offsetof(FrameConstants, bakedGIRayDebugSource)  == 1172, "ray-debug source field moved");
+static_assert(offsetof(FrameConstants, bakedGIRayDebugSkyDir)  == 1176, "ray-debug sky bin field moved");
+static_assert(sizeof(FrameConstants)                           == 1180, "FrameConstants size changed");
+// The SH9 sky-visibility SRV index. It replaced the response SRV index at the
+// SAME offset, because the two V views are the only readers and the response
+// table no longer carries a visibility. Measured with dxc on BakedGI_Debug.hlsl:
+// 732. Nothing downstream moved, so the pads further on still hold.
+static_assert(offsetof(FrameConstants, bakedGISkyVisSRVIndex)  == 732, "sky-vis SRV index moved");
+
+// -----------------------------------------------------------------------------
+// Ray-debug RECORD layout. The stride comes from BAKED_GI_RAY_RECORD_F4
+// (SharedTypes.h), which both shader files also read, so this block guards the
+// CPU arithmetic that the shader compiler cannot see: the field float4 indices
+// used by the readback, and the two buffer sizes the dispatch and the copy use.
+// Every number below is also printed in the layout comment of SharedTypes.h.
+// -----------------------------------------------------------------------------
+static_assert(BakedGI::kRayRecordF4 == 8u,        "ray record: stride changed");
+static_assert(BakedGI::kRayRecordBytes == 128u,   "ray record: a record is not 128 B");
+// The first six float4 keep their original offsets and meanings. A change here
+// moves every reader at once, so the guard is explicit about all six.
+static_assert(BakedGI::kRayRecF4GatherDir  == 0u, "ray record: rec0 moved");
+static_assert(BakedGI::kRayRecF4Albedo     == 1u, "ray record: rec1 moved");
+static_assert(BakedGI::kRayRecF4L          == 2u, "ray record: rec2 moved");
+static_assert(BakedGI::kRayRecF4Efb        == 3u, "ray record: rec3 moved");
+static_assert(BakedGI::kRayRecF4HitNormal  == 4u, "ray record: rec4 moved");
+static_assert(BakedGI::kRayRecF4HitPos     == 5u, "ray record: rec5 moved");
+static_assert(BakedGI::kRayRecF4Shadow     == 6u, "ray record: rec6 moved");
+static_assert(BakedGI::kRayRecF4ShadowInfo == 7u, "ray record: rec7 moved");
+// 16 directions x 64 records x 8 float4 = 8,192, then 16 x 9 for the table.
+static_assert(BakedGI::kRayDebugTableBase == 8192u, "ray debug: table base moved");
+static_assert(BakedGI::kRayDebugBufF4s    == 8336u, "ray debug: buffer float4 count moved");
+static_assert(BakedGI::kRayDebugBufBytes  == 133376u, "ray debug: buffer size moved");
+static_assert(BakedGI::kRayDebugReadbackBytes == 135680u, "ray debug: readback size moved");
+// The response record shrank from 10 float4 to 9 when the cone visibility left
+// slot 9. The stride is read by the bake, the dilation, the term fold, the ray
+// debug and the CPU readback, so a regression must fail somewhere that names it.
+static_assert(BakedGI::kResponseFloat4s == 9u, "response record: stride changed");
+static_assert(BakedGI::kRayDebugTableBytes == 2304u, "ray debug: stored table size moved");
+// The three secondary status values are read by the shader writer, the shader
+// viewer and this readback, so a renumber has to fail somewhere that names it.
+static_assert(BAKED_GI_RAY_SHADOW_NONE    == 0u, "ray record: shadow status NONE moved");
+static_assert(BAKED_GI_RAY_SHADOW_OPEN    == 1u, "ray record: shadow status OPEN moved");
+static_assert(BAKED_GI_RAY_SHADOW_BLOCKED == 2u, "ray record: shadow status BLOCKED moved");
+// The channel number is written in three files and read by the renderer's
+// instance-count branch, so it is checked against the mirror it must agree with.
+static_assert(BakedGI::kRayFanChannelDeltaDirs == 7u, "ray fan: DeltaDirections channel moved");
+static_assert(BakedGI::kRayFanChannelVHitRay   == 8u, "ray fan: VHit Ray channel moved");
+static_assert(BakedGI::kSkyVisModeCount        == 2u, "sky visibility: mode count changed");
+static_assert((uint32_t)BakedGI::SkyVisMode::SH9          == 0u, "sky visibility: SH9 is not mode 0");
+static_assert((uint32_t)BakedGI::SkyVisMode::NoVisibility == 1u, "sky visibility: NoVisibility is not mode 1");
 
 // =============================================================================
 // Probes/ disk cache — the ShaderCache pattern applied to the bake outputs.
@@ -67,8 +161,11 @@ namespace
 constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
 // Version 2 added the 17 sun states. Version 3 appends the actual dilation
 // count and, for a positive count, the final dilated sky and sun tables.
-// Older files cannot restore the runtime data this build requires. Reject them.
-constexpr uint32_t kProbeCacheVersion = 3;
+// Version 4 drops the tenth float4 of both response tables: the record is 9
+// float4 now, so a version-3 payload is the wrong length and its strides are
+// wrong. Older files cannot restore the runtime data this build requires.
+// Reject them.
+constexpr uint32_t kProbeCacheVersion = 4;
 
 #pragma pack(push, 4)
 struct ProbeCacheHeader
@@ -413,6 +510,11 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     if (!CreateProbeBuffers())
         return false;
+    // The sky-visibility SH9 payload, reported once for each bake. 36 B for each
+    // probe: 418,176 B at 11,616 probes, 4.72 MB at the kMaxProbeCount cap.
+    std::cout << "[BakedGI] sky-visibility SH9 buffer: " << GetSkyVisSHBytes() << " B ("
+              << kSkyVisSHCoeffs * sizeof(float) << " B for each probe, "
+              << m_ProbeCount << " probes)" << std::endl;
     if (m_DilationIterations != 0u && !CreateDilationBuffers())
         return false;
 
@@ -451,23 +553,30 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         vp.probeCount = m_ProbeCount;
         vp.visUAVIdx  = (uint32_t)m_Visibility.uavIndex;
         vp.metaUAVIdx = (uint32_t)m_Meta.uavIndex;
+        vp.skyVisSHUAVIdx = (uint32_t)m_SkyVisSH.uavIndex;
 
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIVisParams) / 4, &vp, 0);
         cmdList->SetPipelineState(m_VisBakePSO.Get());
         cmdList->Dispatch(kVisDispatchX, (m_ProbeCount + kVisDispatchX - 1) / kVisDispatchX, 1);
 
-        // Barrier BOTH outputs: the transport iterations read the meta bits
+        // Barrier ALL THREE outputs: the transport iterations read the meta bits
         // the classification lane wrote (the visibility barrier alone would
-        // leave that write-read unordered).
-        D3D12_RESOURCE_BARRIER visBarriers[2] = {
+        // leave that write-read unordered), and the SH buffer is read by the
+        // per-frame fold after this list completes.
+        D3D12_RESOURCE_BARRIER visBarriers[3] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_Visibility.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_Meta.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SkyVisSH.resource.Get()),
         };
-        cmdList->ResourceBarrier(2, visBarriers);
+        cmdList->ResourceBarrier(3, visBarriers);
     }
     else
     {
         std::cerr << "[BakedGI] Visibility bake PSO missing — Chebyshev weights skipped" << std::endl;
+        // No dispatch wrote the SH buffer, so its bytes are undefined. Mark the
+        // SH data unavailable: the fold then zeroes V and the UI says so,
+        // instead of reading garbage coefficients.
+        m_SkyVisSHValid = false;
     }
 
     uint32_t cur = 0;
@@ -605,6 +714,21 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
+    // ---- Sky-visibility SH9: leave the write state ONCE, on the bake list ----
+    //
+    // The visibility dispatch wrote this buffer as a UAV and its barrier is
+    // recorded above, so this transition is ordered after that write and after
+    // every later UAV barrier of the bake. The per-frame fold reads the buffer
+    // through an SRV on a different command list, so the read state must be
+    // established here and once, not in RecordUpdate.
+    //
+    // A re-bake calls CreateProbeBuffers, which replaces the resource and sets
+    // its tracked state to UNORDERED_ACCESS again, so no stale state survives a
+    // bake. The buffer is transitioned only when a dispatch actually filled it:
+    // without the visibility PSO the bytes are undefined and nothing reads them.
+    if (m_SkyVisSHValid)
+        m_SkyVisSH.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
     std::cout << "[BakedGI] Bake recorded (" << m_ProbeCount << " probes, "
               << "visibility: 16x16 depth moments x" << kVisStride << " texels/probe, "
               << (m_EfbBallsValid ? "per-term response balls captured"
@@ -700,27 +824,76 @@ inline float RayDebugLuminance(float r, float g, float b)
 }
 
 // One float4 of the response table for a direction and an SH term.
+// The stride is BakedGI::kResponseFloat4s (9). It is NOT a literal: the record
+// lost its tenth float4 when the cone visibility left slot 9, and a stale 10
+// here would read every direction one float4 past where it belongs.
 inline const float* RayDebugTable(const uint8_t* base, uint32_t dir, uint32_t lm)
 {
-    return reinterpret_cast<const float*>(base) + ((size_t)dir * 10u + lm) * 4u;
+    return reinterpret_cast<const float*>(base)
+         + ((size_t)dir * BakedGI::kResponseFloat4s + lm) * 4u;
 }
 
-// rec3.w packs TWO values into one float, because the record is a fixed 96 B and
-// no field is spare:  status + 4 * sourceRayIndex. BakedGI_RayDebug.hlsl owns the
-// encode. Status keeps its old meaning and its old three values (0 = sky miss,
-// 1 = backface reject, 2 = shaded), so a reader decodes instead of comparing.
+// The float offset of one record field. A record is indexed in float4s
+// (BakedGI::kRayRecF4*, which mirrors the shader layout) and this readback walks
+// floats, so this is the ONE place that converts.
+inline const float* RayDebugField(const float* rec, uint32_t f4)
+{
+    return rec + (size_t)f4 * 4u;
+}
+
+// The record `r` of record group `dir`, inside the mapped readback. ONE place
+// multiplies by the stride: the readout used to spell the same expression four
+// times, and a stride change had to reach all four.
+inline const float* RayDebugRecord(const uint8_t* mapped, uint32_t dir, uint32_t r)
+{
+    return reinterpret_cast<const float*>(mapped)
+         + ((size_t)dir * BakedGI::kDebugGatherRays + r) * BakedGI::kRayRecordF4 * 4u;
+}
+
+// rec3.w packs TWO values into one float, because the 6-float4 record it was
+// written against had no spare field:  status + 4 * sourceRayIndex.
+// BakedGI_RayDebug.hlsl owns the encode. Status keeps its old meaning and its old
+// three values (0 = sky miss, 1 = backface reject, 2 = shaded), so a reader
+// decodes instead of comparing.
 //
 // Exactness: fp32 represents every integer up to 2^24, and the largest packed
 // value is 2 + 4 * 255 = 1022, so std::fmod is exact and the round trip loses
 // nothing. Read rec3.w directly and you get the packed value, not the status.
 inline float RayDebugStatus(const float* rec)
 {
-    return std::fmod(rec[12 + 3], 4.0f);
+    return std::fmod(RayDebugField(rec, BakedGI::kRayRecF4Efb)[3], 4.0f);
 }
 
 inline uint32_t RayDebugSourceRay(const float* rec)
 {
-    return static_cast<uint32_t>(std::lround((rec[12 + 3] - RayDebugStatus(rec)) * 0.25f));
+    return static_cast<uint32_t>(
+        std::lround((RayDebugField(rec, BakedGI::kRayRecF4Efb)[3] - RayDebugStatus(rec)) * 0.25f));
+}
+
+// The SECONDARY visibility ray of a record: the shadow ray the gather hit fired
+// toward the active delta direction W. rec6.w is the status and it is a plain
+// float, so no decode is needed; the three values come from SharedTypes.h, which
+// the shader writer reads as well.
+//
+//   NONE     no shadow ray was traced. The record is not shaded, or NdotD <= 0
+//   OPEN     nothing was hit, so Vhit is 1 and rec6.xyz is W
+//   BLOCKED  the ray stopped, so Vhit is 0 and rec6.xyz is that hit's world pos
+inline float RayDebugShadowStatus(const float* rec)
+{
+    return RayDebugField(rec, BakedGI::kRayRecF4Shadow)[3];
+}
+
+inline const float* RayDebugShadowPayload(const float* rec)
+{
+    return RayDebugField(rec, BakedGI::kRayRecF4Shadow); // .xyz = W (open) or hit pos (blocked)
+}
+
+// rec7 = (distance, instance, primitive, reserved). -1 in all three means the
+// field carries no value, which is the rec4/rec5 convention: instance 0 and
+// distance 0 are legal and must not also mean "none".
+inline const float* RayDebugShadowInfo(const float* rec)
+{
+    return RayDebugField(rec, BakedGI::kRayRecF4ShadowInfo);
 }
 
 } // namespace
@@ -734,6 +907,8 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
                              D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                              D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
                              uint32_t probeIndex,
+                             RayDebugSource source,
+                             uint32_t skyDirection,
                              uint32_t sunState)
 {
     if (!device || !cmdList || !rootSignature || !m_RayDebugPSO)
@@ -741,10 +916,31 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
     if (!m_Valid || m_ProbeCount == 0)
         return false;
 
+    // The mirror check runs here, on the one path that prints a direction. It is
+    // two sin/cos calls for each dump, and it turns a formula drift into a failed
+    // dump instead of a direction in the log that the shader never traced.
+    const bool mirrorOk = VerifyDeltaDirectionMirror();
+    assert(mirrorOk);
+    (void)mirrorOk;
+
     // Clamp into the grid: a stale UI value must not read outside the table.
     if (probeIndex >= m_ProbeCount)
         probeIndex = m_ProbeCount - 1u;
     m_RayDebugProbe = probeIndex;
+    // Clamp the bin. A stale value must not select a bin that does not exist, and
+    // it is the DISPLAYED bin after the dump, so it also clamps what the panel may
+    // show next.
+    if (skyDirection >= kDirections)
+        skyDirection = kDirections - 1u;
+    // Record what THIS dump replays, before any early return below, so the labels
+    // name the source the buffer will hold. A dump never changes the caller's
+    // selection: the source is an argument, so it can only be echoed here.
+    //
+    // For a SKY dump the bin is the DISPLAYED bin, not the set of bins traced: the
+    // dispatch below records all kDirections of them, so the request only decides
+    // which one is on screen when the dump finishes.
+    m_RayDebugSource       = source;
+    m_RayDebugSkyDirection = (source == RayDebugSource::Sky) ? skyDirection : kRayDebugNoDir;
     // Clear the verdict for this dump. A skipped assignment then yields no
     // verdict, whatever the index value is. The pairing check alone cannot catch
     // a re-bake that flips the verdict at the SAME index.
@@ -807,38 +1003,74 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
     p.rayRecUAVIdx       = (uint32_t)m_RayDebugBuf.uavIndex;
     // The final iteration (kBakeIterations - 1 = 2) reads the previous
     // iteration's table for its feedback term. With the 3-iteration odd
-    // ping-pong, that buffer is 1 - m_FinalResponse.
+    // ping-pong, that buffer is 1 - m_FinalResponse. This is the SKY feedback
+    // source, and the sky replay keeps it: the sky transport ping-pongs on the same
+    // schedule as the sun series.
     p.responsePrevSRVIdx = (uint32_t)m_Response[1 - m_FinalResponse].srvIndex;
     p.visSRVIdx          = (uint32_t)m_Visibility.srvIndex;
 
-    // Method 3: replay ONE sun hour state. Its feedback AND its stored record both
-    // come from the sun table (stride kSunStates, indexed by sunState), which is
-    // what the bake's sun pass wrote. The ping-pong index is the same as the binned
-    // one: the sun series advances on the same per-iteration schedule.
+    // The one field that selects the table, the stride, the record index, the delta
+    // direction and the seed TOGETHER. The shader reads anything that is not 1 as
+    // SUN, so the zero-initialised struct would already mean SUN; the assignment is
+    // explicit so a reader sees the source travel. There is no sky-bin field: a SKY
+    // dispatch takes the bin from each group's own index, which is what lets ONE
+    // dispatch fill all 16 groups.
+    p.source       = (uint32_t)m_RayDebugSource;
+
+    // SUN: replay ONE sun hour state. Its feedback AND its stored record both come
+    // from the sun table (stride kSunStates, indexed by sunState), which is what the
+    // bake's sun pass wrote. Everything below is the shipped path, unchanged.
     if (sunState >= kSunStates)
         sunState = kSunStates - 1u;
     m_RayDebugSunState = sunState;
     p.sunState = m_RayDebugSunState;
-    // The seed, resolved exactly as the bake resolves it. The bake seeds each hour
-    // state from its own index, so the replay must carry that same state index.
-    // Under the binned path it is fixed to kSunSeedOwnDir, because that is what
-    // the binned bake always uses — passing a bin here would compare this replay
-    // against a table baked from `dir`.
-    p.seedDir = m_SunResponseValid ? m_RayDebugSunState : kSunSeedOwnDir;
-    if (m_SunResponseValid)
+
+    if (m_RayDebugSource == RayDebugSource::Sky)
     {
-        // The state's own direction, from the one formula. Derived, never passed
-        // in: a caller-supplied direction could describe another hour and the
-        // self-check would then report a MISMATCH with no visible cause.
-        const DirectX::XMFLOAT3 d = SunDirectionAtHourCPU(m_RayDebugSunState);
-        p.sunDirX = d.x;
-        p.sunDirY = d.y;
-        p.sunDirZ = d.z;
-        p.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - m_FinalSunResponse].srvIndex;
+        // SKY: the bake's sky transport, for EVERY fibonacci bin in one dispatch.
+        // Each group d traces bin d, so the seed must be d as well — the bake seeds
+        // bin j from j. The own-direction sentinel is exactly that request, and it
+        // is the only value that can be shared by 16 groups: a fixed bin here would
+        // seed all of them from one index and 15 would report MISMATCH.
+        // The feedback table stays the sky table set above (stride kDirections,
+        // indexed by the group index in the shader). sunDir stays zero: the SKY
+        // branch of the shader never reads it.
+        p.seedDir = kSunSeedOwnDir;
+    }
+    else
+    {
+        // The seed, resolved exactly as the bake resolves it. The bake seeds each
+        // hour state from its own index, so the replay must carry that same state
+        // index. Under the binned fallback it is fixed to kSunSeedOwnDir, because
+        // that is what the binned bake always uses — passing a bin here would
+        // compare this replay against a table baked from `dir`.
+        p.seedDir = m_SunResponseValid ? m_RayDebugSunState : kSunSeedOwnDir;
+        if (m_SunResponseValid)
+        {
+            // The state's own direction, from the one formula. Derived, never
+            // passed in: a caller-supplied direction could describe another hour
+            // and the self-check would then report a MISMATCH with no visible
+            // cause.
+            const DirectX::XMFLOAT3 d = SunDirectionAtHourCPU(m_RayDebugSunState);
+            p.sunDirX = d.x;
+            p.sunDirY = d.y;
+            p.sunDirZ = d.z;
+            p.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - m_FinalSunResponse].srvIndex;
+        }
     }
 
     cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIRayDebugParams) / 4, &p, 0);
     cmdList->SetPipelineState(m_RayDebugPSO.Get());
+    // kDirections groups, always. A SUN dump works in group 0 and returns at once
+    // from the other 15. A SKY dump works in every group, because group d traces
+    // bin d — so ONE click fills all 16 record groups and the whole re-accumulated
+    // table, and the bin browser then needs no second dump.
+    //
+    // COST. A SKY dump therefore replays kDirections x kBakeGatherRays ray
+    // traversals instead of one direction's worth, which is about 16x the GPU work
+    // of the single-bin dump. It is a synchronous debug click, it never runs in a
+    // normal frame, and the extra time is the price of browsing all 16 bins without
+    // a wait. It is NOT a cost per frame.
     cmdList->Dispatch(1, kDirections, 1);
 
     {
@@ -859,15 +1091,24 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
 
     // The probe's slice of the stored table -> readback, for the self-check.
     {
-        // The stored slice is the probe's record for the replayed hour state; the
-        // 16-direction table's slice would read past it.
-        ID3D12Resource* stored = m_SunResponseValid
+        // WHICH TABLE, and which slice of it. The source decides, and nothing else
+        // does: the two tables have different strides, so the wrong branch copies
+        // bytes that belong to another probe or another record.
+        //
+        //   SUN  ONE record: the probe's record for the replayed hour state. The
+        //        full 16-direction slice would read past the sun row.
+        //   SKY  the probe's whole 16-record sky slice, so the readout can rank all
+        //        sixteen bins by stored DC luminance AND check every one of them
+        //        against its own re-accumulated record.
+        const bool sunSource  = (m_RayDebugSource != RayDebugSource::Sky);
+        const bool sunTable   = sunSource && m_SunResponseValid;
+        ID3D12Resource* stored = sunTable
             ? m_SunResponse[m_FinalSunResponse].resource.Get()
             : m_Response[m_FinalResponse].resource.Get();
-        const UINT64 srcOffset = m_SunResponseValid
+        const UINT64 srcOffset = sunTable
             ? (UINT64)(m_RayDebugProbe * kSunStates + m_RayDebugSunState) * kResponseFloat4s * 16u
             : (UINT64)m_RayDebugProbe * kDirections * kResponseFloat4s * 16u;
-        const UINT64 tableBytes = m_SunResponseValid
+        const UINT64 tableBytes = sunTable
             ? (UINT64)kResponseFloat4s * 16u : kRayDebugTableBytes;
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
             stored, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -897,6 +1138,24 @@ void BakedGI::TransitionRayDebugForRead(ID3D12GraphicsCommandList* cmdList)
     // GPUResource::Transition guards on a state change, so drawing the fan on
     // two frames in a row emits one barrier, not two.
     m_RayDebugBuf.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+bool BakedGI::SetRayDebugSkyDirection(uint32_t dir)
+{
+    // CPU STATE ONLY. This function deliberately contains no dispatch, no copy, no
+    // Map and no wait, because a sky dump records every bin: another bin is already
+    // in the buffer. Moving the display therefore costs nothing and cannot stall
+    // the frame. If a future change ever needs a dispatch here, the browser becomes
+    // a dump and the UI promise ("no dump, no wait") becomes false.
+    if (m_RayDebugSource != RayDebugSource::Sky)
+        return false; // a SUN dump holds one group; there is no sky bin to show
+    if (!m_RayDebugBuf.resource)
+        return false; // no records at all
+    if (dir >= kDirections)
+        return false; // out of range: keep the displayed bin, never clamp silently
+
+    m_RayDebugSkyDirection = dir;
+    return true;
 }
 
 BakedGI::ProbeMetaStatus BakedGI::ReadProbeMeta(uint32_t probe, uint32_t& metaWord) const
@@ -945,15 +1204,60 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     const uint8_t* tableReacc  = mapped + (UINT64)kRayDebugTableBase * 16u;
     const uint8_t* tableStored = mapped + kRayDebugStoredOff;
 
+    // --- WHICH SOURCE THIS READOUT DESCRIBES ---
+    // Every label, index and verdict below derives from these three values, so the
+    // readout cannot name a table the dump did not read. The two tables have
+    // different strides and different meanings for the same integer, so a single
+    // confused index would compare a sun record against a sky record and report a
+    // MISMATCH that is purely an addressing difference.
+    //
+    //   skySource  the dump replayed the sky table. It traced EVERY fibonacci bin,
+    //              so all kDirections record groups hold records and every bin can
+    //              be checked and displayed.
+    //   sunTable   a sun dump whose sun table exists, so ONE record was copied.
+    //              Without the sun table the shipped binned fallback runs.
+    //   focusDir   the bin ON DISPLAY, which is also the record GROUP the Ray Fan
+    //              and the Cage Trace read. It is where the detailed tables below
+    //              start, not the set of bins that were traced.
+    const bool     skySource = (m_RayDebugSource == RayDebugSource::Sky);
+    const bool     sunTable  = !skySource && m_SunResponseValid;
+    const uint32_t focusDir  = skySource ? m_RayDebugSkyDirection : 0u;
+
     std::cout << "[BakedGI RayDebug] probe " << m_RayDebugProbe
               << " (grid " << m_DimX << "x" << m_DimY << "x" << m_DimZ
               << " @ " << m_Spacing << "m)" << std::endl;
+    // Name the source BEFORE any number. Every number below describes one record of
+    // one table, and the reader must know which one.
+    if (skySource)
+    {
+        // The direction is the CPU mirror of BakedGIDeltaDirection, so the reader
+        // can see the vector the shader traced instead of having to derive it.
+        const DirectX::XMFLOAT3 d = DeltaDirection(focusDir);
+        std::cout << "    source SKY — all " << kDirections
+                  << " sky directions were traced; the display is bin " << focusDir
+                  << " of " << kDirections << ", direction (" << d.x << ", " << d.y << ", " << d.z
+                  << "), record group " << focusDir << std::endl;
+    }
+    else if (sunTable)
+    {
+        std::cout << "    source SUN — hour state " << m_RayDebugSunState
+                  << " (hour " << (kSunStateHour0 + kSunStateStepHours * (float)m_RayDebugSunState)
+                  << "), record group 0" << std::endl;
+    }
+    else
+    {
+        std::cout << "    source SUN — binned fallback: no sun table, so the replay seeded from"
+                     " the direction index and compared against the sky table" << std::endl;
+    }
     // The two counts differ on purpose, so print both. Confusing them is how a
-    // reader would size a ranking against the wrong set.
-    std::cout << "    " << kBakeGatherRays << " gather rays for each direction were replayed ("
-              << kBakeGatherRays * kDirections << " rays); the " << kDebugGatherRays
-              << " RECORD slots of each direction hold the rays that carry a direct term first"
+    // reader would size a ranking against the wrong set. The GROUP count differs by
+    // source: a SUN dump writes one group, a SKY dump writes all sixteen.
+    std::cout << "    " << kBakeGatherRays << " gather rays for each traced direction were"
+                 " replayed; the " << kDebugGatherRays
+              << " RECORD slots of a direction hold the rays that carry a direct term first."
               << std::endl;
+    std::cout << "    Record groups written by this dump: "
+              << (skySource ? kDirections : 1u) << " of " << kDirections << std::endl;
 
     // --- Validity gate. Read the probe's meta bit up front, so the reader has
     // the verdict before step 1. Do NOT infer invalidity from an all-zero
@@ -996,10 +1300,11 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     }
 
     // --- Step 1: rank the stored records by the luminance of the DC term. ---
-    // The count follows what the dump COPIED. The sun replay stores ONE record
-    // (its own hour state), so ranking 16 would read 2400 B past the copy and
-    // print numbers that belong to no bake at all.
-    const uint32_t rankDirs = m_SunResponseValid ? 1u : kDirections;
+    // The count follows what the dump COPIED. A sun dump copies ONE record (its own
+    // hour state), so ranking 16 would read 2400 B past the copy and print numbers
+    // that belong to no bake at all. A sky dump copies the probe's whole 16-record
+    // slice, so all sixteen bins are rankable.
+    const uint32_t rankDirs = sunTable ? 1u : kDirections;
     std::vector<std::pair<float, uint32_t>> dirRank;
     dirRank.reserve(rankDirs);
     for (uint32_t h = 0; h < rankDirs; ++h)
@@ -1016,78 +1321,116 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     for (size_t i = 0; i < dirRank.size(); ++i)
     {
         const uint32_t h = dirRank[i].second;
-        const float* v = RayDebugTable(tableStored, h, 9u); // slot 9 = V_i
         std::cout << "    " << (rankDirs == 1u ? "hour state " : "dir ")
                   << (h < 10u ? " " : "") << h
-                  << "  dcLum " << dirRank[i].first
-                  << "  V_i " << v[0] << std::endl;
+                  << "  dcLum " << dirRank[i].first << std::endl;
     }
 
-    // Name the state the Ray Fan replays, next to the DC ranking. The two picks
-    // differ on purpose: step 1 ranks by baked DC luminance, and the fan follows
-    // the hour state the dump replayed.
-    if (sunToDir && m_SunResponseValid)
+    // Name the record the Ray Fan draws, next to the DC ranking. The two picks
+    // differ on purpose: step 1 ranks by baked DC luminance, and the fan follows the
+    // bin ON DISPLAY. Naming it unconditionally is safe: it is a fact of the dump and
+    // of the panel's bin browser, not of the scene's light.
+    if (skySource)
+    {
+        std::cout << "    the Ray Fan displays sky direction " << focusDir
+                  << " (record group " << focusDir
+                  << "); the panel's Sky Bin control moves it with no new dump" << std::endl;
+    }
+    else if (sunTable)
     {
         std::cout << "    the Ray Fan replays hour state " << m_RayDebugSunState
                   << " (hour " << (kSunStateHour0 + kSunStateStepHours * (float)m_RayDebugSunState)
-                  << ")" << std::endl;
+                  << ")";
+        // The scene's live to-sun direction is NOT what the replay traced: the
+        // replay traces the baked hour state's own direction. Printing both answers
+        // "is the light where the state says it is", which is the only question the
+        // live light can answer here. A SKY replay ignores this argument, because no
+        // sun record is involved.
+        if (sunToDir)
+        {
+            std::cout << ", and the scene's to-sun direction is ("
+                      << sunToDir->x << ", " << sunToDir->y << ", " << sunToDir->z << ")";
+        }
+        std::cout << std::endl;
     }
+    // The binned fallback prints nothing here: it has no single replayed record to
+    // name.
 
-    // --- Step 2: rank the RECORDS of the highest-DC-luminance direction, step
-    // 1's winner, by the luminance of L (record component 2). ---
-    // This winner is a DC-luminance pick. It is NOT the hour state the Ray Fan
-    // replays (m_RayDebugSunState). The two are different picks on purpose; do
-    // not join them.
+    // --- Step 2: rank the RECORDS of the displayed direction, by the luminance of
+    // L (record component 2). ---
+    // A SUN dump traced one hour state, so step 1's DC winner IS that record. A SKY
+    // dump traced all sixteen bins while step 1 ranks the stored table, so the two
+    // picks can differ. The detailed tables below describe ONE bin — the displayed
+    // one — because 16 x 64 rows would bury the answer.
     //
     // A record is NOT a source ray. The bake traces kBakeGatherRays for each
     // direction and the debug pass keeps kDebugGatherRays of them, qualifiers
     // first (BakedGI_RayDebug.hlsl). So record 0..63 are an ORDERED SUBSET of
     // rays 0..255, and "ray" below is the source index read from rec3.w. A
     // reader who assumes record r is ray r will mis-name every ray.
-    const uint32_t dcDir = dirRank.empty() ? 0u : dirRank.front().second;
+    const uint32_t dcDir     = dirRank.empty() ? 0u : dirRank.front().second;
+    // The displayed group: group 0 for a sun dump, the displayed bin's group for a
+    // sky dump. In the shipped sun path dcDir is also 0, because a sun dump ranks
+    // one record, so nothing moves there.
+    const uint32_t recordDir = skySource ? focusDir : 0u;
     std::vector<std::pair<float, uint32_t>> rayRank;
     rayRank.reserve(kDebugGatherRays);
     for (uint32_t r = 0; r < kDebugGatherRays; ++r)
     {
         // The record index is in float4 units, so multiply by 4 for the float
         // offset (the same conversion RayDebugTable applies).
-        const float* rec = reinterpret_cast<const float*>(mapped)
-                         + ((size_t)dcDir * kDebugGatherRays + r) * kRayRecordF4 * 4u;
-        const float* L = rec + 8; // rec2 = (L.rgb, Vhit)
+        const float* rec = RayDebugRecord(mapped, recordDir, r);
+        const float* L = RayDebugField(rec, BakedGI::kRayRecF4L); // rec2 = (L.rgb, Vhit)
         rayRank.emplace_back(RayDebugLuminance(L[0], L[1], L[2]), r);
     }
     std::sort(rayRank.begin(), rayRank.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    // Under method 3 the ray-debug replay wrote ONE group, for ONE hour state. The
-    // DC-luminance pick ranks the 16 bins, which the sun fold no longer reads, so
-    // naming a winner would point at a direction with no bearing on the image.
-    if (m_SunResponseValid)
+    // This table describes ONE group: the displayed one. A SUN dump wrote group 0,
+    // and a SKY dump wrote every group, so either way the rows below belong to a
+    // record the dump traced.
+    if (skySource)
+    {
+        std::cout << "[BakedGI RayDebug] step 2 — the DISPLAYED sky direction " << focusDir
+                  << " (step 1's DC winner is dir " << dcDir
+                  << (dcDir == focusDir ? ", the same bin)"
+                                        : ", a different bin; every bin has records)")
+                  << ", " << kDebugGatherRays << " records by L luminance (high to low), top 16:"
+                  << std::endl;
+    }
+    else if (sunTable)
     {
         std::cout << "[BakedGI RayDebug] step 2 — hour state " << m_RayDebugSunState
-                  << " (method 3: one direction, no DC-luminance pick; the 16 bins "
+                  << " (one direction, no DC-luminance pick; the 16 bins "
                      "carry no sun weight), "
                   << kDebugGatherRays << " records by L luminance (high to low), top 16:"
                   << std::endl;
     }
     else
     {
-        std::cout << "[BakedGI RayDebug] step 2 — highest-DC-luminance direction " << dcDir
-                  << ", " << kDebugGatherRays << " records by L luminance (high to low), top 16:"
+        // The binned fallback: no sun table, so the replay wrote group 0 and step 1
+        // ranked the 16 stored directions. Naming a DC winner as the record source
+        // would name a group that holds no records.
+        std::cout << "[BakedGI RayDebug] step 2 — binned fallback: record group 0, the only group"
+                     " the replay wrote (step 1 ranks all " << kDirections << " stored directions), "
+                  << kDebugGatherRays << " records by L luminance (high to low), top 16:"
                   << std::endl;
     }
     for (size_t i = 0; i < rayRank.size() && i < 16u; ++i)
     {
         const uint32_t r = rayRank[i].second;
-        const float* rec = reinterpret_cast<const float*>(mapped)
-                         + ((size_t)dcDir * kDebugGatherRays + r) * kRayRecordF4 * 4u;
-        const float* gdir = rec + 0;
-        const float* alb  = rec + 4;
-        const float* L    = rec + 8;
+        const float* rec = RayDebugRecord(mapped, recordDir, r);
+        const float* gdir = RayDebugField(rec, BakedGI::kRayRecF4GatherDir);
+        const float* alb  = RayDebugField(rec, BakedGI::kRayRecF4Albedo);
+        const float* L    = RayDebugField(rec, BakedGI::kRayRecF4L);
         // rec4 = (hit normal.xyz, instance index), rec5 = (hit world pos.xyz,
         // primitive index). -1 in w means the ray carried no surface.
-        const float* idn  = rec + 16;
-        const float* idp  = rec + 20;
+        const float* idn  = RayDebugField(rec, BakedGI::kRayRecF4HitNormal);
+        const float* idp  = RayDebugField(rec, BakedGI::kRayRecF4HitPos);
+        // rec6/rec7 = the SECONDARY visibility ray of that hit. shw names its
+        // status, so "Vhit 1" is no longer the only evidence a row carries.
+        const float* shw  = RayDebugField(rec, BakedGI::kRayRecF4Shadow);
+        const float* shi  = RayDebugField(rec, BakedGI::kRayRecF4ShadowInfo);
         std::cout << "    rec " << (r < 10u ? " " : "") << r
                   << "  ray " << RayDebugSourceRay(rec)
                   << "  L " << rayRank[i].first
@@ -1098,17 +1441,27 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
                   << "  inst " << (int)idn[3]
                   << "  prim " << (int)idp[3]
                   << "  Lrgb(" << L[0] << ", " << L[1] << ", " << L[2] << ")"
+                  << "  | shw " << RayDebugShadowStatusName(RayDebugShadowStatus(rec))
+                  << " shdist " << shi[0]
+                  << " shinst " << (int)shi[1]
+                  << " shprim " << (int)shi[2]
+                  << " shxyz(" << shw[0] << ", " << shw[1] << ", " << shw[2] << ")"
                   << std::endl;
     }
 
     // --- Step 2b: the hit-surface census. ---
-    // Group every HIT of the probe's 16 x 64 re-traced rays by the instance it
-    // landed on, and print that group's ray count, mean diffuse albedo, mean hit
-    // position and mean hit normal. This is what rec4/rec5 exist for: a record
-    // used to carry no surface identity, so naming the mesh behind a coloured ray
-    // meant reproducing EvalResponseIndirect offline and inferring the normal from
-    // NdotD. It also makes a tinted surface visible as a NUMBER — the instance
-    // whose mean albedo is red is the one to go looking for.
+    // Group every HIT of the probe's re-traced rays by the instance it landed on,
+    // and print that group's ray count, mean diffuse albedo, mean hit position and
+    // mean hit normal. This is what rec4/rec5 exist for: a record used to carry no
+    // surface identity, so naming the mesh behind a coloured ray meant reproducing
+    // EvalResponseIndirect offline and inferring the normal from NdotD. It also
+    // makes a tinted surface visible as a NUMBER — the instance whose mean albedo is
+    // red is the one to go looking for.
+    //
+    // The scan covers all kDirections groups. A SKY dump fills every one of them,
+    // so the census is the whole sphere. A SUN dump fills group 0 only, and the
+    // other groups are a freshly zeroed buffer with status 0 (sky miss), so they
+    // add nothing and the census stays the shipped one direction.
     //
     // The count covers every non-miss ray (status >= 0.5), backface rejects
     // included: a reject names a real surface too, and it is often the one being
@@ -1128,13 +1481,12 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     {
         for (uint32_t r = 0; r < kDebugGatherRays; ++r)
         {
-            const float* rec = reinterpret_cast<const float*>(mapped)
-                             + ((size_t)h * kDebugGatherRays + r) * kRayRecordF4 * 4u;
+            const float* rec = RayDebugRecord(mapped, h, r);
             if (RayDebugStatus(rec) < 0.5f) // status 0 = sky miss
                 continue;
-            const float* alb = rec + 4;
-            const float* nrm = rec + 16;
-            const float* pos = rec + 20;
+            const float* alb = RayDebugField(rec, BakedGI::kRayRecF4Albedo);
+            const float* nrm = RayDebugField(rec, BakedGI::kRayRecF4HitNormal);
+            const float* pos = RayDebugField(rec, BakedGI::kRayRecF4HitPos);
             const uint32_t inst = (uint32_t)std::max(0.0f, nrm[3]);
             HitGroup* g = nullptr;
             for (auto& e : groups)
@@ -1159,8 +1511,16 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
               [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
 
     std::cout << "[BakedGI RayDebug] step 2b — hit surfaces, " << kDebugGatherRays
-              << " records of " << kBakeGatherRays << " replayed rays for each of "
-              << kDirections << " directions, grouped by instance:" << std::endl;
+              << " records of " << kBakeGatherRays << " replayed rays, source "
+              << RayDebugSourceName(m_RayDebugSource);
+    if (skySource)
+        std::cout << ", all " << kDirections << " sky directions ("
+                  << (kDirections * kDebugGatherRays)
+                  << " records), grouped by instance:" << std::endl;
+    else if (sunTable)
+        std::cout << " hour state " << m_RayDebugSunState << ", grouped by instance:" << std::endl;
+    else
+        std::cout << " (binned fallback), grouped by instance:" << std::endl;
     if (groups.empty())
         std::cout << "    no hit rays — this probe sees sky only" << std::endl;
     for (size_t i = 0; i < groups.size() && i < 12u; ++i)
@@ -1181,11 +1541,14 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
 
     // --- Step 2c: the Cage Trace pool — the CPU side of the ray picker (view
     // 9). One entry for each shaded ray whose feedback term beats its direct term
-    // at the hit ("direct < Efb"), for EVERY direction. ---
+    // at the hit ("direct < Efb"). ---
     //
-    // The view's direction is the sun fold's argmax, so building all 16 is what
-    // stops a sun change after the dump from leaving the combo on another
-    // direction's rays. The cost is 16 x 64 records, read once per dump.
+    // The pool is built for EVERY group, and a SKY dump fills every group, so all
+    // sixteen bins have a filled pool. A SUN dump writes group 0 only, so groups
+    // 1..15 are zero in a freshly zeroed buffer and their lists come out empty by
+    // construction. The UI reads the pool of GetRayDebugDir(), which is the
+    // DISPLAYED group, so the combo enumerates the rays on screen and never another
+    // direction's.
     //
     // The score is luminance(diffAlbedo * Efb) — the shader's own key. The bake's
     // band-0 coefficient is one constant times the ray's radiance (all 64 rays
@@ -1199,17 +1562,16 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
             m_RayCandidates[h].clear();
             for (uint32_t r = 0; r < kDebugGatherRays; ++r)
             {
-                const float* rec = reinterpret_cast<const float*>(mapped)
-                                 + ((size_t)h * kDebugGatherRays + r) * kRayRecordF4 * 4u;
+                const float* rec = RayDebugRecord(mapped, h, r);
                 // rec3.w packs status + 4 * sourceRayIndex; decode the status.
                 // The shader's test is |status - 2| <= 0.5.
                 const float status = RayDebugStatus(rec);
                 if (status < 1.5f || status > 2.5f)
                     continue; // a sky miss or a backface reject carries no L and no Efb
 
-                const float* alb  = rec + 4;  // (diffAlbedo.rgb, NdotD)
-                const float* L    = rec + 8;  // (L.rgb, Vhit)
-                const float* efb  = rec + 12; // (Efb.rgb, status)
+                const float* alb  = RayDebugField(rec, BakedGI::kRayRecF4Albedo); // (diffAlbedo.rgb, NdotD)
+                const float* L    = RayDebugField(rec, BakedGI::kRayRecF4L);      // (L.rgb, Vhit)
+                const float* efb  = RayDebugField(rec, BakedGI::kRayRecF4Efb);    // (Efb.rgb, packed)
                 const float  ndotd = alb[3] * L[3]; // NdotD * Vhit, the direct term's weight
 
                 RayCandidate c;
@@ -1227,21 +1589,23 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
         m_RayCandidateDirs = kDirections;
     }
 
-    if (sunToDir)
     {
-        // Group 0 is the only group the sun replay writes, so it is the only
-        // group whose records describe the sun. The 16-bin argmax that used to
-        // pick this is gone with the kernel: there is no sun weight per bin now.
-        static constexpr uint32_t kSunGroup = 0u;
-        // Sorted HERE only, on a copy: the stored list keeps ray order, so the
-        // UI combo's rows do not re-sort under the user's cursor.
-        std::vector<RayCandidate> rows = m_RayCandidates[kSunGroup];
+        // The DISPLAYED group: it is the one whose records the Ray Fan and the Cage
+        // Trace read, so the readout prints the same list the panel enumerates.
+        // Sorted HERE only, on a copy: the stored list keeps ray order, so the UI
+        // combo's rows do not re-sort under the user's cursor.
+        std::vector<RayCandidate> rows = m_RayCandidates[recordDir];
         std::sort(rows.begin(), rows.end(),
                   [](const RayCandidate& a, const RayCandidate& b) { return a.score > b.score; });
 
-        std::cout << "[BakedGI RayDebug] step 2c — Cage Trace pool, hour state "
-                  << m_RayDebugSunState
-                  << ": " << rows.size() << " of " << kDebugGatherRays
+        std::cout << "[BakedGI RayDebug] step 2c — Cage Trace pool, source "
+                  << RayDebugSourceName(m_RayDebugSource);
+        if (skySource)
+            std::cout << " direction " << focusDir << " (displayed)";
+        else if (sunTable)
+            std::cout << " hour state " << m_RayDebugSunState;
+        std::cout << " (record group " << recordDir << "): " << rows.size() << " of "
+                  << kDebugGatherRays
                   << " records carry Efb > NdotD*Vhit (the picker's list, by score):" << std::endl;
         for (const RayCandidate& c : rows)
             std::cout << "    rec " << (c.ray < 10u ? " " : "") << c.ray
@@ -1254,15 +1618,131 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
             std::cout << "    none — the trace draws nothing in this direction" << std::endl;
     }
 
+    // --- Step 2d: the SECONDARY visibility rays of the displayed group. ---
+    // For each shaded record whose hit fired a shadow ray (NdotD > 0), this prints
+    // where that ray ended. It exists because a white Vhit used to be the only
+    // evidence of its own claim: the record carried no endpoint, so a lit floor
+    // whose sky ray never stopped could not be told apart from a ray that leaves
+    // the RT scene. rec6/rec7 carry the answer, and this prints it.
+    //
+    //   open     the ray committed nothing. shxyz is W, the unit active delta
+    //            direction, and the drawn segment runs to the length cap.
+    //   blocked  the ray committed a hit. shxyz is that hit's world position and
+    //            shdist/shinst/shprim name it.
+    //
+    // The rows are ordered by section, then by distance: a blocked ray that stops
+    // very close to its own hit is the interesting one, because the surface it
+    // stops on is the surface that was supposed to be lit. Open rays follow, so the
+    // section a reader is chasing does not move between dumps.
+    {
+        struct ShadowRow
+        {
+            uint32_t   rec;
+            uint32_t   sourceRay;
+            float      status;
+            float      dist;
+            float      inst;
+            float      prim;
+            float      xyz[3];
+            float      ndotd;
+        };
+        std::vector<ShadowRow> shadowRows;
+        shadowRows.reserve(kDebugGatherRays);
+        uint32_t nNone = 0u, nOpen = 0u, nBlocked = 0u;
+        for (uint32_t r = 0; r < kDebugGatherRays; ++r)
+        {
+            const float* rec = RayDebugRecord(mapped, recordDir, r);
+            const float  shs = RayDebugShadowStatus(rec);
+            if (shs < 0.5f)
+            {
+                ++nNone;
+                continue;
+            }
+            const float* payload = RayDebugShadowPayload(rec);
+            const float* info    = RayDebugShadowInfo(rec);
+            ShadowRow row;
+            row.rec       = r;
+            row.sourceRay = RayDebugSourceRay(rec);
+            row.status    = shs;
+            row.dist      = info[0];
+            row.inst      = info[1];
+            row.prim      = info[2];
+            row.xyz[0]    = payload[0];
+            row.xyz[1]    = payload[1];
+            row.xyz[2]    = payload[2];
+            row.ndotd     = RayDebugField(rec, BakedGI::kRayRecF4Albedo)[3];
+            if (shs > 1.5f) ++nBlocked; else ++nOpen;
+            shadowRows.push_back(row);
+        }
+        // Blocked first, nearest first; then open, in record order. std::stable_sort
+        // keeps the record order inside each key, so two dumps of the same buffer
+        // print the same list.
+        std::stable_sort(shadowRows.begin(), shadowRows.end(),
+                         [](const ShadowRow& a, const ShadowRow& b)
+                         {
+                             const bool ab = (a.status > 1.5f);
+                             const bool bb = (b.status > 1.5f);
+                             if (ab != bb) return ab;
+                             if (!ab) return false;       // both open: record order
+                             return a.dist < b.dist;      // both blocked: nearest first
+                         });
+
+        std::cout << "[BakedGI RayDebug] step 2d — VHit secondary rays, source "
+                  << RayDebugSourceName(m_RayDebugSource);
+        if (skySource)
+            std::cout << " direction " << focusDir << " (displayed)";
+        else if (sunTable)
+            std::cout << " hour state " << m_RayDebugSunState;
+        std::cout << " (record group " << recordDir << "): " << nBlocked << " blocked, "
+                  << nOpen << " open, " << nNone << " with no secondary ray"
+                  << " — of " << kDebugGatherRays << " records:" << std::endl;
+        if (shadowRows.empty())
+        {
+            std::cout << "    none — no shaded ray in this direction has NdotD > 0" << std::endl;
+        }
+        for (size_t i = 0; i < shadowRows.size() && i < 16u; ++i)
+        {
+            const ShadowRow& row = shadowRows[i];
+            std::cout << "    rec " << (row.rec < 10u ? " " : "") << row.rec
+                      << "  ray " << row.sourceRay
+                      << "  NdotD " << row.ndotd
+                      << "  shw " << RayDebugShadowStatusName(row.status);
+            if (row.status > 1.5f)
+            {
+                std::cout << "  shdist " << row.dist
+                          << "  shinst " << (int)row.inst
+                          << "  shprim " << (int)row.prim;
+            }
+            std::cout << "  shxyz(" << row.xyz[0] << ", " << row.xyz[1] << ", "
+                      << row.xyz[2] << ")" << std::endl;
+        }
+        if (shadowRows.size() > 16u)
+            std::cout << "    ... " << (shadowRows.size() - 16u) << " more row(s)" << std::endl;
+    }
 
     // --- Step 3: the self-check. Compare the re-accumulated table with the
     // stored table, element by element. ---
+    //
+    // WHICH RECORDS to compare. A SKY dump re-accumulated ALL kDirections groups
+    // and copied the probe's all-kDirections stored slice, so it checks every bin
+    // and prints a verdict for each one. One verdict for sixteen bins is not good
+    // enough here: the panel can display any bin, and a single drifted bin would
+    // hide behind fifteen good ones under a "worst of 16" MATCH.
+    //
+    // A SUN dump stays exactly as shipped: one verdict for the one record it
+    // traced, or the shipped 16-way binned-fallback comparison.
+    const uint32_t checkCount = skySource ? kDirections : (sunTable ? 1u : kDirections);
+    const uint32_t checkFirst = 0u;
+
     float maxAbs = 0.0f, maxStored = 0.0f;
     uint32_t worstDir = 0, worstLm = 0;
-    // One direction; the other fifteen records were never written.
-    const uint32_t dirsToCheck = m_SunResponseValid ? 1u : kDirections;
-    for (uint32_t h = 0; h < dirsToCheck; ++h)
+    uint32_t mismatched = 0u; // bins (or records) that fail their own tolerance
+    for (uint32_t h = checkFirst; h < checkFirst + checkCount; ++h)
     {
+        // Per-record tolerance: a small stored row must not pass on the strength of
+        // a large row elsewhere in the probe's slice.
+        float recAbs = 0.0f, recStored = 0.0f;
+        uint32_t recLm = 0;
         for (uint32_t lm = 0; lm < kResponseFloat4s; ++lm)
         {
             const float* a = RayDebugTable(tableReacc,  h, lm);
@@ -1270,19 +1750,47 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
             for (uint32_t c = 0; c < 3u; ++c) // xyz carry the data; w is always zero
             {
                 const float d = std::fabs(a[c] - b[c]);
-                if (d > maxAbs) { maxAbs = d; worstDir = h; worstLm = lm; }
-                maxStored = std::max(maxStored, std::fabs(b[c]));
+                if (d > recAbs) { recAbs = d; recLm = lm; }
+                recStored = std::max(recStored, std::fabs(b[c]));
             }
+        }
+        const float recTol = 1e-4f * std::max(1.0f, recStored);
+        const bool  recOk  = (recAbs <= recTol);
+        if (!recOk)
+            ++mismatched;
+        if (recAbs > maxAbs) { maxAbs = recAbs; worstDir = h; worstLm = recLm; }
+        maxStored = std::max(maxStored, recStored);
+        if (skySource)
+        {
+            std::cout << "    bin " << (h < 10u ? " " : "") << h
+                      << "  max |diff| " << recAbs
+                      << "  max |stored| " << recStored
+                      << "  " << (recOk ? "MATCH" : "MISMATCH") << std::endl;
         }
     }
     const float tol = 1e-4f * std::max(1.0f, maxStored);
-    const bool  pass = (maxAbs <= tol);
+    // Count-driven, not a second comparison of the same numbers: for one record this
+    // is identical to "max |diff| <= tol", and for sixteen it cannot claim a MATCH
+    // while a bin failed.
+    const bool  pass = (mismatched == 0u);
 
-    std::cout << "[BakedGI RayDebug] step 3 — self-check: re-accumulated table vs stored table"
-              << std::endl;
+    // The header names the SOURCE and WHICH RECORDS, so a MATCH below can never be
+    // read as a verdict about another table or another record.
+    std::cout << "[BakedGI RayDebug] step 3 — self-check, source "
+              << RayDebugSourceName(m_RayDebugSource);
+    if (skySource)
+        std::cout << ", all " << kDirections << " sky directions (record index = direction)";
+    else if (sunTable)
+        std::cout << ", hour state " << m_RayDebugSunState << " (record index "
+                  << m_RayDebugSunState << ")";
+    std::cout << ": re-accumulated table vs stored table" << std::endl;
     std::cout << "    max |diff| " << maxAbs << "  (worst at dir " << worstDir
               << ", lm " << worstLm << ")   max |stored| " << maxStored
               << "   tol " << tol << std::endl;
+    if (mismatched != 0u)
+        std::cout << "    " << mismatched << " of " << checkCount
+                  << (checkCount == 1u ? " record" : " records") << " exceed their own tolerance"
+                  << std::endl;
     if (haveMeta && !probeValid)
         std::cout << "    NOT A VERDICT — the probe is invalid, so its stored table is all zero."
                   << " The mismatch above is expected." << std::endl;
@@ -1290,7 +1798,13 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     {
         std::cout << "    " << (pass ? "MATCH — the re-trace reproduced the bake"
                                      : "MISMATCH — the RNG stream drifted; read the rays with care")
-                  << std::endl;
+                  << " (source " << RayDebugSourceName(m_RayDebugSource);
+        if (skySource)
+            std::cout << ", all " << kDirections << " sky directions)" << std::endl;
+        else if (sunTable)
+            std::cout << ", hour state " << m_RayDebugSunState << ")" << std::endl;
+        else
+            std::cout << ", binned fallback)" << std::endl;
         if (!haveMeta)
         {
             // Name the cause. The two causes need different fixes, so one
@@ -1347,6 +1861,77 @@ DirectX::XMFLOAT3 BakedGI::SunDirectionAtHour(float hour)
 DirectX::XMFLOAT3 BakedGI::SunDirectionAtHourCPU(uint32_t state)
 {
     return SunDirectionAtHour(kSunStateHour0 + kSunStateStepHours * (float)state);
+}
+
+// =============================================================================
+// Fibonacci sky-quadrature directions — the CPU mirror
+// =============================================================================
+//
+// ONE formula, stated once in the shader (BakedGIDeltaDirection,
+// BakedGI.hlsli:33-39) and once here. The bake, the sky replay and this mirror all
+// use it, so the direction the log prints is the direction the GPU traced.
+//
+// Every step is FLOAT, in the shader's own order, because the shader's literal
+// 2.39996323f and its float divide are part of the answer: a double computation
+// would land on a different last bit for the higher bins, where phi is near 28.8
+// radians and the argument reduction of cos/sin amplifies the difference.
+//
+// The normalization divides by sqrt(dot) rather than multiplying by rsqrt. HLSL's
+// normalize multiplies by rsqrt, whose hardware approximation can differ by about
+// 2e-7 relative — far below the 1e-6 the reference check allows.
+DirectX::XMFLOAT3 BakedGI::DeltaDirection(uint32_t i)
+{
+    const float y   = ((float)i + 0.5f) / (float)kDirections;
+    const float phi = (float)i * 2.39996323f; // golden angle, the shader's literal
+    const float r   = std::sqrt(std::max(0.0f, 1.0f - y * y));
+    const float x   = r * std::cos(phi);
+    const float z   = r * std::sin(phi);
+    // Unit length by construction only in exact arithmetic: 1 - y^2 + y^2 = 1, but
+    // the rounded sine and cosine break it. Normalize, as the shader does.
+    const float len = std::sqrt(x * x + y * y + z * z);
+    return DirectX::XMFLOAT3(x / len, y / len, z / len);
+}
+
+// Reference values of BakedGIDeltaDirection, read from DXC's OWN constant folding
+// of that exact function, not from a second derivation:
+//
+//   dxc -T cs_6_6 -E main probe.hlsl -Fc probe.asm
+//     Out[0] = float4(BakedGIDeltaDirection(0u),  0) -> ( 0.99951159954071045, 0.03125, 0)
+//     Out[1] = float4(BakedGIDeltaDirection(12u), 0) -> (-0.54008126258850098, 0.78125, -0.31298670172691345)
+//
+// The measured difference between this mirror and the folded constants is exactly
+// zero for both indices. The tolerance below is therefore for the rsqrt
+// approximation on the GPU, not for the formula.
+bool BakedGI::VerifyDeltaDirectionMirror()
+{
+    constexpr float kTol = 1e-6f;
+
+    struct Ref
+    {
+        uint32_t i;
+        float x, y, z;
+    };
+    static const Ref kRefs[] =
+    {
+        {  0u,  0.99951159954071045f, 0.03125f,  0.0f                  },
+        { 12u, -0.54008126258850098f, 0.78125f, -0.31298670172691345f  },
+    };
+
+    for (const Ref& ref : kRefs)
+    {
+        const DirectX::XMFLOAT3 d = DeltaDirection(ref.i);
+        if (std::fabs(d.x - ref.x) > kTol ||
+            std::fabs(d.y - ref.y) > kTol ||
+            std::fabs(d.z - ref.z) > kTol)
+        {
+            std::cerr << "[BakedGI] DELTA DIRECTION MIRROR DRIFT at direction " << ref.i
+                      << ": got (" << d.x << ", " << d.y << ", " << d.z
+                      << "), the shader folds (" << ref.x << ", " << ref.y << ", " << ref.z
+                      << ")" << std::endl;
+            return false;
+        }
+    }
+    return true;
 }
 
 BakedGI::SunHourBlend BakedGI::SunBlendForHour(float hour)
@@ -1475,9 +2060,11 @@ bool BakedGI::CreateProbeBuffers()
     m_LitProbesSun  = {};
     m_Meta          = {};
     m_Visibility    = {};
+    m_SkyVisSH      = {};
+    m_SkyVisSHValid = false;
 
     const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
-    // Sun table: one record for EACH hour state, per probe. 17 x 160 B = 2720 B
+    // Sun table: one record for EACH hour state, per probe. 17 x 144 B = 2448 B
     // per probe per buffer. Created only when the sun pass runs, so a bake that
     // does not need the sun pays nothing.
     const uint64_t sunElems = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s;
@@ -1498,11 +2085,21 @@ bool BakedGI::CreateProbeBuffers()
         !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
         !CreateStructuredBuffer(m_Visibility, sizeof(float) * 2, (uint64_t)m_ProbeCount * kVisStride,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility"))
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility") ||
+        // Sky-visibility SH9 A/B data. Written by the SAME visibility dispatch,
+        // which indexes this buffer through Vis.skyVisSHUAVIdx, so it is part of
+        // the required chain and not an optional extra: a missing buffer would
+        // make the shader write through descriptor 0. 36 B for each probe.
+        !CreateStructuredBuffer(m_SkyVisSH, sizeof(float), (uint64_t)m_ProbeCount * kSkyVisSHCoeffs,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGISkyVisSH"))
     {
         std::cerr << "[BakedGI] Failed to create probe buffers" << std::endl;
         return false;
     }
+    // The buffer exists but holds no bake yet. The visibility dispatch below
+    // fills it, and TryLoadCache clears the flag again because the cache has no
+    // SH section.
+    m_SkyVisSHValid = (m_SkyVisSH.resource != nullptr);
     return true;
 }
 
@@ -1609,8 +2206,8 @@ bool BakedGI::RecordDilation(ID3D12GraphicsCommandList* cmdList)
 // Debug-only capture, created on the dispatch path only: the term snapshots and
 // the folded per-probe response balls that the "Efb Contribution" view reads.
 //
-// SIZING. One snapshot is a whole transport table: probeCount x 16 x 10 float4,
-// 2560 B for each probe (about 30 MB at 11,616 probes, 56 MB at 21,952). The
+// SIZING. One snapshot is a whole transport table: probeCount x 16 x 9 float4,
+// 2304 B for each probe (about 27 MB at 11,616 probes, 50 MB at 21,952). The
 // kIterSnapshotCount = kBakeIterations - 1 snapshots plus kBakeIterations balls
 // (144 B for each probe — the ball is a per-probe SH9) is the whole cost, and it
 // is what the view costs when it is never opened. It is paid on a bake, which is
@@ -1784,6 +2381,10 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     if (m_DilationIterations != 0u && !CreateDilationBuffers())
         return false;
     m_FinalResponse = h.finalResponse;
+    // The cache carries no sky-visibility SH9 section, so the buffer created
+    // above holds undefined bytes. Mark it invalid: the fold then zeroes V and
+    // the UI reports SH9 as unavailable, instead of reading a NaN field.
+    m_SkyVisSHValid = false;
     if (m_DilationIterations != 0u)
     {
         m_FinalDilatedResponse = (m_DilationIterations - 1u) & 1u;
@@ -2026,6 +2627,16 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
     p.spacing  = m_Spacing;
     p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
+    // Sky-visibility source for the V in the sky term. The EFFECTIVE mode is 0
+    // only when the resident bake holds SH data, and 1 for the NoVisibility
+    // diagnostic. Mode 1 reads no descriptor, so the SRV index is left at 0
+    // there and the shader never touches it. There is no third mode: the cone
+    // path this switch used to offer is removed.
+    {
+        const SkyVisMode skyVis = GetEffectiveSkyVisMode();
+        p.skyVisSHSRVIdx = (skyVis == SkyVisMode::SH9) ? GetSkyVisSHSRVIndex() : 0u;
+        p.skyVisMode     = (uint32_t)skyVis;
+    }
 
     cmdList->SetComputeRootSignature(rootSignature);
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);

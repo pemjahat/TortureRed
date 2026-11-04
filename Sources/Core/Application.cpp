@@ -134,7 +134,7 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDimY = 0;
     m_FrameConstants.bakedGIDimZ = 0;
     m_FrameConstants.bakedGIDebugView = 0;
-    m_FrameConstants.bakedGIResponseSRVIndex = 0;
+    m_FrameConstants.bakedGISkyVisSRVIndex = BakedGI::kSkyVisNoSRV;
     m_FrameConstants.bakedGIDebugScale = 1.0f;
     // Ray-debug constants: the SRV index starts at the "no buffer" sentinel
     // (0xFFFFFFFF), not 0, because 0 is a legal descriptor index. The Ray Fan
@@ -144,7 +144,12 @@ void Application::Initialize()
     m_FrameConstants.bakedGIRayDebugProbe = 0;
     m_FrameConstants.bakedGIRayDebugChannel = 1;   // albedo
     m_FrameConstants.bakedGIRayDebugLength = 8.0f; // probe spacings
-    m_FrameConstants.bakedGIRayDebugDir = 0;       // sun-dominant direction, set each frame
+    // The record group and the delta source: "no dump yet". kRayDebugNoDir is
+    // 0xFFFFFFFF, and the fan's direction guard rejects it the same way it rejects
+    // a group past the basis, so frame 0 draws nothing and marks no bin.
+    m_FrameConstants.bakedGIRayDebugDir = BakedGI::kRayDebugNoDir;
+    m_FrameConstants.bakedGIRayDebugSource = (uint32_t)BakedGI::RayDebugSource::Sun;
+    m_FrameConstants.bakedGIRayDebugSkyDir = BakedGI::kRayDebugNoDir;
     // Cage Trace (view 9) ray override: the "no override" sentinel, so the first
     // frame traces the shader's own argmax. Application::FillRayDebugConstants
     // overwrites it every frame from m_BakedGIRayDebugRay.
@@ -575,7 +580,11 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIProbeSkySRVIndex   = gi.IsValid() ? gi.GetLitSkySRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeVisSRVIndex   = gi.IsValid() ? gi.GetVisibilitySRVIndex() : 0u;
-        m_FrameConstants.bakedGIResponseSRVIndex   = gi.IsValid() ? gi.GetResponseSRVIndex() : 0u;
+        // The raw SH9 sky-visibility field, for the two V debug views (3 and 4).
+        // It is published whether or not the fold uses it: the views diagnose the
+        // bake, not the current mode. The getter returns kSkyVisNoSRV when the
+        // resident bake has no SH section, and both views early-out on it.
+        m_FrameConstants.bakedGISkyVisSRVIndex     = gi.GetSkyVisSHSRVIndex();
         // Runtime FILLED eligibility follows the same effective getter that selects
         // the tables. Raw A/B mode publishes zero even when meta holds FILLED.
         const bool useFilled = gi.IsUsingDilatedTransport();
@@ -687,16 +696,21 @@ void Application::Update(float deltaTime)
 // call sites (Update and, again, Render right after the dump), so the two fills
 // cannot drift.
 //
-// The SRV index and the probe come from the DUMP, not from the UI fields. The
-// dump clamps its index into the grid and stores it, so the fan and the text
-// describe one probe even when the UI field changed after a dump.
+// The SRV index, the probe, the record group and the delta source come from the
+// DUMP, not from the UI fields. The dump clamps its index into the grid and stores
+// it, so the fan and the text describe one probe even when the UI field changed
+// after a dump. The source is dump state for the same reason: a changed selection
+// applies to the NEXT dump, and until then the labels keep naming the source the
+// resident bytes came from.
+//
+// The sky BIN is the one exception, and it is not a hole in the rule above. A SKY
+// dump records ALL kDirections bins, so the bin names records that are already in
+// the buffer. It is display state, and the panel's Sky Bin control moves it with
+// no dump. The group and the cyan marker both follow it, so the picture and the
+// labels name one bin.
 //
 // 0xFFFFFFFF is the "no ray-debug buffer" sentinel. 0 is a legal descriptor
 // index, so it cannot mean "none": the fan shader early-outs on the sentinel.
-//
-// It deliberately does NOT touch bakedGIRayDebugDir: that is the sun fold's
-// own output, FillSunFoldConstants owns it, and the post-dump call must not
-// re-derive a pick the dump did not change.
 void Application::FillRayDebugConstants()
 {
     BakedGI& gi = m_Renderer.GetBakedGI();
@@ -717,6 +731,20 @@ void Application::FillRayDebugConstants()
         (m_BakedGIRayDebugRay < 0 || (uint32_t)m_BakedGIRayDebugRay >= BakedGI::kDebugGatherRays)
             ? BakedGI::kNoRayPick
             : (uint32_t)m_BakedGIRayDebugRay;
+    // The record GROUP the fan, the labels and the Cage Trace read, and the source
+    // it came from. kRayDebugNoDir with no dump: the shader's direction guard
+    // rejects it, and the DeltaDirections channel then marks no bin.
+    //
+    // The sky bin field carries the SAME value as the group, because a SKY dump
+    // recorded every bin: one value names the group that is read and the cyan bin
+    // marker that is drawn, so the marker can not point at a bin the rays do not
+    // come from. A SUN dump has no bin, so that field keeps the sentinel.
+    const uint32_t displayDir = hasRayDebugBuffer ? gi.GetRayDebugDir() : BakedGI::kRayDebugNoDir;
+    m_FrameConstants.bakedGIRayDebugDir     = displayDir;
+    m_FrameConstants.bakedGIRayDebugSource  = (uint32_t)gi.GetRayDebugSource();
+    m_FrameConstants.bakedGIRayDebugSkyDir  =
+        (hasRayDebugBuffer && gi.GetRayDebugSource() == BakedGI::RayDebugSource::Sky)
+            ? displayDir : BakedGI::kRayDebugNoDir;
 }
 
 // Publishes the two per-bake-term response balls the "Efb Contribution" view
@@ -762,8 +790,9 @@ void Application::FillEfbBallConstants()
 //   - the 16 direction weights the Ray Fan's DeltaDirections channel ramps, and
 //   - the to-sun direction of the current HOUR, for the 17th box that same
 //     channel draws (FrameConstants::bakedGISunDir),
-// plus the two hour states the fold is interpolating (FrameConstants::
-// bakedGIRayDebugDir and m_BakedGISunState), for the UI text.
+// plus the hour state the fold starts at (m_BakedGISunState), for the UI text.
+// The record group the Ray Fan and the Cage Trace read is NOT part of the fold: it
+// belongs to the dump, and FillRayDebugConstants publishes it.
 //
 // All of it comes from ONE BakedGI::SunBlendForHour and ONE
 // BakedGI::SunDirectionAtHour, so the box colours, the orange marker and the
@@ -794,9 +823,9 @@ void Application::FillSunFoldConstants()
         m_FrameConstants.bakedGISunDir = { 0.0f, 0.0f, 0.0f, 0.0f };
 
     m_BakedGISunState = (int)blend.i0;
-    // The sun dump writes group 0 only, so the fan must read group 0. The old
-    // per-bin argmax would point it at a bin the fold never touches.
-    m_FrameConstants.bakedGIRayDebugDir = 0u;
+    // bakedGIRayDebugDir is NOT set here any more. It is the record group the last
+    // dump wrote, which is dump state: FillRayDebugConstants owns it, and a sun
+    // move must not point the fan at a group the records were never traced into.
 }
 
 void Application::Render()
@@ -878,8 +907,21 @@ void Application::Render()
         // The SAME state the fold is interpolating, so the dump describes the
         // record the frame actually reads. A different state replays a different
         // bake and the self-check reports MISMATCH — a true report.
+        //
+        // The source comes from the UI selection, which is the ONLY way it enters the
+        // dump. The sky bin is the bin ON DISPLAY: a SKY dump records every bin, so
+        // this only decides which one stays on screen when the dump finishes. The Ray
+        // Fan's Sky Bin browser keeps it up to date, so a re-dump does not move the
+        // displayed bin.
+        const BakedGI::RayDebugSource source =
+            (m_BakedGIRayDebugSource == (int)BakedGI::RayDebugSource::Sky)
+                ? BakedGI::RayDebugSource::Sky
+                : BakedGI::RayDebugSource::Sun;
+        const uint32_t skyDirection =
+            (m_BakedGIRayDebugSkyDir < 0) ? 0u : (uint32_t)m_BakedGIRayDebugSkyDir;
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
                                    haveSunToDir ? &sunToDir : nullptr,
+                                   source, skyDirection,
                                    (uint32_t)m_BakedGISunState);
         // The dump replaced the ray-debug buffer and cached a new verdict. Fill
         // the dump-derived constants again so the fan reads the new buffer, probe
@@ -2014,6 +2056,88 @@ void Application::RenderImGui()
                     }
                 }
 
+                // --- Sky visibility: which V the sky fold multiplies ---
+                // Two entries. SH9 is the 9-coefficient projection of the sky
+                // visibility from the visibility rays, and it is the default.
+                // No Sky Visibility zeroes V as a diagnostic and needs no bake
+                // data at all. The switch never asks for a bake: it invalidates
+                // the probe fold and nothing else.
+                {
+                    BakedGI& abGI = m_Renderer.GetBakedGI();
+                    const bool shAvailable = abGI.HasSkyVisSH();
+                    const BakedGI::SkyVisMode selected =
+                        (BakedGI::SkyVisMode)m_BakedGISkyVisMode;
+                    bool changed = false;
+                    if (ImGui::BeginCombo("Sky Visibility",
+                                          BakedGI::SkyVisModeName(selected)))
+                    {
+                        for (uint32_t m = 0u; m < BakedGI::kSkyVisModeCount; ++m)
+                        {
+                            const BakedGI::SkyVisMode mode = (BakedGI::SkyVisMode)m;
+                            // SH9 is the ONE entry that needs a bake which ran
+                            // the visibility dispatch. No Sky Visibility never
+                            // does, so it stays selectable with no bake and no
+                            // cache.
+                            const bool needsSH = (mode == BakedGI::SkyVisMode::SH9);
+                            if (needsSH)
+                                ImGui::BeginDisabled(!shAvailable);
+                            if (ImGui::Selectable(BakedGI::SkyVisModeName(mode),
+                                                  mode == selected))
+                            {
+                                m_BakedGISkyVisMode = (int)m;
+                                changed = true;
+                            }
+                            if (needsSH)
+                                ImGui::EndDisabled();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (changed)
+                    {
+                        abGI.SetSkyVisMode((BakedGI::SkyVisMode)m_BakedGISkyVisMode);
+                        m_ProbeFoldWanted = true;
+                        m_ProbeFoldHour   = -1.0f;
+                    }
+                    // AllowWhenDisabled: the tooltip is what explains a disabled
+                    // item, so it must work in that state too.
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Which V the sky term A_l Y_lm(W_i) V(W_i) uses.\n"
+                                          "SH9: raw SH9 visibility, projected from the 16x16x4 = 1024\n"
+                                          "rays the depth-moment bake already traces, then reconstructed\n"
+                                          "at W_i and clamped to [0, 1]. This is the default and the only\n"
+                                          "source of a non-zero V.\n"
+                                          "No Sky Visibility: V = 0. A diagnostic, not a shipping mode. It\n"
+                                          "removes only the direct first-bounce sky term, so the bounces\n"
+                                          "R_i and the sun term stay. The image difference isolates how much\n"
+                                          "the V term contributes.\n"
+                                          "The switch triggers no bake, no dump and no GPU wait: it folds\n"
+                                          "the probe grid again on the next frame.");
+
+                    // Report the mode the fold USES, not the mode that was
+                    // selected: an SH9 selection with no SH data folds with V = 0.
+                    const BakedGI::SkyVisMode effective = abGI.GetEffectiveSkyVisMode();
+                    ImGui::Text("Sky visibility in use: %s",
+                                BakedGI::SkyVisModeName(effective));
+                    if (effective != abGI.GetSkyVisMode())
+                    {
+                        ImGui::TextDisabled("%s is selected but this bake holds no SH9 data, "
+                                            "so the fold uses %s.",
+                                            BakedGI::SkyVisModeName(abGI.GetSkyVisMode()),
+                                            BakedGI::SkyVisModeName(effective));
+                    }
+                    if (shAvailable)
+                    {
+                        ImGui::Text("SH9 buffer: %llu B (%u B for each probe)",
+                                    (unsigned long long)abGI.GetSkyVisSHBytes(),
+                                    BakedGI::kSkyVisSHCoeffs * 4u);
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("The current bake has no SH9 sky-visibility data. "
+                                            "A Probes/ cache load carries no SH9 section.");
+                    }
+                }
+
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
 
@@ -2026,17 +2150,78 @@ void Application::RenderImGui()
                                       "Index = x + y*dimX + z*dimX*dimY, clamped to the grid.\n"
                                       "Do not derive this by hand: read it off \"Probes Near Camera\"\n"
                                       "below, whose rows set this field and dump in one click.\n"
-                                      "The dump re-traces the 64 gather rays of this probe's sun hour\n"
-                                      "state and prints the 64-ray ranking and a self-check that\n"
-                                      "compares the re-trace with the stored record.\n"
+                                      "The dump re-traces the 64 gather rays of this probe's selected\n"
+                                      "delta source and prints the 64-ray ranking and a self-check\n"
+                                      "that compares the re-trace with the stored record.\n"
                                       "The Ray Fan debug view draws the same probe, so the picture and\n"
                                       "the text always describe one probe.");
+
+                // --- WHICH BAKED TABLE the next dump replays ---
+                // Two entries, and the index IS BakedGI::RayDebugSource, so the
+                // three spellings of the value cannot drift. The selection is read
+                // only here, by the dump; the Ray Fan and the Cage Trace write their
+                // labels from BakedGI's RECORDED source, so a change here can never
+                // relabel records that already exist.
+                const char* rayDebugSources[] = { "Sun", "Sky" };
+                ImGui::SetNextItemWidth(180.f);
+                ImGui::Combo("Ray Debug Source", &m_BakedGIRayDebugSource,
+                             rayDebugSources, IM_ARRAYSIZE(rayDebugSources));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Which baked response table the next dump replays. It applies to the\n"
+                                      "next \"Dump Probe Ray Debug\" and to nothing else — no re-bake.\n"
+                                      "Sun: ONE hour state of the SUN table (17 records for each probe),\n"
+                                      "traced toward that state's own direction. This is the original tool.\n"
+                                      "Sky: ALL 16 fibonacci bins of the SKY quadrature table (16 records\n"
+                                      "for each probe), each traced toward its own direction with the sky\n"
+                                      "feedback at the hit. One dump therefore fills every record group, and\n"
+                                      "the Ray Fan can then show any bin with no further dump.\n"
+                                      "The record channels, the self-check and the Ray Fan then all name\n"
+                                      "the source that was recorded, so a sky record is never labelled sun.");
+                if (m_BakedGIRayDebugSource == (int)BakedGI::RayDebugSource::Sky)
+                {
+                    // No bin control here any more. ONE sky dump records ALL sixteen
+                    // bins, so "which bin to dump" is not a question. The bin that is
+                    // shown is chosen in the Ray Fan section, where the records it
+                    // names are on screen. A second control here would be a second
+                    // value for one fact, and the two could disagree.
+                    ImGui::TextDisabled("  One dump records all %u sky bins; pick the one to show "
+                                        "in the Ray Fan section.",
+                                        (unsigned)BakedGI::kDirections);
+                }
+
                 if (ImGui::Button("Dump Probe Ray Debug"))
                     m_PendingRayDebug = true;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Re-traces one probe's gather rays and prints the readout to the console.\n"
                                       "Debug only, on demand — no per-frame cost. See the log section\n"
-                                      "[BakedGI RayDebug].");
+                                      "[BakedGI RayDebug].\n"
+                                      "SUN: one hour state, so one record group. SKY: all 16 bins in the\n"
+                                      "same dispatch, so this click costs about 16x the GPU work and then\n"
+                                      "records every bin for browsing.");
+                // The selection above and the buffer below are two different facts.
+                // Say so when they differ, instead of leaving a label that describes
+                // a source the resident records were not traced from.
+                //
+                // The sky BIN is not part of this test any more: a SKY dump records
+                // every bin, so a moved bin describes records that ARE in the buffer.
+                // The bin browser writes BakedGI directly, so there is no second value
+                // to compare.
+                {
+                    const BakedGI& selGI = m_Renderer.GetBakedGI();
+                    if (selGI.HasRayDebugBuffer())
+                    {
+                        const bool selSky = (m_BakedGIRayDebugSource == (int)BakedGI::RayDebugSource::Sky);
+                        const bool recSky = (selGI.GetRayDebugSource() == BakedGI::RayDebugSource::Sky);
+                        if (selSky != recSky)
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
+                            ImGui::TextWrapped("The buffer still holds the %s record. Press Dump Probe Ray "
+                                               "Debug to record the selected source.",
+                                               recSky ? "SKY" : "SUN");
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                }
 
                 // --- Probes near the camera ---
                 // The answer to "which probe index am I standing in?". The index
@@ -2183,29 +2368,39 @@ void Application::RenderImGui()
                                       "Cyan = FILLED: invalid origin with donor-backed runtime transport.\n"
                                       "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
                                       "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
-                                      "sky = sky bounces + occluded sky direct (V_i-gated), sun = sun bounces only (direct sun never enters probes).\n"
+                                      "sky = sky bounces + occluded sky direct (V-gated), sun = sun bounces only (direct sun never enters probes).\n"
                                       "The three lit views always sum: total = sky + sun.\n"
-                                      "Sky Visibility: grayscale cube = mean of the 16 baked sky visibilities (sky-open fraction); red = invalid.\n"
-                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked (near camera only, VALID origins only; FILLED probes skipped).\n"
-                                      "Ray Fan: the 64 gather rays of ONE direction of one probe (the Ray Debug Probe above), as thin boxes.\n"
+                                      "Sky Visibility: SH ball per probe — each sphere point evaluates the probe's sky-visibility\n"
+                                      "SH9 field at its own normal, so the ball shows the DIRECTIONAL direct sky visibility.\n"
+                                      "Grayscale = the reconstructed V at that direction (white = 1 = open sky, black = 0 =\n"
+                                      "blocked), raw and un-gained. Red = invalid probe. Nothing draws when the current bake\n"
+                                      "holds no SH9 data. The DC term alone is the sphere MEAN, not the display value.\n"
+                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked, coloured\n"
+                                      "by the SAME SH9 field reconstructed at that direction (near camera only, VALID origins only;\n"
+                                      "FILLED probes skipped).\n"
+                                      "Ray Fan: the 64 gather rays of ONE delta record of one probe (the Ray Debug Probe above), as thin boxes.\n"
                                       "Ray Fan stays raw when runtime dilation fills the selected probe.\n"
-                                       "  Probe (Baked): the SUN-DOMINANT direction, i.e. the bin the fold's kernel weights most.\n"
-                                       "  Probe (Baked Sun): the REAL SUN DIRECTION. That method traces a single direction\n"
-                                       "  toward the sun at bake time, so there is no dominant bin and the 16 delta\n"
-                                       "  directions shown by the DeltaDirections channel carry NO weight in its fold.\n"
+                                      "  The record is the one the last dump replayed: the sun hour state (Ray Debug Source Sun) or\n"
+                                      "  one of the 16 fibonacci sky bins (Ray Debug Source Sky, which records ALL 16 in one\n"
+                                      "  dump). The line under the channel combo names the record on screen.\n"
                                       "It draws the records of the LAST dump, so press \"Dump Probe Ray Debug\" first and again after a rebuild.\n"
-                                      "Its DeltaDirections channel swaps the geometry: the 16 delta directions of that same probe,\n"
-                                      "grayscale by the weight in the sun fold, white = the direction the fan itself draws, plus\n"
-                                      "one thicker ORANGE box along the REAL sun, so the fold's angular error is visible. That\n"
-                                      "channel reads no record, so it works before any dump.\n"
+                                      "Its DeltaDirections channel swaps the geometry: the 16 sky-quadrature directions of that same\n"
+                                      "probe, grayscale by the weight in the sun fold (uniform, so all white), plus one thicker ORANGE\n"
+                                      "box along the REAL sun. In Ray Debug Source Sky the DISPLAYED bin is thicker and CYAN, so the bin\n"
+                                      "the records describe is identifiable. That channel reads no record, so it works before any dump.\n"
+                                      "Its VHit Ray channel swaps the geometry to the SECONDARY ray of each shaded gather ray: one thin\n"
+                                      "segment from that ray's hit toward the active delta direction. CYAN = open (Vhit 1, drawn to the\n"
+                                      "length cap), RED = blocked (Vhit 0, ends at the recorded first RT hit). A cyan line that crosses\n"
+                                      "visible geometry exposes a mismatch between the RT scene and the raster scene.\n"
                                       "Efb Contribution: SH ball per probe of the SERIES-FEEDBACK contribution — the selected\n"
                                       "bake term's response ball minus term 1's (the no-feedback baseline), so it is exactly what\n"
                                       "the Efb term added, and where. The ball's DC reads as the feedback's share of that term's\n"
                                       "transport. Term 1 is black by construction: the bake gates feedback off there. Needs a bake\n"
                                       "from the dispatch path; a Probes/ cache load has no per-term tables and draws nothing.\n"
                                       "Efb stays raw and VALID-only when runtime dilation fills a probe.\n"
-                                      "Cage Trace: ONE probe (the Ray Debug Probe above). It derives the chain — the sun-dominant\n"
-                                      "direction, that direction's largest FEEDBACK-DOMINATED ray (a shaded ray whose Efb term\n"
+                                      "Cage Trace: ONE probe (the Ray Debug Probe above). It derives the chain — the record\n"
+                                      "group on screen (the sun hour state, or the displayed sky bin), that record's largest\n"
+                                      "FEEDBACK-DOMINATED ray (a shaded ray whose Efb term\n"
                                       "beats its NdotD*Vhit term), a line from the probe to that ray's hit, and the 8 trilinear\n"
                                       "cage probes the bake's feedback gather actually sampled at that hit. GREEN = the largest\n"
                                       "share of the gather, AMBER = middle, RED = smallest or a member the backface test culled.\n"
@@ -2289,12 +2484,15 @@ void Application::RenderImGui()
                 if (m_BakedGIDebugView == 7)
                 {
                     // Ray Fan: same probe as the text dump, so the two reads agree.
-                    // The last entry must stay last and must stay at index
-                    // BakedGI::kRayFanChannelDeltaDirs: the renderer reads the
-                    // channel to choose the instance count, and the shader reads
-                    // it to choose the geometry. Three places, one value.
+                    // The DeltaDirections entry must stay at index
+                    // BakedGI::kRayFanChannelDeltaDirs and VHit Ray at
+                    // BakedGI::kRayFanChannelVHitRay: the renderer reads the channel
+                    // to choose the instance count, and the shader reads it to choose
+                    // the geometry. Three places, one value. The Sky V_i entry that
+                    // used to sit at 9 is removed with the channel.
                     const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Efb",
-                                                     "Hit Distance", "Direct vs Efb", "DeltaDirections" };
+                                                     "Hit Distance", "Direct vs Efb", "DeltaDirections",
+                                                     "VHit Ray" };
                     if (ProbeMethodActive())
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
@@ -2305,47 +2503,161 @@ void Application::RenderImGui()
                     ImGui::Combo("Ray Fan Channel", &m_BakedGIRayDebugChannel, rayFanChannels, IM_ARRAYSIZE(rayFanChannels));
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Colour of each box. Channels 0..6 colour the 64 gather rays of the\n"
-                                          "sun-dominant direction (see below).\n"
+                                          "RECORDED delta source (see the line below): the sun hour state for\n"
+                                          "source SUN, the DISPLAYED fibonacci sky bin for source SKY.\n"
                                           "Status: grey = sky miss, blue = backface reject, orange = shaded.\n"
-                                          "NdotD: cos(hit normal, the sun-dominant direction) drawn straight — 1 is white, 0 is black.\n"
+                                          "NdotD: cos(hit normal, the SELECTED delta direction) drawn straight —\n"
+                                          "1 is white, 0 is black. That direction is the sun at the replayed\n"
+                                          "hour state, or the displayed fibonacci bin.\n"
                                           "Albedo / Vhit / Efb: the record fields.\n"
                                           "Hit Distance: log ramp, sky miss near black.\n"
                                           "Direct vs Efb: green = NdotD*Vhit dominates, red = Efb dominates.\n"
-                                          "DeltaDirections: swaps the geometry — the 16 delta directions of the\n"
-                                          "same probe, one box each, drawn with the NdotD channel's straight\n"
-                                          "grayscale on the sun-fold weight divided by the largest of the 16.\n"
-                                          "WHITE is 1.0 = the most weighted direction, which is the direction\n"
-                                          "the fan draws. One more box, thicker and ORANGE, points along the\n"
-                                          "REAL sun: the angle between it and the bin boxes is the fold's\n"
-                                          "angular error. It does not draw with no sun, or with the sun below\n"
-                                          "the horizon. It reads no record, so it needs no dump.");
+                                          "DeltaDirections: swaps the geometry — the 16 sky-quadrature\n"
+                                          "directions of the same probe, one box each, drawn with the NdotD\n"
+                                          "channel's straight grayscale on the fold weight divided by the\n"
+                                          "largest of the 16 (uniform, so all white). One more box, thicker\n"
+                                          "and ORANGE, points along the REAL sun: the angle between it and the\n"
+                                          "bin boxes is the fold's angular error. It does not draw with no\n"
+                                          "sun, or with the sun below the horizon. In SKY source the DISPLAYED\n"
+                                          "bin is drawn thicker and CYAN, so the bin the records describe is\n"
+                                          "identifiable. It reads no record, so it needs no dump.\n"
+                                          "VHit Ray: swaps the geometry to the SECONDARY visibility ray of\n"
+                                          "each shaded gather ray — the shadow ray that produces Vhit. One\n"
+                                          "thin segment for each record with NdotD > 0, from that ray's hit\n"
+                                          "toward the active delta direction W of the record on screen.\n"
+                                          "CYAN = the ray is OPEN: nothing blocked it, so Vhit is 1 and the\n"
+                                          "segment runs to the Ray Length cap. A cyan line that crosses\n"
+                                          "visible ceiling or wall geometry is the defect this channel\n"
+                                          "exists for: the RT scene and the raster scene disagree there.\n"
+                                          "RED = the ray is BLOCKED: Vhit is 0 and the segment ends at the\n"
+                                          "recorded first RT hit (its distance, instance and primitive are\n"
+                                          "in the text readout, step 2d). Records with no secondary ray\n"
+                                          "draw nothing. Needs a dump, and it follows the Sky Bin browser\n"
+                                          "with no new dump.");
 
+                    // DeltaDirections is the one channel that draws fixed-length
+                    // bin boxes and reads no record, so it takes the treatment its
+                    // geometry needs: no Sky Bin browser, no Ray Length slider and no
+                    // invalid-probe dim. Channels 0..6 and 8 read records; they need
+                    // a dump and they follow the Sky Bin browser.
                     const bool deltaDirs =
                         ((uint32_t)m_BakedGIRayDebugChannel == BakedGI::kRayFanChannelDeltaDirs);
-
-                    // Which state the fan replays. The sun is one direction, so
-                    // there is no dominant bin and no per-bin weight: saying
-                    // otherwise would describe the removed 16-bin kernel.
-                    ImGui::Text("Ray Fan: probe %u, sun hour state %d (hour %.2f)",
-                                m_Renderer.GetBakedGI().GetRayDebugProbe(), m_BakedGISunState,
-                                m_GIHour);
+                    const bool binGeometry = deltaDirs;
+                    // WHICH RECORD the fan draws. The SOURCE and the PROBE come from
+                    // the DUMP: the records in the buffer were traced from the source
+                    // the dump used, and a label that followed the combo would rename
+                    // them. The sky BIN is different — a SKY dump recorded every bin,
+                    // so the bin is the displayed group and the browser below owns it.
+                    const BakedGI& fanGI = m_Renderer.GetBakedGI();
+                    const bool fanSky = (fanGI.GetRayDebugSource() == BakedGI::RayDebugSource::Sky);
+                    const char* fanSourceName = BakedGI::RayDebugSourceName(fanGI.GetRayDebugSource());
+                    if (fanSky)
+                    {
+                        ImGui::Text("Ray Fan: probe %u, source %s, sky bin %u of %u (displayed)",
+                                    fanGI.GetRayDebugProbe(), fanSourceName,
+                                    fanGI.GetRayDebugSkyDirection(), BakedGI::kDirections);
+                    }
+                    else
+                    {
+                        ImGui::Text("Ray Fan: probe %u, source %s, sun hour state %u (hour %.2f)",
+                                    fanGI.GetRayDebugProbe(), fanSourceName,
+                                    fanGI.GetRayDebugSunState(),
+                                    BakedGI::kSunStateHour0 +
+                                        BakedGI::kSunStateStepHours * (float)fanGI.GetRayDebugSunState());
+                    }
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("The dump replayed this probe's record for the first of the\n"
-                                          "two hour states the fold interpolates. The fan draws that\n"
-                                          "record's 64 gather rays, so every drawn ray belongs to a\n"
-                                          "bake the current hour actually reads.");
+                        ImGui::SetTooltip("The records on screen belong to this probe and this source.\n"
+                                          "SUN: the dump replayed the first of the two hour states the fold\n"
+                                          "interpolates, so every drawn ray belongs to a bake the current\n"
+                                          "hour reads.\n"
+                                          "SKY: ONE dump recorded ALL %u fibonacci bins, each traced toward\n"
+                                          "its own direction with the sky feedback at the hit. The bin named\n"
+                                          "here is the one ON DISPLAY, and the Sky Bin control moves it with\n"
+                                          "no dump and no wait.\n"
+                                          "Press \"Dump Probe Ray Debug\" after a bake or a source change.",
+                                          (unsigned)BakedGI::kDirections);
+
+                    // --- Sky V_i CURSOR: REMOVED with the channel it marked ---
+                    // Channel 9 and the per-bin cone visibility it coloured are
+                    // gone, so there is no cursor, no marker and no member left.
+
+                    // --- Sky Bin browser (SKY source, record channels only) ---
+                    // Every sky bin is already in the buffer, so this control is a
+                    // pure view switch. SetRayDebugSkyDirection touches CPU state and
+                    // nothing else: no dispatch, no readback, no Map, no wait, and no
+                    // bake. The channels, the labels, the DeltaDirections cyan marker
+                    // and the Cage Trace pool all read the same one value, so the
+                    // number here and the rays on screen cannot disagree.
+                    //
+                    // DeltaDirections needs no browser: it draws the bins themselves.
+                    // It DOES follow this value for the cyan marker, so that channel
+                    // shows the number read-only below.
+                    if (fanSky && !binGeometry)
+                    {
+                        const uint32_t shownBin = fanGI.GetRayDebugSkyDirection();
+                        int bin = (shownBin < BakedGI::kDirections) ? (int)shownBin : 0;
+                        bool moved = false;
+                        ImGui::SetNextItemWidth(140.f);
+                        if (ImGui::SliderInt("Sky Bin", &bin, 0, (int)BakedGI::kDirections - 1))
+                            moved = true;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Which recorded sky bin the 64 rays belong to, 0..%d.\n"
+                                              "ALL bins were recorded by the last dump, so this only changes\n"
+                                              "which group is read: no dump, no GPU wait, no re-bake.\n"
+                                              "The label above, the channels, the self-check readout and the\n"
+                                              "Cage Trace pool follow it, and the DeltaDirections channel\n"
+                                              "moves its thicker CYAN box to the same bin.\n"
+                                              "Direction = BakedGIDeltaDirection(bin) in BakedGI.hlsli:\n"
+                                              "y = (bin+0.5)/16, phi = bin*2.39996323 (golden angle),\n"
+                                              "r = sqrt(1-y*y).",
+                                              (int)BakedGI::kDirections - 1);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Prev##skybin"))
+                        {
+                            bin = (bin + (int)BakedGI::kDirections - 1) % (int)BakedGI::kDirections;
+                            moved = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Next##skybin"))
+                        {
+                            bin = (bin + 1) % (int)BakedGI::kDirections;
+                            moved = true;
+                        }
+                        if (moved)
+                        {
+                            // Read the bin back from BakedGI for the member and for
+                            // the label: the setter can refuse, and a label must never
+                            // describe a state the buffer is not in.
+                            m_Renderer.GetBakedGI().SetRayDebugSkyDirection((uint32_t)bin);
+                            m_BakedGIRayDebugSkyDir = (int)fanGI.GetRayDebugSkyDirection();
+                            // Publish at once, so the frame after this one draws the
+                            // new group and the new cyan bin.
+                            FillRayDebugConstants();
+                        }
+                        const uint32_t shownNow = fanGI.GetRayDebugSkyDirection();
+                        const DirectX::XMFLOAT3 sd =
+                            BakedGI::DeltaDirection((shownNow < BakedGI::kDirections) ? shownNow : 0u);
+                        ImGui::TextDisabled("  bin %u of %u, direction (%.4f, %.4f, %.4f) — no dump needed",
+                                            shownNow, (unsigned)BakedGI::kDirections, sd.x, sd.y, sd.z);
+                    }
+                    else if (fanSky && deltaDirs)
+                    {
+                        const uint32_t shownBin = fanGI.GetRayDebugSkyDirection();
+                        ImGui::TextDisabled("  the CYAN bin box follows the displayed sky bin (%u); set it in "
+                                            "a record channel",
+                                            shownBin);
+                    }
 
                     // Both widgets below describe the RECORD channels only.
-                    // DeltaDirections reads no record and draws a fixed-length box,
+                    // DeltaDirections reads no record and draws fixed-length boxes,
                     // so neither applies. Offering a ray-length slider that changes
                     // nothing is the kind of dead control this panel has been
                     // shedding, and it would also suggest the 16 boxes are rays.
-                    if (!deltaDirs)
+                    if (!binGeometry)
                     {
                         // The dump zeroes an invalid probe's stored table, so the
                         // channels that read that table are degenerate. The fan dims
                         // them (BAKED_GI_RAYFAN_INVALID_DIM). Say which ones here too.
-                        const BakedGI& fanGI = m_Renderer.GetBakedGI();
                         if (fanGI.HasRayDebugBuffer() && fanGI.GetRayDebugKnownInvalid())
                         {
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
@@ -2359,6 +2671,8 @@ void Application::RenderImGui()
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Ray length cap in probe spacings. A hit shorter than the cap draws\n"
                                               "at its true distance; a longer hit and a sky miss draw at the cap.\n"
+                                              "The VHit Ray channel uses it for its OPEN (cyan) segments: an open\n"
+                                              "secondary ray has no hit to stop at, so it runs to the cap.\n"
                                               "The leak the fan is chasing spans about 6 spacings.");
                     }
                 }
@@ -2371,9 +2685,10 @@ void Application::RenderImGui()
                     //
                     // The pool is the dump's OWN readback (BakedGI::GetRayCandidates),
                     // so its numbers are the trace's numbers rather than a second
-                    // computation, and it is kept for all 16 directions — hence the
-                    // lookup by the CURRENT sun-dominant direction: a sun move after
-                    // the dump re-lists instead of describing another direction.
+                    // computation. Its lists cover every group: a SKY dump fills all
+                    // 16, a SUN dump fills group 0 and leaves the rest empty. So the
+                    // lookup is by the DISPLAYED group index, and moving the Sky Bin
+                    // control re-lists at once, from the same readback.
                     const BakedGI& cageGI = m_Renderer.GetBakedGI();
                     if (!cageGI.IsValid())
                     {
@@ -2391,14 +2706,30 @@ void Application::RenderImGui()
                     }
                     else
                     {
-                        // The sun dump writes group 0 only, so group 0 is the pool
-                        // that describes the trace. There is no argmax to name any
-                        // more: the 16 bins carry no sun weight.
-                        ImGui::Text("Cage Trace: probe %u, sun hour state %d — picks from group 0",
-                                    cageGI.GetRayDebugProbe(), m_BakedGISunState);
+                        // The DISPLAYED record GROUP is the pool that describes the
+                        // trace: group 0 for the SUN source, the displayed bin's own
+                        // group for the SKY source. One lookup, used by the label and
+                        // by both pool reads below, so the panel cannot describe one
+                        // group and read another. The Sky Bin browser moves this value
+                        // and the label with it.
+                        const uint32_t cageGroup = cageGI.GetRayDebugDir();
+                        const bool cageSky = (cageGI.GetRayDebugSource() == BakedGI::RayDebugSource::Sky);
+                        if (cageSky)
+                        {
+                            ImGui::Text("Cage Trace: probe %u, source SKY, displayed sky bin %u — picks from group %u",
+                                        cageGI.GetRayDebugProbe(), cageGI.GetRayDebugSkyDirection(), cageGroup);
+                        }
+                        else
+                        {
+                            ImGui::Text("Cage Trace: probe %u, source SUN, hour state %u — picks from group %u",
+                                        cageGI.GetRayDebugProbe(), cageGI.GetRayDebugSunState(), cageGroup);
+                        }
                         if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("The probe is the dumped one, and the state is the first of the\n"
-                                              "two the current hour interpolates. What the trace draws:/n"
+                            ImGui::SetTooltip("The probe and the source are the dump's own values. The record\n"
+                                              "group is the DISPLAYED one: group 0 for SUN, the Sky Bin the Ray\n"
+                                              "Fan shows for SKY, so this line and the trace describe one group\n"
+                                              "and the Sky Bin control moves both. What the\n"
+                                              "trace draws:\n"
                                               "  the probe -> hit segment, then the 8 trilinear cage probes the\n"
                                               "  bake's feedback gather actually sampled at that hit, then the\n"
                                               "  trilinear CELL of the pushed read point (hit + n*0.1*spacing) as a\n"
@@ -2423,9 +2754,7 @@ void Application::RenderImGui()
                         }
                         else
                         {
-                            // Group 0: the only group the sun replay writes.
-                            constexpr uint32_t kSunGroup = 0u;
-                            const uint32_t dir = kSunGroup;
+                            const uint32_t dir = cageGroup;
                             const auto& pool = cageGI.GetRayCandidates(dir);
 
                             const BakedGI::RayCandidate* sel = nullptr;
@@ -2482,7 +2811,7 @@ void Application::RenderImGui()
 
                         if (m_BakedGIRayDebugRay >= 0)
                         {
-                            const auto& check = cageGI.GetRayCandidates(0u);
+                            const auto& check = cageGI.GetRayCandidates(cageGroup);
                             bool inPool = false;
                             for (const BakedGI::RayCandidate& c : check)
                                 if ((int)c.ray == m_BakedGIRayDebugRay) { inPool = true; break; }
