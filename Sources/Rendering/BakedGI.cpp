@@ -99,14 +99,13 @@ static_assert(kSH9OpenValue > 0.999999999 && kSH9OpenValue < 1.000000001,
 static_assert(offsetof(FrameConstants, bakedGIUseFilled)       == 1168, "runtime FILLED flag moved");
 // The two ray-debug source fields are appended after the last 4-byte scalar,
 // so no pad is needed on either side. Measured with dxc as well: 1172, 1176,
-// and the struct size 1180. The Sky V_i cursor that used to occupy 1180 is
-// removed with the channel it marked.
+// and the struct size 1180. Re-measure both sides when a field before these
+// changes size or count.
 static_assert(offsetof(FrameConstants, bakedGIRayDebugSource)  == 1172, "ray-debug source field moved");
 static_assert(offsetof(FrameConstants, bakedGIRayDebugSkyDir)  == 1176, "ray-debug sky bin field moved");
 static_assert(sizeof(FrameConstants)                           == 1180, "FrameConstants size changed");
-// The SH9 sky-visibility SRV index. It replaced the response SRV index at the
-// SAME offset, because the two V views are the only readers and the response
-// table no longer carries a visibility. Measured with dxc on BakedGI_Debug.hlsl:
+// The SH9 sky-visibility SRV index. The two V views are its only readers, and the
+// response table carries no visibility. Measured with dxc on BakedGI_Debug.hlsl:
 // 732. Nothing downstream moved, so the pads further on still hold.
 static_assert(offsetof(FrameConstants, bakedGISkyVisSRVIndex)  == 732, "sky-vis SRV index moved");
 
@@ -479,7 +478,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         return false;
     }
 
-    // The grid identity is now (re)established. Bumped here rather than on the
+    // The grid identity is (re)established. Bumped here rather than on the
     // success path so the cache-load early return below is covered too: both
     // paths end up with this grid. A bump on a bake that later fails only costs
     // the UI one rebuild.
@@ -842,19 +841,16 @@ inline const float* RayDebugField(const float* rec, uint32_t f4)
 }
 
 // The record `r` of record group `dir`, inside the mapped readback. ONE place
-// multiplies by the stride: the readout used to spell the same expression four
-// times, and a stride change had to reach all four.
+// multiplies by the stride, so a stride change reaches one line.
 inline const float* RayDebugRecord(const uint8_t* mapped, uint32_t dir, uint32_t r)
 {
     return reinterpret_cast<const float*>(mapped)
          + ((size_t)dir * BakedGI::kDebugGatherRays + r) * BakedGI::kRayRecordF4 * 4u;
 }
 
-// rec3.w packs TWO values into one float, because the 6-float4 record it was
-// written against had no spare field:  status + 4 * sourceRayIndex.
-// BakedGI_RayDebug.hlsl owns the encode. Status keeps its old meaning and its old
-// three values (0 = sky miss, 1 = backface reject, 2 = shaded), so a reader
-// decodes instead of comparing.
+// rec3.w packs TWO values into one float: status + 4 * sourceRayIndex.
+// BakedGI_RayDebug.hlsl owns the encode. Status has three values (0 = sky miss,
+// 1 = backface reject, 2 = shaded), so a reader decodes instead of comparing.
 //
 // Exactness: fp32 represents every integer up to 2^24, and the largest packed
 // value is 2 + 4 * 255 = 1022, so std::fmod is exact and the round trip loses
@@ -949,7 +945,7 @@ bool BakedGI::RecordRayDebug(ID3D12Device* device, ID3D12GraphicsCommandList* cm
     // The Cage Trace pool describes the OLD records. Clear it here, not in the
     // readout: a dump whose readout never runs — no readback, or a failed Map —
     // must leave an EMPTY pool, so the UI cannot offer a ray index that belongs
-    // to a buffer which no longer exists.
+    // to a buffer that is not resident.
     for (auto& list : m_RayCandidates)
         list.clear();
     m_RayCandidateDirs = 0u;
@@ -1428,7 +1424,7 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
         const float* idn  = RayDebugField(rec, BakedGI::kRayRecF4HitNormal);
         const float* idp  = RayDebugField(rec, BakedGI::kRayRecF4HitPos);
         // rec6/rec7 = the SECONDARY visibility ray of that hit. shw names its
-        // status, so "Vhit 1" is no longer the only evidence a row carries.
+        // status, so "Vhit 1" is not the only evidence a row carries.
         const float* shw  = RayDebugField(rec, BakedGI::kRayRecF4Shadow);
         const float* shi  = RayDebugField(rec, BakedGI::kRayRecF4ShadowInfo);
         std::cout << "    rec " << (r < 10u ? " " : "") << r
@@ -1452,11 +1448,10 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
     // --- Step 2b: the hit-surface census. ---
     // Group every HIT of the probe's re-traced rays by the instance it landed on,
     // and print that group's ray count, mean diffuse albedo, mean hit position and
-    // mean hit normal. This is what rec4/rec5 exist for: a record used to carry no
-    // surface identity, so naming the mesh behind a coloured ray meant reproducing
-    // EvalResponseIndirect offline and inferring the normal from NdotD. It also
-    // makes a tinted surface visible as a NUMBER — the instance whose mean albedo is
-    // red is the one to go looking for.
+    // mean hit normal. rec4/rec5 carry that surface identity, so naming the mesh
+    // behind a coloured ray needs no offline EvalResponseIndirect replay and no
+    // normal inferred from NdotD. It also makes a tinted surface visible as a
+    // NUMBER — the instance whose mean albedo is red is the one to go looking for.
     //
     // The scan covers all kDirections groups. A SKY dump fills every one of them,
     // so the census is the whole sphere. A SUN dump fills group 0 only, and the
@@ -1620,10 +1615,10 @@ void BakedGI::LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const
 
     // --- Step 2d: the SECONDARY visibility rays of the displayed group. ---
     // For each shaded record whose hit fired a shadow ray (NdotD > 0), this prints
-    // where that ray ended. It exists because a white Vhit used to be the only
-    // evidence of its own claim: the record carried no endpoint, so a lit floor
-    // whose sky ray never stopped could not be told apart from a ray that leaves
-    // the RT scene. rec6/rec7 carry the answer, and this prints it.
+    // where that ray ended. It exists because a white Vhit is the ray's own claim:
+    // without an endpoint, a lit floor whose sky ray never stopped cannot be told
+    // apart from a ray that leaves the RT scene. rec6/rec7 carry the answer, and
+    // this prints it.
     //
     //   open     the ray committed nothing. shxyz is W, the unit active delta
     //            direction, and the drawn segment runs to the length cap.
@@ -2630,8 +2625,7 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     // Sky-visibility source for the V in the sky term. The EFFECTIVE mode is 0
     // only when the resident bake holds SH data, and 1 for the NoVisibility
     // diagnostic. Mode 1 reads no descriptor, so the SRV index is left at 0
-    // there and the shader never touches it. There is no third mode: the cone
-    // path this switch used to offer is removed.
+    // there and the shader never touches it. Exactly two modes exist.
     {
         const SkyVisMode skyVis = GetEffectiveSkyVisMode();
         p.skyVisSHSRVIdx = (skyVis == SkyVisMode::SH9) ? GetSkyVisSHSRVIndex() : 0u;

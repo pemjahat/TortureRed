@@ -409,7 +409,7 @@ bool Sky::BakeCubemap(ID3D12GraphicsCommandList* cmdList,
     // The model is daylight-only and its solve is a domain error at a negative
     // angle: it returns NaN, not a dark sky. Hand it a CLAMPED elevation and fade
     // the radiance it returns instead. The fade reads the TRUE elevation, so a
-    // setting sun still fades out even though the model no longer sees it.
+    // setting sun still fades out even though the model is handed a clamped one.
     const double hwElevation = std::min(std::max(elevation, 0.0), XM_PI / 2.0);
     const double twilight    = TwilightFactor(elevation);
 

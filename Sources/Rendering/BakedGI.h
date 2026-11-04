@@ -27,13 +27,11 @@ class BakedGI
 public:
     static constexpr uint32_t kDirections      = 16; // delta/sky-quadrature directions
     // float4s for each (probe, direction) record: 9 SH9 RGB and nothing else.
-    // It was 10 until 2026-11-04; slot 9 held the per-bin cone visibility V_i.
-    // That scalar is gone, and so is the 8-ray cone that produced it.
     static constexpr uint32_t kResponseFloat4s = 9;
 
     // ---- Equinox hour states: the sun direction set ----
     //
-    // The sun is one number now: the hour of TRUE SOLAR TIME, where hour 12 is
+    // The sun is one number: the hour of TRUE SOLAR TIME, where hour 12 is
     // solar noon. The date is fixed at the equinox, so the sun path is a great
     // circle and the arc above the horizon is exactly 180 degrees. Seventeen
     // states cover that arc at 0.75 h (11.25 degree) intervals.
@@ -123,14 +121,12 @@ public:
     // buffer, and the view cannot show 256 boxes legibly anyway. The debug pass
     // replays all kBakeGatherRays and writes only the ones that matter.
     static constexpr uint32_t kDebugGatherRays = 64;
-    // float4s for each ray record. 4 -> 6 on 2026-10-14: rec4 and rec5 add the
-    // hit's IDENTITY (normal, world position, instance index, primitive index),
-    // which this layout used to discard — so naming the surface behind a coloured
-    // ray meant reproducing EvalResponseIndirect offline and inferring the normal
-    // from NdotD alone. 6 -> 8 on 2026-11-03: rec6 and rec7 add the SECONDARY
+    // float4s for each ray record. rec4 and rec5 carry the hit's IDENTITY
+    // (normal, world position, instance index, primitive index), so naming the
+    // surface behind a coloured ray needs no offline EvalResponseIndirect replay
+    // and no normal inferred from NdotD alone. rec6 and rec7 carry the SECONDARY
     // visibility ray (endpoint or direction, status, distance, instance,
     // primitive), so a white Vhit can be checked instead of trusted.
-    // rec0..rec5 keep their meaning AND their offsets; only the STRIDE changed.
     // BAKED_GI_RAY_RECORD_F4 (SharedTypes.h) is the ONE definition, and both
     // shader files read it too, so the writer, the viewer and this readback cannot
     // drift.
@@ -151,8 +147,8 @@ public:
     static constexpr uint32_t kRayRecF4ShadowInfo = 7u; // (distance, instance, primitive, 0)
     // The re-accumulated table sits after the records in the same buffer, so one
     // UAV serves both outputs. Layout: [records][table], both float4.
-    // The record stride is the DEBUG count: keeping the buffer at its old size
-    // is what stops this change from adding 302,592 B of readback.
+    // The record stride is the DEBUG count, which keeps the readback at its
+    // current size; the full gather count would add 302,592 B.
     static constexpr uint32_t kRayDebugTableBase = kDirections * kDebugGatherRays * kRayRecordF4;
     static constexpr uint32_t kRayDebugBufF4s    = kRayDebugTableBase + kDirections * kResponseFloat4s;
     static constexpr uint64_t kRayDebugBufBytes  = (uint64_t)kRayDebugBufF4s * 16;
@@ -246,10 +242,8 @@ public:
     //                 sun term. The image difference isolates how much the V
     //                 term contributes.
     //
-    // The per-bin cone estimator that used to be the default is REMOVED: one
-    // scalar for each (probe, bin) from 8 shadow rays, stored in response slot
-    // 9. It cost 8 rays for each bin and could not resolve an aperture inside a
-    // cell. The response record is 9 float4 now.
+    // The V comes from a FIELD, not from one scalar for each bin: a scalar cannot
+    // resolve an aperture inside a cell.
     //
     // The selection is runtime state, so a switch needs no rebake — only a probe
     // fold, which is the Application's call because the live lit table depends on
@@ -346,9 +340,9 @@ public:
     // True only when the resident sun table can serve THIS hour.
     //
     // The table holds every hour state, so the only way it can fail to serve an
-    // hour is that no bake has produced it. The direction test that used to live
-    // here is gone: the state directions are fixed by the equinox formula and are
-    // unit length by construction, so no live sun vector can invalidate them.
+    // hour is that no bake has produced it. The state directions are fixed by the
+    // equinox formula and are unit length by construction, so no live sun vector
+    // can invalidate them.
     //
     // Kept as a query rather than a bare HasSunResponse so the callers that ask
     // "is the sun term available for the frame I am about to draw" keep one
@@ -662,9 +656,8 @@ public:
     // renumbering would change a shipped draw path.
     static constexpr uint32_t kRayFanChannelVHitRay = 8u;
 
-    // The Sky V_i channel that used to sit at 9 is REMOVED, together with the
-    // per-bin cone visibility it coloured and its cursor marker. Channels 0..8
-    // keep their numbers, so no shipped draw path moves.
+    // Channels 0..8 are the whole set, and their numbers are fixed: the renderer's
+    // instance-count branches test them.
 
     // ---------------------------------------------------------------------
     // Sun fold: the ONE definition of the hour -> two-state blend.

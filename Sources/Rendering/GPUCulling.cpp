@@ -706,10 +706,10 @@ void GPUCulling::CullTwoPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
     //   1. MeshletPass::BuildDispatchMeshArgs (always-on — builds the mesh-shader
     //      dispatch args from the visible-meshlet count).
     //   2. CopyCullStatsCS below (debug-only overlay).
-    // It was previously left tracked in UNORDERED_ACCESS state here (only a UAV
-    // barrier above, never a state transition), so both SRV reads were illegal
-    // (D3D12 debug layer: RESOURCE_STATE_MISMATCH — a resource must be in
-    // NON_PIXEL_SHADER_RESOURCE/PIXEL_SHADER_RESOURCE state to be read via SRV).
+    // Both SRV reads require a SHADER_RESOURCE state: a UAV barrier alone does not
+    // transition state, so leaving the resource in UNORDERED_ACCESS here makes both
+    // reads illegal (D3D12 debug layer: RESOURCE_STATE_MISMATCH — a resource must be
+    // in NON_PIXEL_SHADER_RESOURCE/PIXEL_SHADER_RESOURCE state to be read via SRV).
     // Transition unconditionally — not gated on m_CopyCullStatsPSO — so
     // BuildDispatchMeshArgs's read stays legal even if the debug PSOs failed
     // to compile. CullTwoPass's own start-of-phase transition (back to

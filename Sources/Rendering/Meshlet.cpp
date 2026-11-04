@@ -26,7 +26,7 @@ void MeshletPass::CreateResources(uint32_t internalWidth, uint32_t internalHeigh
         std::cerr << "[Meshlet] Failed to create visibility buffer" << std::endl;
     }
 
-    // Culling, HZB, and debug-recording resources are now in GPUCulling.
+    // Culling, HZB, and debug-recording resources live in GPUCulling.
 }
 
 void MeshletPass::RecreateVisibilityBuffer(uint32_t internalWidth, uint32_t internalHeight)
@@ -299,7 +299,7 @@ void MeshletPass::ResolveVisibilityGBuffer(ID3D12GraphicsCommandList* cmdList, I
     GPU_MARKER(cmdList, L"Visibility GBuffer Resolve (Full-Screen)");
 
     // Matches VisibilityGBufferParams in Shaders/VisibilityGBuffer.hlsl (register b1/ root param 12).
-    // FLAT scalar fields only — HLSL legacy cbuffer layout 16-byte-aligns nested struct members,
+    // FLAT scalar fields only — HLSL cbuffer packing 16-byte-aligns nested struct members,
     // which misaligns this plain C++ struct.
     struct VisibilityGBufferParams
     {

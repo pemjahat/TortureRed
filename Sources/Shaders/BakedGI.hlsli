@@ -253,10 +253,8 @@ float3 BakedGIClassifyDirection(uint i, uint n)
 //
 //     L_lm = (4pi / 1024) * sum_s V_s * Y_lm(d_s)     V_s binary, 0 or 1
 //
-// The per-bin cone-fraction scalar that used to sit in response slot 9 was
-// removed: it cost 8 shadow rays for each (probe, bin) and carried one number
-// per cell, while this field costs no ray and carries the whole field. The
-// fold either reconstructs this field or zeros V — there is no third source.
+// This field costs no shadow ray and carries the whole visibility field, so the
+// fold either reconstructs it or zeros V — there is no third source.
 //
 // NO cosine A_l factor and NO normalisation by Y00: the runtime fold multiplies
 // V by a per-bin response, so it needs the visibility FIELD, and not an

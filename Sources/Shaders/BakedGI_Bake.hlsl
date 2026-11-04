@@ -57,16 +57,15 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 //
 // VISIBILITY-WEIGHTED: each cage probe is gated by the same backface +
 // Chebyshev weights the runtime fetch uses, read from the baked octahedral
-// depth moments — feedback cannot cross walls/roofs. Plain trilinear
-// feedback was the last leak channel (capture-verified, ProbeGI4.rdc): a
-// cavity probe's roof-underside gather hit sits in a cell whose corners
-// span the roof (dark cavity probes below, legitimately bright above-roof
-// probes above); the plain blend injected their response through the slab
-// at ~50% weight — cavity probes with V_i = 0 in ALL 16 directions still
-// carried R_j ~ 0.04 (~500 sunDC at runtime). With the weights, the
+// depth moments — feedback cannot cross walls/roofs. Without the weights the
+// blend leaks: a cavity probe's roof-underside gather hit sits in a cell whose
+// corners span the roof (dark cavity probes below, legitimately bright
+// above-roof probes above), so a plain blend injects their response through
+// the slab at ~50% weight — cavity probes with V_i = 0 in ALL 16 directions
+// then carry R_j ~ 0.04 (~500 sunDC at runtime). With the weights, the
 // above-roof probes are Chebyshev-rejected (the slab is between) and the
 // feedback is zero — the physically correct value for a surface that cannot
-// see any lit region.
+// see any lit region. Measured in ProbeGI4.rdc.
 // stride: the records per probe. BAKED_GI_DIRECTIONS for the 16-bin table,
 //         1 for the method-3 sun table (one record for each probe).
 // idx:    the bin index, or 0 for the sun table.
@@ -183,8 +182,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     const uint kRespIdx    = isSunPass ? BakeParams.sunState : dir;
 
     // The delta direction. isSunPass uses the real sun, so the visibility test and
-    // the cosine below finally ask the right question: this is the whole point of
-    // the method, and it is why the fold no longer has an angular error.
+    // the cosine below ask the right question: this is the whole point of the
+    // method, and it is why the fold has no angular error.
     float3 sunDir = float3(BakeParams.sunDirX, BakeParams.sunDirY, BakeParams.sunDirZ);
     float3 wDelta;
     if (isSunPass)
@@ -207,9 +206,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // transport iterations — its UAV barrier orders the write). DDGI
     // criteria: >= 25% backfaces among 32 stable fibonacci rays = dead; no
     // relocation (bad probes stay put — the experiment measures the criteria
-    // swap alone). The old 1cm existential test runs alongside as a
-    // diagnostic bit. Dead probes get zeroed responses; all direction
-    // threads read the same verdict, so the old same-value race is gone. ---
+    // swap alone). The 1cm existential test runs alongside as a diagnostic
+    // bit. Dead probes get zeroed responses; all direction
+    // threads read the same verdict, so no thread races on it. ---
     const bool valid = (meta[probe] & BAKED_GI_META_VALID) != 0u;
 
     if (!valid)
@@ -233,13 +232,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // --- Gather: indirect field around the probe under the delta light ---
     //
     // The RNG stream starts here, at the seed above, with no draw spent before
-    // it. Until 2026-11-04 a V_i axis ray ran first on this stream, and it was
-    // kept for the SKY pass only to preserve the draw count of a still older
-    // bake. Both the axis ray and the V_i it produced are gone, so every R_i in
-    // this table is a NEW draw sequence: the tables do not match a build from
-    // before this change. That break is intended. The stream is now the natural
-    // one (seed, then the 256 gather directions), so a future change has no
-    // hidden draw to preserve. Reproduce it in BakedGI_RayDebug.hlsl exactly.
+    // it: the seed, then the 256 gather directions. Any table written by an older
+    // build does not match this stream, so a change to the draw order invalidates
+    // the cache. Reproduce the stream in BakedGI_RayDebug.hlsl exactly.
     StructuredBuffer<float4> responsePrev = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
     StructuredBuffer<float2> visMoments   = ResourceDescriptorHeap[BakeParams.visSRVIdx];
 

@@ -47,7 +47,7 @@ void Renderer::CreateRasterIndirectGIResources()
     CreateBuffer(m_IrCacheLifeBuf,     MAX_ENTRIES * 4ULL,  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
     CreateBuffer(m_IrCacheTraceArgsBuf,12ULL,               D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, true);
 
-    // Structured (RWStructuredBuffer<T>) — CreateStructuredBuffer now writes correct UAV
+    // Structured (RWStructuredBuffer<T>) — CreateStructuredBuffer writes a correct UAV
     CreateStructuredBuffer(m_IrCachePoolBuf,       sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_IrCacheEntryCellBuf,  sizeof(UINT),      MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     CreateStructuredBuffer(m_IrCacheIrradianceBuf, sizeof(Reservoir), MAX_ENTRIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -597,7 +597,7 @@ void Renderer::EndFrame()
 
 void Renderer::Present()
 {
-    // This is now handled in EndFrame
+    // Handled in EndFrame
 }
 
 void Renderer::ExecuteCommandList()
@@ -620,12 +620,9 @@ ID3D12Resource* Renderer::GetCurrentBackBuffer() const
 
 void Renderer::CreateRootSignature()
 {
-    // the legacy bindless texture descriptor table (t0 space0,
-    // 4096 SRVs, ex root param 3) is gone. Textures are read in shaders via
-    // ResourceDescriptorHeap[index] (GetTexture2D), which
-    // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED makes valid for any heap index without a
-    // table — so this signature no longer carries a texture table parameter and
-    // all following root parameters shifted down by one.
+    // Textures are read in shaders via ResourceDescriptorHeap[index] (GetTexture2D),
+    // which CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED makes valid for any heap index without
+    // a table — so this signature carries no texture table parameter.
 
     CD3DX12_DESCRIPTOR_RANGE uavRange0;
     uavRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0: Restir RTXDI ping pong buffer
@@ -1011,9 +1008,9 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
     if (!m_BakedGI.IsValid() || frame.bakedGIValid == 0)
         return;
 
-    // The sun column no longer needs a direction: the hour selects the two baked
-    // states. `sun` is kept in the signature because the irradiance that scales
-    // the term still comes from the sky model, which the same light drives.
+    // The sun column takes no direction: the hour selects the two baked states.
+    // `sun` is kept in the signature because the irradiance that scales the term
+    // still comes from the sky model, which the same light drives.
     (void)sun;
 
     m_BakedGI.RecordUpdate(m_CommandList.Get(), m_RootSignature.Get(), m_FrameCB.gpuAddress,
@@ -1098,17 +1095,16 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
         // Geometry per view: cube (36 verts) for placement, UV spheres
         // (8x8x6 = 384 verts) for the five ball views (2 lit irradiance, 3 sky
         // visibility, 5 lit sky, 6 lit sun, 8 Efb contribution), per-direction
-        // instances for the two per-direction ray views (4 visibility rays, 7 ray
-        // fan) — both draw one thin box per (probe, fibonacci direction) — and a
-        // fixed thin-box set for the Cage Trace (9), which draws one probe's
-        // trace chain.
+        // instances for the one per-direction ray view (7 ray fan, one thin box
+        // per gather ray of the displayed record) and a fixed thin-box set for the
+        // Cage Trace (9), which draws one probe's trace chain.
+        // View 4 draws nothing: its index is skipped, and the shader early-outs on
+        // 4, so a stale value draws nothing.
         const uint32_t view = frame.bakedGIDebugView;
         uint32_t vertsPerInstance = 36;
         uint32_t instanceCount    = m_BakedGI.GetProbeCount();
         if (view == 2u || view == 3u || view == 5u || view == 6u || view == 8u)
             vertsPerInstance = 384;
-        if (view == 4u)
-            instanceCount *= BakedGI::kDirections;
         if (view == 7u)
         {
             // Ray Fan. Three shapes, chosen by the colour channel:
@@ -1125,11 +1121,6 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
             //   a dump the probe index is 0, so the boxes sit at probe 0's cell.
             //   A SKY dump marks its bin by REUSING that bin's instance, so the
             //   draw count is the same in both sources.
-            //
-            //   Sky V_i — REMOVED. It drew the same 16 instances as
-            //   DeltaDirections plus a cursor marker, coloured by the per-bin cone
-            //   visibility that used to live in response slot 9. The channel, the
-            //   slot and the cursor are all gone, so no branch here.
             //
             //   Every record channel — 64 instances, one per gather ray of the
             //   displayed delta record (FrameConstants::bakedGIRayDebugDir). The

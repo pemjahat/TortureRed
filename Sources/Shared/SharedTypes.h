@@ -31,8 +31,8 @@ static const float FP16Max      = 65504.0f;            // fp16 max
 // Common.hlsl -> Shared/SharedTypes.h; C++ via GraphicsTypes.h). Deliberately
 // NOT named PHI: HLSL identifiers are case-insensitive and `phi` is the
 // established azimuth / golden-angle local name in the shaders, so a PHI
-// constant would shadow-collide with them. fl(PI) is bit-identical to the
-// previously scattered 3.14159265f literals.
+// constant would shadow-collide with them. The value is bit-identical to a
+// 3.14159265f literal.
 static const float PI           = 3.14159265358979f;
 
 #define RESTIR_RESERVOIR_DEBUG_OFF        0u
@@ -60,10 +60,8 @@ static const float PI           = 3.14159265358979f;
 // (BakedGI::kRayRecordF4 in BakedGI.h). This header is compiled from source on
 // both sides, so the GPU and the CPU cannot disagree about the stride.
 //
-// A record is 8 float4 = 128 B. The first six float4 keep the offsets and the
-// meanings they had at the 6-float4 layout, so every existing reader is
-// unchanged. rec6 and rec7 carry the SECONDARY ray — the shadow ray that the
-// gather hit fires toward the active delta direction W:
+// A record is 8 float4 = 128 B. rec6 and rec7 carry the SECONDARY ray — the
+// shadow ray that the gather hit fires toward the active delta direction W:
 //
 //   rec0 = (gather direction.xyz, hit distance; 1e4 = miss)
 //   rec1 = (diffuse albedo.rgb, NdotD)
@@ -181,19 +179,20 @@ struct FrameConstants {
     uint   bakedGIDimZ;
 
     // Probe debug overlay (BakedGI_Debug.hlsl): view enum + lit-preview scale.
-    uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility, 4 visibility rays,
-                                    // 5 lit sky source, 6 lit sun source, 7 ray fan (one probe's gather rays),
+    uint   bakedGIDebugView;        // 0 off, 1 placement, 2 lit irradiance, 3 sky visibility,
+                                    // 4 unused, 5 lit sky source, 6 lit sun source,
+                                    // 7 ray fan (one probe's gather rays),
                                     // 8 efb contribution (per-probe SH ball of R^k - R^0 for one bake term;
                                     //   the term is the UI's "Iteration" 1..3 — see bakedGIEfbIterSRVIndex)
     // Per-probe raw SH9 SKY VISIBILITY: 9 floats for each probe, stride 4 B.
-    // StructuredBuffer<float>, written by the visibility bake and read by the two
-    // V views (bakedGIDebugView 3 and 4). It is the ONE source of the V the fold
+    // StructuredBuffer<float>, written by the visibility bake and read by the V
+    // view (bakedGIDebugView 3). It is the ONE source of the V the fold
     // multiplies, so no response-table slot carries a visibility any more.
     //
     // 0xFFFFFFFF means "no SH data": no bake has run, or a Probes/ cache load
     // restored the tables without this section. 0 is a legal descriptor index, so
-    // it cannot mean "none" — both views early-out on the sentinel before they
-    // declare the SRV. BakedGI::kSkyVisNoSRV is the C++ spelling.
+    // it cannot mean "none" — the view early-outs on the sentinel before it
+    // declares the SRV. BakedGI::kSkyVisNoSRV is the C++ spelling.
     uint   bakedGISkyVisSRVIndex;
     float  bakedGIDebugScale;       // lit-ball gain (DC-normalized shading multiplier)
 
@@ -272,9 +271,7 @@ struct FrameConstants {
                                     // toward. It draws rec5, rec6 and rec7. Cyan = the secondary
                                     // ray is open, red = it stopped at the recorded first hit. See
                                     // BakedGI::kRayFanChannelVHitRay.
-                                    // The Sky V_i channel that used to sit at 9 is REMOVED with
-                                    // the per-bin cone visibility it coloured. 0..8 are the
-                                    // whole set, and their numbers did not change.
+                                    // 0..8 is the whole set.
     float bakedGIRayDebugLength;    // ray length cap, in probe spacings
     uint  bakedGIRayDebugValid;     // 1 = do not dim. The probe is valid, or its validity is
                                     // unknown (the meta read failed). 0 = the probe is KNOWN
@@ -296,9 +293,9 @@ struct FrameConstants {
     // (bakedGIRayDebugChannel == 7). One entry for each BakedGI::kDirections /
     // BAKED_GI_DIRECTIONS direction, in index order.
     //
-    // These were the sun fold's kernel weights. That kernel is gone: the sun is 17
-    // baked hour states now, so no per-bin sun weight exists. The 16 directions
-    // are the hemisphere sky quadrature, which weights every direction equally, so
+    // These are sky weights, not sun weights: the sun is 17 baked hour states, so
+    // no per-bin sun weight exists. The 16 directions are the hemisphere sky
+    // quadrature, which weights every direction equally, so
     // every entry is 1/16 and the channel draws them all at the same brightness.
     //
     // The field is KEPT at this size and this offset on purpose: a shrunken array
@@ -410,10 +407,10 @@ struct FrameConstants {
     // table. The shader draws it as a 17th, thicker, ORANGE box.
     //
     // xyz = the to-sun UNIT direction at the current HOUR, from
-    //       BakedGI::SunDirectionAtHour. It is no longer the light's live
-    //       direction: the GI sun comes from the hour, and the two are kept equal
-    //       by Application::Render, which writes the same direction into the
-    //       directional light. w = 1.0 inside daylight, 0.0 otherwise — outside
+    //       BakedGI::SunDirectionAtHour. It is the GI sun, not an independent
+    //       light direction: Application::Render writes the same direction into
+    //       the directional light, so the two stay equal.
+    //       w = 1.0 inside daylight, 0.0 otherwise — outside
     //       hour 6 to 18 the sun term is zero, so the marker does not draw. With
     //       w = 0 the xyz is written as zero too, so no stale direction survives.
     //
@@ -465,8 +462,7 @@ struct FrameConstants {
     // so none of them needs a pad: HLSL places a scalar on a 4-byte boundary and no
     // vector crosses a 16-byte boundary here. Measured on both sides:
     // bakedGIUseFilled 1168, bakedGIRayDebugSource 1172, bakedGIRayDebugSkyDir
-    // 1176, sizeof 1180. The Sky V_i cursor that used to sit at 1180 is REMOVED
-    // with the channel it marked. Re-measure both sides when a field BEFORE these
+    // 1176, sizeof 1180. Re-measure both sides when a field BEFORE these
     // changes size or count.
     uint bakedGIRayDebugSource;     // 1172: 0 = SUN, 1 = SKY — the dumped source
     uint bakedGIRayDebugSkyDir;     // 1176: the displayed sky bin, or 0xFFFFFFFF
@@ -497,9 +493,9 @@ struct BakedGIBakeParams {
     //              instead of the 16-direction table. ONE pair of indices,
     //              interpreted per pass: a second pair would be two places to get
     //              wrong.
-    // This is NOT the removed SingleDirectionSun switch. BOTH passes run on every
-    // bake: the 16-direction table is the live sky quadrature, and the sun table
-    // is what the hour fold interpolates. Removing either one breaks the frame.
+    // BOTH passes run on every bake: the 16-direction table is the live sky
+    // quadrature, and the sun table is what the hour fold interpolates. Skipping
+    // either one breaks the frame.
     uint  isSunPass;
     float sunDirX, sunDirY, sunDirZ;   // TO-SUN unit direction, isSunPass 1 only
 
@@ -534,18 +530,14 @@ struct BakedGIBakeParams {
 //
 // OFFSETS, measured on both sides after the 2026-10-29 cleanup:
 // sunIrradianceX 0, hour 12, responseSRVIdx 16, litSunUAVIdx 32, dimZ 60,
-// sunResponseSRVIdx 64, sizeof 68.
-//
-// Three dead slots were REMOVED, not kept as pads: the ones that used to hold
-// sunDirY, sunDirZ and sunMode. Nothing reads them, and SharedTypes.h is compiled
-// from source on both sides, so a shifted layout costs nothing beyond a shader
-// cache wipe. Keeping a pad to protect an ABI that no longer exists only invites
-// a reader to think the field is still meaningful.
+// sunResponseSRVIdx 64, sizeof 68. The offsets are contiguous: nothing here is a
+// pad. SharedTypes.h is compiled from source on both sides, so a shifted layout
+// costs only a shader cache wipe.
 struct BakedGIUpdateParams {
     float sunIrradianceX, sunIrradianceY, sunIrradianceZ; // sun perpendicular irradiance (RGB)
     // 12: the GI sun input. TRUE SOLAR TIME in hours, 0..24, hour 12 = solar noon.
-    // This slot held sunDirX. The fold no longer interpolates by direction: the 17
-    // baked hour states already bracket the hour, so the direction is not an input.
+    // The direction is not an input: the 17 baked hour states already bracket the
+    // hour.
     float hour;
     uint  responseSRVIdx;  // final response table (SRV), the 16-record sky basis
     uint  metaSRVIdx;      // probe validity (SRV)
@@ -571,8 +563,8 @@ struct BakedGIUpdateParams {
     // index 0 never reaches a read.
     uint  skyVisSHSRVIdx; // SRV: per-probe sky-visibility SH9, stride 9 floats
     uint  skyVisMode;     // 0 = SH9 buffer (the default), 1 = V = 0 (no buffer read).
-                          // These are BakedGI::SkyVisMode's values. There is no third
-                          // mode: the per-bin cone fraction it used to select is gone.
+                          // These are BakedGI::SkyVisMode's values, and there are
+                          // exactly two.
 };
 
 
@@ -956,7 +948,7 @@ struct MeshletCandidate {
 // =============================================================================
 
 // IMPORTANT: cbuffer-bound (root-constants) structs must stay FLAT — scalar fields only,
-// no nested structs, no arrays. HLSL legacy cbuffer layout 16-byte-aligns nested struct
+// no nested structs, no arrays. HLSL cbuffer packing 16-byte-aligns nested struct
 // members (and array elements), which silently misaligns a plain C++ struct.
 
 // Passed to the Mesh Shader rasterize pass via root param 12 (b1).
@@ -970,7 +962,7 @@ struct RasterParams {
     uint Phase;                      // TWO_PASS_PHASE_FIRST / TWO_PASS_PHASE_SECOND — also doubles as the VisibleMeshletsCounter slot index for this phase
     // Bindless SRV heap indices of the 9 global meshlet stream buffers.
     // Each stream is looked up individually via ResourceDescriptorHeap[idx], so the streams
-    // no longer need adjacent heap slots (old t0-t15 space3 descriptor table removed).
+    // need no adjacent heap slots.
     uint GlobalPositionsSRVIdx;        // StructuredBuffer<float3>
     uint GlobalNormalsSRVIdx;          // StructuredBuffer<uint> (RGB10A2_SNORM)
     uint GlobalUVsSRVIdx;              // StructuredBuffer<uint> (RG16_FLOAT)
@@ -1161,9 +1153,8 @@ struct DepthReadoutParams {
 // once per frame (gated to Phase 1 in GPUCulling::CullTwoPass) — Phase 2 must NOT reset slot 0,
 // since Phase 2 appends its own candidates into VisibleMeshlets STARTING at slot 0's value
 // (elementOffset += VisibleMeshletsCounter[TWO_PASS_PHASE_FIRST]) rather than aliasing over
-// Phase 1's already-rasterized range. See docs/bug_flyingworld_meshlet_flicker.md — this is
-// the fix for a frame-to-frame flicker caused by Phase 2 previously resetting a single shared
-// counter/slot, which corrupted the deferred Visibility Buffer resolve for Phase-1 pixels.
+// Phase 1's already-rasterized range. A single shared counter corrupts the deferred
+// Visibility Buffer resolve for Phase-1 pixels. See docs/bug_flyingworld_meshlet_flicker.md.
 #define TWO_PASS_PHASE_FIRST   0u
 #define TWO_PASS_PHASE_SECOND  1u
 
@@ -1197,9 +1188,9 @@ struct TwoPassCullConstants {
     // Fully-bindless resource indices — MeshletTwoPassCull.hlsl has no root SRV/UAV
     // descriptors at all (root signature is just b0+b1+a static sampler); every buffer
     // is looked up via ResourceDescriptorHeap[idx] instead. This also sidesteps having
-    // to allocate a dedicated root SRV slot for OccludedInstances just because it is
-    // UAV-written in Phase 1 but SRV-read in Phase 2 (see OccludedInstancesSRVIdx above,
-    // which predates this and was the original motivating case for going bindless here).
+    // to allocate a dedicated root SRV slot for OccludedInstances, which is UAV-written
+    // in Phase 1 but SRV-read in Phase 2 — a role reversal one fixed root slot cannot
+    // serve. OccludedInstancesSRVIdx above is that path.
     uint  InstanceDataSRVIdx;          // SRV bindless index of Model's InstanceData[]
     uint  InstanceBoundsSRVIdx;        // SRV bindless index of Model's InstanceBounds[]
     uint  MeshDataSRVIdx;              // SRV bindless index of Model's MeshData[]

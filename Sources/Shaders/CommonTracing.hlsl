@@ -519,7 +519,7 @@ LightSampleResult SampleSingleLight(
     return SampleSingleLightLUT(rngSample, lights, g_LightLUT, numLights);
 }
 
-// Legacy CDF functions removed - LUT is O(1) and sufficient for max 256 lights
+// Sampling uses the LUT: O(1), and sufficient for max 256 lights.
 
 // Sample a single local light uniformly - each local light has equal probability 1/(numLights-1).
 LightSampleResult SampleSingleLightUniform(

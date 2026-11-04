@@ -157,7 +157,7 @@ public:
     int GetGlobalMeshletBoundsSRVIndex() const { return m_GlobalMeshletBounds.srvIndex; }
     // Bindless SRV heap indices for the remaining meshlet stream buffers.
     // Each stream is looked up individually via ResourceDescriptorHeap[idx], so the
-    // streams no longer need contiguous heap slots (no more t0-t15 space3 descriptor table).
+    // streams need no contiguous heap slots.
     int GetGlobalPositionsSRVIndex()        const { return m_GlobalPositions.srvIndex; }
     int GetGlobalNormalsSRVIndex()          const { return m_GlobalNormals.srvIndex; }
     int GetGlobalUVsSRVIndex()              const { return m_GlobalUVs.srvIndex; }

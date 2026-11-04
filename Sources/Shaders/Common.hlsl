@@ -9,9 +9,8 @@
 
 #define SHARC_HASH_ENTRIES_NUM (4 * 1024 * 1024)
 
-// Bindless texture lookup. Replaces the legacy
-// `Texture2D g_Textures[] : register(t0, space0)` descriptor-table array:
-// every texture already receives a heap SRV index at creation, so any texture
+// Bindless texture lookup.
+// Every texture receives a heap SRV index at creation, so any texture
 // is reachable as ResourceDescriptorHeap[index] without a root descriptor
 // table. Guarded with a macro so it can also live in MeshletCommon.hlsli
 // (which does not include this file) without redefinition conflicts.

@@ -1,10 +1,11 @@
 // =============================================================================
 // BakedGI_Debug.hlsl — probe debug overlay (post-composite LDR).
 //
-// Nine views (FrameConstants::bakedGIDebugView):
+// Eight views (FrameConstants::bakedGIDebugView). Index 4 draws nothing, so the
+// other indices do not shift:
 //   1 Placement      — cube per grid cell, classification A/B: green = valid
 //                      under both criteria, red = bad under both, BLUE =
-//                      newly bad (old 1cm test said valid, DDGI's >= 25%
+//                      newly bad (the 1cm test says valid, DDGI's >= 25%
 //                      backface rule kills it), yellow = newly valid.
 //   2 Lit Irradiance — billboard SH ball per valid probe: each sphere point
 //                      evaluates the probe's lit SH9 coefficients at its own
@@ -27,12 +28,8 @@
 //                      is small, so a DC-coloured ball reads almost black.
 //                      Red = invalid probe. Nothing draws when the bake holds no
 //                      SH9 data.
-//   4 Visibility Rays— thin oriented box per (probe, fibonacci direction):
-//                      green = open sky (V = 1), red = blocked (V = 0), and the
-//                      mix between them, with V reconstructed from the SAME SH9
-//                      field at that bin direction.
-//                      Camera-distance culled (spacing * 8 window), invalid
-//                      probes skipped.
+//   4                 — no view. VSMain early-outs on index 4, so a stale value
+//                      draws nothing and not a placement cube set.
 //   7 Ray Fan        — thin oriented box for each of the 64 gather rays of ONE
 //                      delta record of ONE probe (bakedGIRayDebugProbe), read from
 //                      the ray-debug buffer that the debug dump writes. The record
@@ -133,8 +130,8 @@
 //                        4. the trilinear CELL of the pushed read point as a
 //                           thin wireframe, because the read point is
 //                           worldPos + n*0.1*spacing (:65) and that push can
-//                           cross the cell plane and reweight the cell. It no
-//                           longer CULLS a face: the backface plane is now
+//                           cross the cell plane and reweight the cell. It
+//                           does NOT cull a face: the backface plane is
 //                           measured from the hit, not from the pushed point.
 //                      X-RAY: this view skips the pixel shader's depth test. A
 //                      wiring trace is only legible if the cage is visible, and
@@ -164,7 +161,8 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 #define BAKED_GI_DEBUG_PLACEMENT  1u
 #define BAKED_GI_DEBUG_LIT        2u
 #define BAKED_GI_DEBUG_SKYVIS     3u
-#define BAKED_GI_DEBUG_VISRAYS    4u
+// 4u draws nothing. Keep the gap: the UI, the renderer and this file all name the
+// views by number, so a renumber moves five of them.
 #define BAKED_GI_DEBUG_LIT_SKY    5u
 #define BAKED_GI_DEBUG_LIT_SUN    6u
 #define BAKED_GI_DEBUG_RAYFAN     7u
@@ -246,8 +244,8 @@ float3 BakedGIProbeCellPos(uint probe, uint3 dims, float3 gridMin, float spacing
 // across the box, local z spans [0, len] along w, and the box starts at origin
 // (the probe centre). c is a corner of the unit cube (kCubeTris).
 //
-// ONE copy of the orientation math, shared by both ray views (mode 4 visibility
-// rays, mode 7 ray fan): they differ only in which direction they pass and in
+// ONE copy of the orientation math, shared by the two ray views (mode 7 ray
+// fan, mode 9 cage trace): they differ only in which direction they pass and in
 // which len/halfWidth. A second copy is how the two would stop pointing the
 // same way.
 float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, float3 c)
@@ -276,10 +274,8 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // descriptor index, so the app publishes 0xFFFFFFFF instead. The mode-7 branch
 // early-outs on it before it declares the SRV.
 #define BAKED_GI_RAYFAN_NO_SRV 0xFFFFFFFFu
-// Half-width of a ray box, in probe spacings. 0.01 was chosen when the fan drew
-// all 1024 rays and the boxes fused at mode 4's 0.015. The fan now draws 64, so
-// this value is conservative rather than necessary — mode 4's 0.015 is safe to
-// use here if the boxes read too thin.
+// Half-width of a ray box, in probe spacings. 64 boxes at 0.01 do not fuse; a
+// denser fan is the case to re-check.
 #define BAKED_GI_RAYFAN_BOX_HALF 0.01f
 // Half-width of the SUN-DIRECTION marker box (DeltaDirections channel), in probe
 // spacings. Thicker than the 0.015 of the bin boxes on purpose: it is ONE box
@@ -316,8 +312,8 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // draw count stays the same in both sources.
 //
 // Drawing the 17 SUN STATES along the arc is separate work. It needs a different
-// instance layout and a 17-slot weight array, which changes FrameConstants, so it
-// is not part of this change.
+// instance layout and a 17-slot weight array, which would change FrameConstants,
+// so this channel does not do it.
 //
 // THIS FILE OWNS THIS COUNT, because this file owns the instance layout.
 // BakedGI::kRayFanDeltaDirInstances (BakedGI.h) mirrors it, and the renderer
@@ -331,8 +327,8 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // CYAN = the ray is open, so Vhit = 1 and nothing was hit. RED = the ray stopped,
 // so Vhit = 0 and the segment ends at the recorded first hit.
 //
-// WHY IT EXISTS. Vhit is the recorded claim "nothing blocked this ray", and until
-// this channel it had no endpoint to check. A white Vhit is now a line the reader
+// WHY IT EXISTS. Vhit is the recorded claim "nothing blocked this ray". This
+// channel draws the endpoint, so a white Vhit becomes a line the reader
 // can follow: if the cyan line crosses visible ceiling geometry, the RT scene and
 // the raster scene disagree, which is the one defect the Vhit channel cannot show.
 //
@@ -368,17 +364,12 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // channels are never drawn together.
 #define BAKED_GI_RAYFAN_VHIT_BLOCK_COLOR   float3(0.95f, 0.25f, 0.20f)
 
-// The Sky V_i channel that used to sit at 9 is REMOVED with the per-bin cone
-// visibility it coloured: the response record has no slot 9 any more, so there
-// is no value for it to draw and no cursor to mark. Channels 0..8 keep their
-// numbers, so no shipped draw path moves.
-
 // ---------------------------------------------------------------------------
 // Direct sky visibility from the per-probe raw SH9 field.
 //
-// ONE expression, shared by the two views that show a V: view 3 evaluates it at
-// a sphere normal (a directional ball) and view 4 at one bin direction. Both use
-// the buffer the fold uses, so a view cannot show a V the frame does not.
+// ONE expression, shared by the views that show a V: view 3 evaluates it at a
+// sphere normal (a directional ball). Both use the buffer the fold uses, so a
+// view cannot show a V the frame does not.
 //
 // The DC term alone is the field's sphere MEAN: the mean of a band-limited field
 // over the sphere is L_00 * Y00 (0.28209479177387814), because every higher band
@@ -669,9 +660,9 @@ CageSample BuildCage(StructuredBuffer<float2> vis, float3 worldPos, float3 n,
         {
             const float3 dirv = toProbe / dist;
             // Backface from the HIT, not from the pushed point — the same
-            // origin the bake and the render fetch now use
-            // (BakedGI_Bake.hlsl, BakedGI.hlsli). A debug view that kept the
-            // old origin would draw a cull the bake no longer performs.
+            // origin the bake and the render fetch use
+            // (BakedGI_Bake.hlsl, BakedGI.hlsli). A debug view with another
+            // origin would draw a cull the bake does not perform.
             const float3 toHit = p - worldPos;
             const float  dHit  = length(toHit);
             const float  back  = (dHit < 1e-4f) ? 1.0f : saturate(dot(n, toHit / dHit));
@@ -704,6 +695,14 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     o.color = float4(1.0f, 1.0f, 1.0f, 1.0f);
 
     const uint   mode    = FrameCB.bakedGIDebugView;
+
+    // Index 4 draws nothing. Without this test a stale 4 falls through to the
+    // Placement branch at the end of this function and paints a full cube set
+    // with the A/B colours, which reads as a live view. The UI cannot select 4,
+    // so this early-out is a guard and not a path.
+    if (mode == 4u)
+        return o;
+
     const uint3  dims    = uint3(FrameCB.bakedGIDimX, FrameCB.bakedGIDimY, FrameCB.bakedGIDimZ);
     const float3 gridMin = float3(FrameCB.bakedGIGridMinX, FrameCB.bakedGIGridMinY, FrameCB.bakedGIGridMinZ);
     const float  spacing = FrameCB.bakedGISpacing;
@@ -714,8 +713,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     // --- Mode 7: THE DUMPED DELTA RECORD's 64 gather rays of ONE probe ---
     // The record layout is the compute pass's: eight float4 for each ray, all 64
     // rays of group 0 first, then group 1, and so on. The box geometry is the
-    // mode-4 box with the RECORDED gather direction in place of the fibonacci
-    // direction — that swap is the whole point of the view.
+    // per-direction thin box with the RECORDED gather direction in place of the
+    // fibonacci direction of the sky quadrature — that swap is the whole point.
     // The group is FrameConstants::bakedGIRayDebugDir, the record group ON SCREEN:
     // group 0 for the SUN source (one sun hour state) and the DISPLAYED bin's group
     // for the SKY source. Either way 64 boxes stay legible, and the group index
@@ -1082,50 +1081,6 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
 
         o.color = float4(col, 1.0f);
         o.pos   = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
-        return o;
-    }
-
-    // --- Mode 4: per-(probe, direction) visibility rays ---
-    if (mode == BAKED_GI_DEBUG_VISRAYS)
-    {
-        const uint probe = instance / BAKED_GI_DIRECTIONS;
-        const uint dir   = instance % BAKED_GI_DIRECTIONS;
-        if (probe >= probeCount)
-            return o;
-
-        const float3 probePos = BakedGIProbeCellPos(probe, dims, gridMin, spacing);
-        if (!(meta[probe] & BAKED_GI_META_VALID))
-            return o; // visibility rays belong only to geometrically valid origins
-        if (distance(probePos, FrameCB.cameraPosition.xyz) > spacing * 8.0f)
-            return o; // near-camera window keeps the ray count readable
-
-        const float3 w = BakedGIDeltaDirection(dir);
-        // V — the direct sky visibility at this bin direction, reconstructed from
-        // the probe's raw SH9 field with the fold's own expression. Mix the two
-        // colours by V: a threshold here would paint a cell that is 7/8 open
-        // exactly as red as a cell that is fully blocked.
-        //
-        // A field that is a fraction of a cell is normal for a band-2 fit: one bin
-        // of a 16-bin hemisphere spans about 20 degrees, and band 2 resolves about
-        // two to three bins, so a localised aperture spreads over its neighbours.
-        // That spread is the expected behaviour, not a defect in this view.
-        //
-        // The sentinel test comes BEFORE the SRV declaration: the app publishes
-        // BAKED_GI_SKYVIS_NO_SRV when the resident bake holds no SH9 data, and 0 is
-        // a live descriptor of another resource.
-        if (FrameCB.bakedGISkyVisSRVIndex == BAKED_GI_SKYVIS_NO_SRV)
-            return o;
-        StructuredBuffer<float> skyVis = ResourceDescriptorHeap[FrameCB.bakedGISkyVisSRVIndex];
-        const float V = BakedGISkyVisAt(skyVis, probe, w);
-        o.color = float4(lerp(float3(0.95f, 0.15f, 0.15f),   // blocked  (V = 0)
-                              float3(0.10f, 0.90f, 0.20f),   // open sky (V = 1)
-                              V), 1.0f);
-
-        // Thin oriented box from the probe center along w (local z -> w).
-        const float3 world = OrientedBoxVertex(probePos, w, spacing * 0.35f, spacing * 0.015f,
-                                               kCubeTris[vid % 36u]);
-
-        o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
         return o;
     }
 

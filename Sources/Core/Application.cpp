@@ -580,10 +580,10 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIProbeSkySRVIndex   = gi.IsValid() ? gi.GetLitSkySRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeVisSRVIndex   = gi.IsValid() ? gi.GetVisibilitySRVIndex() : 0u;
-        // The raw SH9 sky-visibility field, for the two V debug views (3 and 4).
-        // It is published whether or not the fold uses it: the views diagnose the
+        // The raw SH9 sky-visibility field, for the V debug view (3).
+        // It is published whether or not the fold uses it: the view diagnoses the
         // bake, not the current mode. The getter returns kSkyVisNoSRV when the
-        // resident bake has no SH section, and both views early-out on it.
+        // resident bake has no SH section, and the view early-outs on it.
         m_FrameConstants.bakedGISkyVisSRVIndex     = gi.GetSkyVisSHSRVIndex();
         // Runtime FILLED eligibility follows the same effective getter that selects
         // the tables. Raw A/B mode publishes zero even when meta holds FILLED.
@@ -798,11 +798,11 @@ void Application::FillEfbBallConstants()
 // BakedGI::SunDirectionAtHour, so the box colours, the orange marker and the
 // Ray Fan label cannot describe different hours.
 //
-// THE 16 WEIGHTS ARE NOW UNIFORM. They described a kernel that no longer exists.
-// The 16 directions are the SKY QUADRATURE, and a hemisphere quadrature weights
-// every direction equally, so 1/16 each is the truthful value and the channel
-// draws them all at the same brightness. Do not invent a ramp here: a non-uniform
-// weight would claim the sun prefers a fibonacci bin, which it cannot any more.
+// THE 16 WEIGHTS ARE UNIFORM. The 16 directions are the SKY QUADRATURE, and a
+// hemisphere quadrature weights every direction equally, so 1/16 each is the
+// truthful value and the channel draws them all at the same brightness. Do not
+// invent a ramp here: a non-uniform weight would claim the sun prefers a
+// fibonacci bin, and the sun is 17 baked hour states.
 void Application::FillSunFoldConstants()
 {
     const auto& lights = m_Scene.GetLights();
@@ -1000,7 +1000,7 @@ void Application::Render()
         //   2. a completed bake, which rewrites the tables;
         //   3. a change of indirect method;
         //   4. a light parameter, which scales sunE and multiplies coefSun.
-        // The sky cubemap is a pure function of the sun, and the sun is now a pure
+        // The sky cubemap is a pure function of the sun, and the sun is a pure
         // function of the hour, so nothing else can move the output. The two sky
         // settings that are NOT derived from the hour — turbidity and ground
         // albedo — are fixed code defaults (Application.cpp:566-567) with no UI
@@ -1220,7 +1220,7 @@ void Application::Render()
                 cmdList->SetComputeRootConstantBufferView(0, m_Renderer.GetFrameGPUAddress());
                 // MeshletDebugParams carries the bindless SRV indices for the meshlet stream
                 // buffers — no root descriptor table needed, so compute
-                // and graphics root state can no longer disagree about space3.
+                // and graphics root state cannot disagree about space3.
                 MeshletDebugParams debugParams = {};
                 debugParams.Mode             = (uint32_t)m_Renderer.GetMeshletDebugMode();
                 debugParams.VisBufSRVIdx     = m_Renderer.GetVisibilityBuffer().srvIndex;
@@ -1361,7 +1361,7 @@ void Application::Render()
 
         // -----------------------------------------------------------------------
         // UNION PATH — runs after both meshlet and non-meshlet geometry branches.
-        // GBuffer (albedo, normal, material, depth) is now populated by either path.
+        // GBuffer (albedo, normal, material, depth) is populated by either path.
         // HZB build is handled inside each branch above (two-phase calls it twice,
         // traditional/frustum-only calls it once) — not duplicated here.
         // -----------------------------------------------------------------------
@@ -1559,17 +1559,16 @@ void Application::Render()
 // output is byte-identical by construction, not by careful editing.
 static const char* kMethod3WordingCaveat =
     "Probe (Baked Sun) bakes 17 hour states and blends the two that bracket Hour. "
-    "The help text below describes the removed 16-direction SUN fold and does not apply to this method.";
+    "The help text below describes a 16-direction SUN fold that this method does not run.";
 
 // The to-sun direction, negated from the light's travel direction exactly as the
 // sky bake and the direct lighting read it. One definition for every reader: the
-// ray-debug readout and the debug panels all used to negate it inline, and the
+// ray-debug readout and the debug panels all call it, and the
 // mode-swap check compares directions, so a divergence between two copies would
 // silently disable that check.
 //
-// The GI sun itself no longer comes from here: it comes from m_GIHour through
-// BakedGI::SunDirectionAtHour. See the note on the hour control in the Light
-// Editor.
+// The GI sun itself comes from m_GIHour through BakedGI::SunDirectionAtHour, not
+// from here. See the note on the hour control in the Light Editor.
 DirectX::XMFLOAT3 Application::SunToDirNow()
 {
     if (!HasSunLight())
@@ -1761,7 +1760,7 @@ void Application::RenderImGui()
 
         if (selectedLight.direction.w < 0.5f) // Directional
         {
-            // Directional-light colour/intensity are now driven by the Hosek-Wilkie
+            // Directional-light colour/intensity are driven by the Hosek-Wilkie
             // solar irradiance (Sky::ComputeSunIrradiance).  The values shown here
             // are read-only and updated each frame.
             DirectX::XMFLOAT3 si = m_Renderer.GetSunIrradiance();
@@ -1779,12 +1778,12 @@ void Application::RenderImGui()
             // where that panel is not drawn.
             //
             // TWO widgets edit m_GIHour: this one and the copy in the Indirect GI
-            // panel. Sharing the float is intended. Sharing the LABEL is not, and
-            // that was the defect: ImGui derives a widget ID from its label plus the
+            // panel. Sharing the float is intended. Sharing the LABEL is not:
+            // ImGui derives a widget ID from its label plus the
             // ID stack, so two widgets with the same label in one scope get the SAME
             // ID. Both then believe they are active, and each maps the mouse against
             // its own rect, so a drag past the far widget's track clamps to the range
-            // maximum. That is what snapped the hour to 24. PushID gives each a
+            // maximum and snaps the hour to 24. PushID gives each a
             // distinct ID while the visible label stays identical.
             ImGui::PushID("HourLightEditor");
             ImGui::SliderFloat("Hour (0-24)", &m_GIHour, 0.0f, 24.0f, "%.2f");
@@ -1900,10 +1899,9 @@ void Application::RenderImGui()
         {
             ImGui::Indent();
 
-            // "Probe (Baked)" was removed with the 16-bin sun fold it existed
-            // for, so the entries below shifted down by one. Nothing stored the
-            // old index: m_IndirectGIMethod is a plain member with a default
-            // initialiser, not a scene field and not an ini key.
+            // "Probe (Baked Sun)" is index 2; the combo order matches the enum in
+            // Application.h. Nothing persists: m_IndirectGIMethod is a plain member
+            // with a default initialiser, not a scene field and not an ini key.
             const char* giMethods[] = { "ReSTIR GI", "DDGI", "Probe (Baked Sun)" };
             const bool methodChanged = ImGui::Combo("Indirect GI Method", &m_IndirectGIMethod, giMethods, IM_ARRAYSIZE(giMethods));
             if (ImGui::IsItemHovered())
@@ -1918,21 +1916,19 @@ void Application::RenderImGui()
             // A METHOD CHANGE IS AN EVENT, NOT A STATE. Service it here, once,
             // unconditionally.
             //
-            // The old code requested work from inside "if (!gi.IsValid())", two
-            // blocks further down. That is why a swap back into the probe method
-            // once left the image stuck: a bake already existed, so the branch
-            // never ran, nothing armed the fold, the fold's gate evaluated false,
-            // and Lit kept whatever the previous method had written. It also gated
-            // the request on "!m_PendingGIProbeBake", which can swallow an event
-            // outright. A pending request is idempotent, so that guard bought
-            // nothing and risked losing the only retry.
+            // The request must NOT sit inside "if (!gi.IsValid())", two blocks
+            // further down: a bake that already exists skips that branch, nothing
+            // arms the fold, the fold's gate evaluates false, and Lit keeps
+            // whatever the previous method wrote. It must NOT be gated on
+            // "!m_PendingGIProbeBake" either: a pending request is idempotent, so
+            // that gate can swallow the only retry.
             // -----------------------------------------------------------------
             if (methodChanged || !wasGIEnabled)
             {
-                // Trigger 3: the method changed, so the lit table now belongs to a
-                // pass that is no longer drawn. Fold again as soon as the probe
-                // method is the live one again, even if nothing else moved. This
-                // is the exact fault the comment above records.
+                // Trigger 3: the method changed, so the lit table belongs to a
+                // pass that is not drawn. Fold again as soon as the probe
+                // method is the live one again, even if nothing else moved. The
+                // comment above records the fault this prevents.
                 m_ProbeFoldWanted = true;
                 m_ProbeFoldHour   = -1.0f;
 
@@ -2343,13 +2339,42 @@ void Application::RenderImGui()
                 }
                 ImGui::Separator();
 
-                // "Sun Directions" was folded into the Ray Fan's DeltaDirections
-                // channel: the same 16 boxes and the same weight ramp, but at the
-                // one cell the fan is already at instead of repeating 16 identical
-                // colours at every probe in the window.
-                const char* probeViews[] = { "Off", "Placement", "Lit Irradiance", "Sky Visibility", "Visibility Rays",
-                                             "Lit Sky Source", "Lit Sun Source", "Ray Fan", "Efb Contribution",
-                                             "Cage Trace" };
+                // The 16 sun-direction boxes are the Ray Fan's DeltaDirections
+                // channel: the same 16 boxes and the same weight ramp, at the one
+                // cell the fan is already at.
+                // Probe debug views. The table SKIPS view 4, which draws nothing:
+                // the shader, the renderer and every `m_BakedGIDebugView == N` test
+                // below name a view by number, so the numbers 5..9 must not move
+                // down to fill the gap.
+                struct ProbeViewEntry { const char* label; int view; };
+                static constexpr ProbeViewEntry kProbeViews[] = {
+                    { "Off",              0 },
+                    { "Placement",        1 },
+                    { "Lit Irradiance",   2 },
+                    { "Sky Visibility",   3 },
+                    { "Lit Sky Source",   5 },
+                    { "Lit Sun Source",   6 },
+                    { "Ray Fan",          7 },
+                    { "Efb Contribution", 8 },
+                    { "Cage Trace",       9 },
+                };
+                constexpr int kProbeViewCount = (int)IM_ARRAYSIZE(kProbeViews);
+
+                // An unknown number shows Off and is coerced to Off, so a stale
+                // value never lands on a live view.
+                int viewEntry = 0;
+                for (int i = 0; i < kProbeViewCount; ++i)
+                    if (kProbeViews[i].view == m_BakedGIDebugView)
+                    {
+                        viewEntry = i;
+                        break;
+                    }
+                if (kProbeViews[viewEntry].view != m_BakedGIDebugView)
+                {
+                    viewEntry = 0;
+                    m_BakedGIDebugView = kProbeViews[viewEntry].view;
+                }
+
                 if (ProbeMethodActive())
                 {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.75f, 0.30f, 1.0f));
@@ -2357,7 +2382,13 @@ void Application::RenderImGui()
                     ImGui::PopStyleColor();
                 }
                 ImGui::SetNextItemWidth(180.f);
-                ImGui::Combo("Probe Debug View", &m_BakedGIDebugView, probeViews, IM_ARRAYSIZE(probeViews));
+                if (ImGui::BeginCombo("Probe Debug View", kProbeViews[viewEntry].label))
+                {
+                    for (int i = 0; i < kProbeViewCount; ++i)
+                        if (ImGui::Selectable(kProbeViews[i].label, i == viewEntry))
+                            m_BakedGIDebugView = kProbeViews[i].view;
+                    ImGui::EndCombo();
+                }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Post-composite overlay, depth-tested against the GBuffer.\n"
                                       "Placement: cube per cell — classification A/B.\n"
@@ -2375,9 +2406,6 @@ void Application::RenderImGui()
                                       "Grayscale = the reconstructed V at that direction (white = 1 = open sky, black = 0 =\n"
                                       "blocked), raw and un-gained. Red = invalid probe. Nothing draws when the current bake\n"
                                       "holds no SH9 data. The DC term alone is the sphere MEAN, not the display value.\n"
-                                      "Visibility Rays: per-probe fibonacci directions — green = open sky, red = blocked, coloured\n"
-                                      "by the SAME SH9 field reconstructed at that direction (near camera only, VALID origins only;\n"
-                                      "FILLED probes skipped).\n"
                                       "Ray Fan: the 64 gather rays of ONE delta record of one probe (the Ray Debug Probe above), as thin boxes.\n"
                                       "Ray Fan stays raw when runtime dilation fills the selected probe.\n"
                                       "  The record is the one the last dump replayed: the sun hour state (Ray Debug Source Sun) or\n"
@@ -2488,8 +2516,7 @@ void Application::RenderImGui()
                     // BakedGI::kRayFanChannelDeltaDirs and VHit Ray at
                     // BakedGI::kRayFanChannelVHitRay: the renderer reads the channel
                     // to choose the instance count, and the shader reads it to choose
-                    // the geometry. Three places, one value. The Sky V_i entry that
-                    // used to sit at 9 is removed with the channel.
+                    // the geometry. Three places, one value.
                     const char* rayFanChannels[] = { "Status", "Albedo", "NdotD", "Vhit", "Efb",
                                                      "Hit Distance", "Direct vs Efb", "DeltaDirections",
                                                      "VHit Ray" };
@@ -2576,10 +2603,6 @@ void Application::RenderImGui()
                                           "no dump and no wait.\n"
                                           "Press \"Dump Probe Ray Debug\" after a bake or a source change.",
                                           (unsigned)BakedGI::kDirections);
-
-                    // --- Sky V_i CURSOR: REMOVED with the channel it marked ---
-                    // Channel 9 and the per-bin cone visibility it coloured are
-                    // gone, so there is no cursor, no marker and no member left.
 
                     // --- Sky Bin browser (SKY source, record channels only) ---
                     // Every sky bin is already in the buffer, so this control is a

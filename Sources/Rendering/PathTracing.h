@@ -41,7 +41,7 @@ public:
                           D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
                           D3D12_CPU_DESCRIPTOR_HANDLE backBufferRTV);
 
-    // Output getters (mirrors former Renderer::Get* accessors)
+    // Output getters
     GPUTexture& GetOutput() { return m_PathTracerPresentOutput; }
     GPUTexture& GetHdrOutput() { return m_PathTracerOutput; }
     GPUTexture& GetRestirDebugHeatmap() { return m_RestirDebugHeatmap; }

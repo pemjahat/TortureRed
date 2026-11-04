@@ -1516,7 +1516,7 @@ void Model::BuildMeshlets(GLTFPrimitive& prim, const std::string& cachePath)
 
     // Per-meshlet optimization — MUST run before any array is derived from the vertex
     // table: it reorders each meshlet's vertex slice in place and rewrites the triangle
-    // local indices to match. Copying the table before this step was the Bug 1 corruption.
+    // local indices to match. Copying the table before this step corrupts both (Bug 1).
     for (const auto& m : meshlets)
     {
         meshopt_optimizeMeshlet(&prim.meshletVertices[m.vertex_offset],

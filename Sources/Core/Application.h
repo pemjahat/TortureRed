@@ -58,7 +58,7 @@ private:
     // it comes from one BakedGI::SunBlendForHour, so the channel, the UI and the
     // panel all describe one computation.
     //
-    // It no longer publishes bakedGIRayDebugDir: that field is dump-derived state
+    // bakedGIRayDebugDir is not published here: that field is dump-derived state
     // and FillRayDebugConstants owns it.
     void FillSunFoldConstants();
 
@@ -86,13 +86,12 @@ private:
     // bake projects), 1 = V = 0 (the No Sky Visibility diagnostic). Runtime
     // selection only: it persists across bakes, triggers no bake, and asks for a
     // probe fold. The combo greys out SH9 when the bake holds no SH9 data, and
-    // No Sky Visibility stays usable with no bake at all. The per-bin cone source
-    // that used to be entry 0 is removed.
+    // No Sky Visibility stays usable with no bake at all.
     int   m_BakedGISkyVisMode   = (int)BakedGI::SkyVisMode::SH9;
     bool  m_PendingGIProbeBake  = false; // BakedGI bake request (auto-set after scene load / Rebuild button)
     int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility,
-                                         // 4 visibility rays, 5 lit sky source, 6 lit sun source, 7 ray fan,
-                                         // 8 Efb contribution
+                                         // 4 unused, 5 lit sky source, 6 lit sun source,
+                                         // 7 ray fan, 8 Efb contribution, 9 cage trace
     float m_BakedGIDebugScale   = 1.0f;  // Lit-ball gain (DC-normalized shading multiplier)
     int   m_BakedGIEfbIter      = 2;     // Efb contribution (view 8) bake term, 0-based: 0 = term 1 (no feedback ->
                                          // black), 1 = term 2, 2 = term 3 (the last, converged term). The UI shows
@@ -115,8 +114,6 @@ private:
                                          // segment for each shaded gather ray, from that ray's hit toward the
                                          // active delta direction. Cyan = the secondary ray is open, red = it
                                          // stopped at the recorded first RT hit.
-                                         // The Sky V_i channel that used to be entry 9 is REMOVED with the
-                                         // per-bin cone visibility it coloured.
                                          // BakedGI::kRayFanChannelDeltaDirs and kRayFanChannelVHitRay are the
                                          // C++ spellings of 7 and 8.
     float m_BakedGIRayDebugLength  = 8.0f; // Ray Fan ray length cap, in probe spacings (channels 0..6, and the
@@ -181,11 +178,10 @@ private:
     // Method enum for m_IndirectGIMethod. Declared BEFORE it, because the default
     // initialiser below names one of these constants.
     //
-    // The values CHANGED on 2026-10-29, and nothing needed remapping: the method
-    // is a plain in-memory member with a default initialiser. It is not a scene
-    // field, not an ini key and not a saved setting — a grep for it finds this
-    // header and the combo only. "Probe (Baked)" was the old index 0; the binned
-    // sun fold it existed for is gone, so it was deleted and the rest moved down.
+    // The values are dense from 0. Nothing persists: the method is a plain
+    // in-memory member with a default initialiser. It is not a scene field, not an
+    // ini key and not a saved setting — a grep for it finds this header and the
+    // combo only.
     //
     // Every "is this the probe method" check goes through ProbeMethodActive(),
     // never a literal.

@@ -22,7 +22,7 @@
 //                     also zero P2 slots [4]–[7] so stale data from prior frames is cleared
 //   BaseSlot=4 → P2: write Candidate@[4], Visible@[5], Occluded@[6], InstanceVisible@[7]
 //
-// VisibleMeshletsCounter is now a 2-slot buffer (TWO_PASS_PHASE_FIRST/SECOND, see
+// VisibleMeshletsCounter is a 2-slot buffer (TWO_PASS_PHASE_FIRST/SECOND, see
 // SharedTypes.h) that is only cleared once per frame — Phase 1's count lives permanently
 // in slot 0, Phase 2's own new count lives in slot 1, simultaneously valid after Phase 2
 // runs (neither is reset by the other). Reads the phase-appropriate slot directly from

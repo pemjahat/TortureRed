@@ -5,8 +5,8 @@
 // visibility token (candidate index + primitive ID). This pass runs once per
 // screen pixel, decodes that token, reconstructs the triangle's vertex attributes
 // via analytic barycentrics (VisibilityBuffer.hlsli::GetVertexAttributes), samples
-// the material, and writes the same GBuffer layout as the legacy Gbuffer.hlsl /
-// former MeshletRasterizeMS PSMain (albedo / normal / roughness|metallic).
+// the material, and writes the same GBuffer layout as Gbuffer.hlsl (albedo /
+// normal / roughness|metallic).
 //
 // Mirrors D3D12_Research's VisibilityGBuffer.hlsl (ShadePS).
 //
@@ -16,7 +16,7 @@
 #include "VisibilityBuffer.hlsli"
 
 // --- Per-pass bindless indices (root constants b1, root param 12) ---
-// FLAT scalar fields only — HLSL legacy cbuffer layout 16-byte-aligns nested struct
+// FLAT scalar fields only — HLSL cbuffer packing 16-byte-aligns nested struct
 // members, which misaligns the C++ side.
 struct VisibilityGBufferParams
 {

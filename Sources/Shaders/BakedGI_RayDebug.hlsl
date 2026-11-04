@@ -29,7 +29,7 @@
 // REPRODUCTION RULE. Both passes must reproduce the bake's RNG stream EXACTLY.
 // The stream is sequential (pcg state, next_float), so the direction of ray r
 // depends on rays 0..r-1 and their shadow rays. Nothing draws from the stream
-// before the gather loop: the V_i axis ray that used to run first is gone. Each
+// before the gather loop. Each
 // pass therefore starts at the same seed, in the same order, with the same ray
 // flags, and draws for nothing else. Efb draws no random numbers, so pass 1
 // skips EvalResponseIndirect and the two streams still agree. Lane 0 of each
@@ -425,9 +425,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     rng.state = seed;
     rng.inc   = 1;
 
-    // No draw happens here. The bake also starts its gather loop at this seed,
-    // because the V_i axis ray that used to run first is gone. BakedGI_Bake.hlsl
-    // states the same rule.
+    // No draw happens here. The bake also starts its gather loop at this seed.
+    // BakedGI_Bake.hlsl states the same rule.
 
     // -------------------------------------------------------------------------
     // PASS 1 — which rays carry a direct term?
@@ -453,10 +452,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
         g_slot[r2] = -1;
     }
 
-    // Slots fill from 0 upward. Two cases. Which case ran is no longer recorded
-    // anywhere: it used to ride slot 9's w, and slot 9 no longer exists. The
-    // case is visible in the output instead — case 1 leaves every slot holding a
-    // qualifier, so no context ray has a record.
+    // Slots fill from 0 upward. Two cases, and the case is visible in the output
+    // rather than recorded: case 1 leaves every slot holding a qualifier, so no
+    // context ray has a record.
     //   case 0: nQual <= DEBUG_RAYS — every qualifier keeps its ray order, and
     //           the free slots take context rays at an even stride.
     //   case 1: nQual >  DEBUG_RAYS — the DEBUG_RAYS largest weights win, in

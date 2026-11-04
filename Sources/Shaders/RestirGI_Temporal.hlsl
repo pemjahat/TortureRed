@@ -135,7 +135,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float debugTemporalTargetPdf = 0;    
     if (hasPrimaryHit) {
         if (hasIndirectHit) {            
-            // Radiance is now incident radiance by design, no division needed
+            // Radiance is incident radiance by design, no division needed
             float3 L_in = indirectRadianceAccum;
             
             // Use GetTargetPDF to determine weight for initial sample

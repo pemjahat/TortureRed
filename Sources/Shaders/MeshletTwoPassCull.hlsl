@@ -16,13 +16,11 @@
 // SRV/UAV descriptors at all (root signature is just b0 FrameCB + b1 TwoPassCullConstants
 // + a static sampler).
 //
-// This used to be a mix: most buffers were root SRV/UAV descriptors (register(t0-t4)/
-// register(u0-u8)), except OccludedInstances, which additionally had a bindless SRV path
-// (CullConst.OccludedInstancesSRVIdx) because it is UAV-written in Phase 1 but SRV-read in
-// Phase 2 — a role reversal a single fixed root descriptor slot can't represent (one root
-// parameter is bound as one type for the whole dispatch). Going fully bindless removes the
-// inconsistency and the extra root-signature complexity of carrying 14 root descriptors
-// that only differ in which register they occupy.
+// The bindless form is required by OccludedInstances: it is UAV-written in Phase 1
+// and SRV-read in Phase 2, a role reversal that a single fixed root descriptor slot
+// cannot represent (one root parameter is bound as one type for the whole dispatch).
+// Bindless keeps both reads legal and drops the 14 root descriptors that differed
+// only in which register they occupied.
 
 #include "MeshletCommon.hlsli"
 
