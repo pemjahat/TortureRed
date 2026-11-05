@@ -116,10 +116,15 @@ public:
     // MUST match GATHER_RAYS in BakedGI_Bake.hlsl and BAKE_RAYS in
     // BakedGI_RayDebug.hlsl.
     static constexpr uint32_t kBakeGatherRays = 256;
+    // Independent rotations of the 256-ray fibonacci set. Separate dispatches
+    // accumulate an exact linear mean, so 8 batches give 2048 rays per record.
+    // MUST match GATHER_BATCHES in BakedGI_Bake.hlsl and BAKE_BATCHES in
+    // BakedGI_RayDebug.hlsl.
+    static constexpr uint32_t kBakeGatherBatches = 8;
     // Ray RECORD slots written for each direction, and the Ray Fan's instance
     // count. Deliberately NOT kBakeGatherRays: this value sizes the debug
     // buffer, and the view cannot show 256 boxes legibly anyway. The debug pass
-    // replays all kBakeGatherRays and writes only the ones that matter.
+    // replays every batch and writes only the rays that matter.
     static constexpr uint32_t kDebugGatherRays = 64;
     // float4s for each ray record. rec4 and rec5 carry the hit's IDENTITY
     // (normal, world position, instance index, primitive index), so naming the
@@ -223,6 +228,7 @@ public:
     // Application owns refold invalidation because the live lit table depends on it.
     void              SetUseDilatedTransport(bool useDilated) { m_UseDilatedTransport = useDilated; }
     bool              UseDilatedTransport() const { return m_UseDilatedTransport; }
+
     bool              HasDilatedTransport() const { return m_DilatedTransportValid; }
     bool              IsUsingDilatedTransport() const
     {
@@ -489,7 +495,7 @@ public:
     struct RayCandidate
     {
         uint32_t ray;       // the RECORD index inside that direction's fan (0..kDebugGatherRays-1)
-        uint32_t sourceRay; // the source gather ray it was taken from (0..kBakeGatherRays-1)
+        uint32_t sourceRay; // flattened source: batch * kBakeGatherRays + ray
         float    score;     // luminance(diffAlbedo * Efb) — the shader's own ranking key
         float    efbLum;    // the feedback term's luminance at the hit
         float    directLum; // the direct term's luminance at the hit, always < efbLum here

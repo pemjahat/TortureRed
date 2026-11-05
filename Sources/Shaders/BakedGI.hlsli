@@ -115,10 +115,10 @@ uint BakedGIFlatten(uint3 c, uint3 dims)
 //     rec3.w = status + 4 * sourceRayIndex
 //
 //   status          0 = sky miss, 1 = backface reject, 2 = shaded
-//   sourceRayIndex  0..BAKE_RAYS-1: which gather ray of the 256 this record is
+//   sourceRayIndex  flattened batch-local index: batch * BAKE_RAYS + ray
 //
-// Exactness: fp32 represents every integer up to 2^24, and the largest packed
-// value is 2 + 4 * 255 = 1022, so fmod is exact and the round trip loses nothing.
+// Exactness: fp32 represents every integer up to 2^24. Eight batches give a
+// largest packed value of 2 + 4 * 2047 = 8190, so fmod and the round trip stay exact.
 //
 // WARNING: rec3.w is NOT the status any more. Compare it to 0.5 or 2.0 direct
 // and you read the packed value. Always go through these two.
@@ -199,7 +199,7 @@ bool BakedGIProbeHasRuntimeData(uint meta)
 
 // Spherical fibonacci over the FULL sphere (DDGI's SphericalFibonacci,
 // faithful copy — z is the pole).
-float3 BakedGIClassifyDirection(uint i, uint n)
+float3 BakedGISphericalFibonacci(uint i, uint n)
 {
     const float PHI = sqrt(5.0f) * 0.5f + 0.5f;
     float fraction = (i * (PHI - 1.0f)) - floor(i * (PHI - 1.0f));
@@ -207,6 +207,47 @@ float3 BakedGIClassifyDirection(uint i, uint n)
     float cosTheta  = 1.0f - (2.0f * i + 1.0f) / (float)n;
     float sinTheta  = sqrt(saturate(1.0f - cosTheta * cosTheta));
     return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+float3 BakedGIClassifyDirection(uint i, uint n)
+{
+    return BakedGISphericalFibonacci(i, n);
+}
+
+// One deterministic stream for each (probe, response record, batch). The
+// iteration is absent on purpose: every transport term uses the same samples.
+uint BakedGIBatchSeed(uint probe, uint seedDir, uint batchIndex)
+{
+    return pcg_hash(probe * 131u + seedDir * 7919u + batchIndex * 0x85ebca6bu
+                    + 0x9e3779b9u);
+}
+
+// Uniform random rotation from three nested hashes. Rodrigues' formula keeps
+// the fibonacci set intact while each batch covers a different orientation.
+float3x3 BakedGIBatchRotation(uint batchSeed)
+{
+    const uint h0 = pcg_hash(batchSeed);
+    const uint h1 = pcg_hash(h0);
+    const uint h2 = pcg_hash(h1);
+    const float invU32 = 1.0f / 4294967296.0f;
+    const float z   = 1.0f - 2.0f * float(h0) * invU32;
+    const float phi = 2.0f * PI * float(h1) * invU32;
+    const float angle = 2.0f * PI * float(h2) * invU32;
+    const float r = sqrt(max(0.0f, 1.0f - z * z));
+    const float3 axis = float3(r * cos(phi), r * sin(phi), z);
+    const float s = sin(angle);
+    const float c = cos(angle);
+    const float t = 1.0f - c;
+    const float x = axis.x, y = axis.y, zAxis = axis.z;
+    return float3x3(
+        t * x * x + c,          t * x * y - s * zAxis, t * x * zAxis + s * y,
+        t * x * y + s * zAxis,  t * y * y + c,         t * y * zAxis - s * x,
+        t * x * zAxis - s * y,  t * y * zAxis + s * x, t * zAxis * zAxis + c);
+}
+
+float3 BakedGIRotatedFibonacci(uint i, uint n, float3x3 rotation)
+{
+    return normalize(mul(rotation, BakedGISphericalFibonacci(i, n)));
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +535,7 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         float3 toSurf = p - worldPos;
         float  dSurf  = length(toSurf);
         float  back   = (dSurf < 1e-4f) ? 1.0f : saturate(dot(N, toSurf / dSurf));
+
         wBF[k] = w * back;
         // Filled probes keep trilinear and backface weights but never read their
         // fixed-origin moments. They cannot enter the full Chebyshev tier.

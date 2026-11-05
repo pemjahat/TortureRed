@@ -62,8 +62,10 @@ ConstantBuffer<BakedGIRayDebugParams> RayDbg  : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
-#define BAKE_RAYS  256u // must match GATHER_RAYS in BakedGI_Bake.hlsl
-#define DEBUG_RAYS 64u  // record slots for each direction; BakedGI::kDebugGatherRays
+#define BAKE_RAYS   256u // must match GATHER_RAYS in BakedGI_Bake.hlsl
+#define BAKE_BATCHES 8u  // must match GATHER_BATCHES in BakedGI_Bake.hlsl
+#define TOTAL_BAKE_RAYS (BAKE_RAYS * BAKE_BATCHES)
+#define DEBUG_RAYS  64u  // record slots for each direction; BakedGI::kDebugGatherRays
 
 // Ray-record layout, in float4s for each ray. The re-accumulated table starts
 // at BakedGI::kRayDebugTableBase, which the C++ side and BakedGI_Debug.hlsl
@@ -103,9 +105,9 @@ ConstantBuffer<BakedGIRayDebugParams> RayDbg  : register(b2);
 
 // Selection state for ONE direction's group. Only lane 0 touches these, so they
 // need no barrier: groupshared is simply a scratch block that a lone lane would
-// otherwise spill into local memory. 2,048 B per group.
-groupshared float g_q[BAKE_RAYS];    // NdotD * Vhit for each source ray; 0 = no direct term
-groupshared int   g_slot[BAKE_RAYS]; // record slot for each source ray; -1 = not written
+// otherwise spill into local memory. Eight batches use 16,384 B per group.
+groupshared float g_q[TOTAL_BAKE_RAYS];    // NdotD * Vhit; 0 = no direct term
+groupshared int   g_slot[TOTAL_BAKE_RAYS]; // record slot; -1 = not written
 
 // ---------------------------------------------------------------------------
 // Trilinear evaluation of a previous iteration's response table.
@@ -214,10 +216,10 @@ struct RayProbe
     float  shadowPrim;   // BLOCKED: committed primitive index. Else -1
 };
 
-RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
+RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta, float3 gdir)
 {
     RayProbe p;
-    p.gdir     = float3(0.0f, 1.0f, 0.0f);
+    p.gdir     = gdir;
     p.t        = 1e4f;
     p.albedo   = float3(0.0f, 0.0f, 0.0f);
     p.normal   = float3(0.0f, 0.0f, 0.0f);
@@ -234,14 +236,8 @@ RayProbe ProbeRay(inout RNG rng, float3 probePos, float3 wDelta)
     p.shadowInst   = -1.0f;
     p.shadowPrim   = -1.0f;
 
-    // Two draws first — the same order as BakedGI_Bake.hlsl:213-214.
-    float u1 = next_float(rng);
-    float u2 = next_float(rng);
-    float z   = 1.0f - 2.0f * u1;
-    float phi = 2.0f * PI * u2;
-    float s   = sqrt(max(0.0f, 1.0f - z * z));
-    p.gdir = float3(s * cos(phi), s * sin(phi), z);
-
+    // The caller supplies the rotated fibonacci direction. Only alpha-mask
+    // traversal consumes the batch RNG, exactly as in BakedGI_Bake.hlsl.
     RayDesc gRay;
     gRay.Origin    = probePos;
     gRay.Direction = p.gdir;
@@ -406,27 +402,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
     StructuredBuffer<float4>   respPrev = ResourceDescriptorHeap[RayDbg.responsePrevSRVIdx];
     StructuredBuffer<float2>   visMom   = ResourceDescriptorHeap[RayDbg.visSRVIdx];
 
-    // The seed, twice. BakedGI_Bake.hlsl's exact expression, including the
-    // seedDir resolve: 0xFFFFFFFF means "this thread's own direction", any other
-    // value pairs the trace with one fibonacci bin. Each pass replays from it, so
-    // neither pass inherits the other's stream.
-    //
-    // SUN: the bake seeds each hour state from its own state index, so this field
-    // carries that index. SKY: the bake seeds bin j from j and this group IS bin j,
-    // so the seed is the group index whatever the field holds. The sky branch reads
-    // `dir` directly for that reason: a leftover bin from an earlier single-bin
-    // dump would seed all 16 groups from one index and every group but one would
-    // compare two different sets of rays and report MISMATCH.
+    // Resolve the record seed exactly as the bake does. Each batch derives its
+    // own stream and rotation from this value. Both passes reset the stream for
+    // every batch, so alpha-mask traversal stays identical to the bake.
     const uint seedDir = skySource ? dir
                                    : ((RayDbg.seedDir == 0xFFFFFFFFu) ? dir : RayDbg.seedDir);
-    const uint seed = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
-
     RNG rng;
-    rng.state = seed;
-    rng.inc   = 1;
-
-    // No draw happens here. The bake also starts its gather loop at this seed.
-    // BakedGI_Bake.hlsl states the same rule.
+    rng.inc = 1;
 
     // -------------------------------------------------------------------------
     // PASS 1 — which rays carry a direct term?
@@ -437,16 +419,24 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // for every ray and decide the slots once the whole direction is known.
     // -------------------------------------------------------------------------
     [loop]
-    for (uint r1 = 0; r1 < BAKE_RAYS; ++r1)
+    for (uint b1 = 0; b1 < BAKE_BATCHES; ++b1)
     {
-        const RayProbe p1 = ProbeRay(rng, probePos, wDelta);
-        g_q[r1] = p1.q;
+        const uint batchSeed = BakedGIBatchSeed(probe, seedDir, b1);
+        const float3x3 rotation = BakedGIBatchRotation(batchSeed);
+        rng.state = batchSeed;
+        [loop]
+        for (uint r1 = 0; r1 < BAKE_RAYS; ++r1)
+        {
+            const float3 gdir = BakedGIRotatedFibonacci(r1, BAKE_RAYS, rotation);
+            const RayProbe p1 = ProbeRay(rng, probePos, wDelta, gdir);
+            g_q[b1 * BAKE_RAYS + r1] = p1.q;
+        }
     }
 
     uint nQual = 0u; // rays that carry a direct term
     uint nCtx  = 0u; // rays that do not
     [loop]
-    for (uint r2 = 0; r2 < BAKE_RAYS; ++r2)
+    for (uint r2 = 0; r2 < TOTAL_BAKE_RAYS; ++r2)
     {
         if (g_q[r2] > 0.0f) ++nQual; else ++nCtx;
         g_slot[r2] = -1;
@@ -462,7 +452,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     uint used = 0u;
     if (nQual <= DEBUG_RAYS)
     {
-        for (uint r3 = 0; r3 < BAKE_RAYS; ++r3)
+        for (uint r3 = 0; r3 < TOTAL_BAKE_RAYS; ++r3)
             if (g_q[r3] > 0.0f)
                 g_slot[r3] = (int)used++;
 
@@ -484,7 +474,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
             uint ctxIndex = 0u;
             uint wrote    = 0u;
             [loop]
-            for (uint r4 = 0; r4 < BAKE_RAYS && wrote < ctxSlots; ++r4)
+            for (uint r4 = 0; r4 < TOTAL_BAKE_RAYS && wrote < ctxSlots; ++r4)
             {
                 if (g_q[r4] > 0.0f)
                     continue; // a qualifier already has its slot
@@ -507,7 +497,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int   bestRay = -1;
             float bestQ   = 0.0f;
             [loop]
-            for (uint r5 = 0; r5 < BAKE_RAYS; ++r5)
+            for (uint r5 = 0; r5 < TOTAL_BAKE_RAYS; ++r5)
             {
                 if (g_slot[r5] >= 0 || g_q[r5] <= 0.0f)
                     continue;
@@ -531,57 +521,60 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // one was built from every ray. Accumulating only the written records would
     // turn the MATCH line into a lie.
     // -------------------------------------------------------------------------
-    rng.state = seed;
-    rng.inc   = 1;
-    // The same starting state as the bake: no draw before the gather loop.
-    // BakedGI_Bake.hlsl states the same rule.
-
-    float3 acc[9] = (float3[9])0;
+    float3 mean[9] = (float3[9])0;
     const uint recBase = RAY_RECORDS_BASE + (dir * DEBUG_RAYS) * RAY_RECORD_F4;
 
     [loop]
-    for (uint r = 0; r < BAKE_RAYS; ++r)
+    for (uint b = 0; b < BAKE_BATCHES; ++b)
     {
-        const RayProbe p = ProbeRay(rng, probePos, wDelta);
+        const uint batchSeed = BakedGIBatchSeed(probe, seedDir, b);
+        const float3x3 rotation = BakedGIBatchRotation(batchSeed);
+        rng.state = batchSeed;
+        float3 acc[9] = (float3[9])0;
 
-        // One record write below covers all three status cases, so the branches
-        // only fill L and Efb. A miss and a backface reject leave both at zero:
-        // the bake skips them, so they carry no L and no Efb.
-        float3 L   = float3(0.0f, 0.0f, 0.0f);
-        float3 Efb = float3(0.0f, 0.0f, 0.0f);
-
-        if (p.status > 1.5f)
+        [loop]
+        for (uint r = 0; r < BAKE_RAYS; ++r)
         {
-            // Shaded: the only branch the bake puts into acc, and the only one
-            // that reads the feedback cage.
-            Efb = EvalResponseIndirect(respPrev, visMom, kRespStride, kRespIdx, p.worldPos,
-                                       p.normal, dims, gridMin, spacing);
-            L   = p.albedo / PI * (p.NdotD * p.Vhit + Efb);
+            const uint sourceRay = b * BAKE_RAYS + r;
+            const float3 gdir = BakedGIRotatedFibonacci(r, BAKE_RAYS, rotation);
+            const RayProbe p = ProbeRay(rng, probePos, wDelta, gdir);
 
-            float basis[9];
-            EvalSH9Basis(p.gdir, basis);
-            [unroll]
-            for (uint lm = 0; lm < 9; ++lm)
-                acc[lm] += basis[lm] * L;
+            // Misses and backface rejects carry no L or Efb. A shaded hit uses
+            // the same previous-iteration feedback table as the bake.
+            float3 L   = float3(0.0f, 0.0f, 0.0f);
+            float3 Efb = float3(0.0f, 0.0f, 0.0f);
+            if (p.status > 1.5f)
+            {
+                Efb = EvalResponseIndirect(respPrev, visMom, kRespStride, kRespIdx, p.worldPos,
+                                           p.normal, dims, gridMin, spacing);
+                L   = p.albedo / PI * (p.NdotD * p.Vhit + Efb);
+
+                float basis[9];
+                EvalSH9Basis(p.gdir, basis);
+                [unroll]
+                for (uint lm = 0; lm < 9; ++lm)
+                    acc[lm] += basis[lm] * L;
+            }
+
+            const int sl = g_slot[sourceRay];
+            if (sl >= 0)
+                WRITE_RECORD(debug, recBase, (uint)sl, sourceRay, p, L, Efb);
         }
 
-        const int sl = g_slot[r];
-        if (sl >= 0)
-            WRITE_RECORD(debug, recBase, (uint)sl, r, p, L, Efb);
+        // Match the bake's running mean in the same order and precision.
+        const float norm = (4.0f * PI / (float)BAKE_RAYS);
+        const float batchWeight = 1.0f / (float)(b + 1u);
+        [unroll]
+        for (uint lm = 0; lm < 9; ++lm)
+        {
+            const float3 batchValue = acc[lm] * norm * BakedGIA_l(lm);
+            mean[lm] = (b == 0u) ? batchValue : lerp(mean[lm], batchValue, batchWeight);
+        }
     }
 
-    // --- Self-check: store the same normalised SH9 the bake stores, with the
-    // bake's own divisor. The slot is `dir`, which is the record index this group
-    // traced, so the C++ side compares this slot against that same record index of
-    // the table it copied. A SUN dump fills slot 0 only; a SKY dump fills all 16,
-    // so the readout can hold every bin to its own stored record.
-    //
-    // The record is 9 float4 and that is the whole table: the bake writes no
-    // tenth slot, so this pass must not either. A build that wrote one would put
-    // its bytes on the next record's slot 0.
-    const float norm = (4.0f * PI / (float)BAKE_RAYS);
+    // The self-check compares the final linear mean against the stored record.
     const uint tBase = RAY_DEBUG_TABLE_BASE + dir * BAKED_GI_RESPONSE_F4;
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
-        debug[tBase + lm2] = float4(acc[lm2] * norm * BakedGIA_l(lm2), 0.0f);
+        debug[tBase + lm2] = float4(mean[lm2], 0.0f);
 }

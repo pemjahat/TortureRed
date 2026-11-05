@@ -524,6 +524,11 @@ struct BakedGIBakeParams {
     // APPENDED again, so the offsets above are unchanged: 72, sizeof 76 (19
     // dwords), still far below the 30-dword DDGIParams that sizes root slot 12.
     uint  sunState;
+
+    // Progressive gather batch. Batch zero initializes the response. Later
+    // batches update the linear running mean with weight 1 / (batchIndex + 1).
+    // APPENDED last: offset 76, sizeof 80 (20 dwords), below the 30-dword slot.
+    uint  batchIndex;
 };
 
 // Root constants for the per-frame lit-probe update dispatch.

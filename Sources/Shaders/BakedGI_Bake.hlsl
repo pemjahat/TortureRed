@@ -37,20 +37,18 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
-// Gather rays for each direction. 64 -> 256 on 2026-10-26.
+// Gather rays for each direction and batch. Every ray carries the same solid
+// angle, 4*PI/GATHER_RAYS, because the rotated fibonacci set is uniform over
+// the full sphere. Eight independent rotations give 2048 rays per record.
 //
-// Every gather ray carries the same solid angle, 4*PI/GATHER_RAYS, because the
-// sampler is uniform over the full sphere. So one ray onto a distant surface
-// stands for that much solid angle regardless of how small the surface is. At
-// 64 the weight is 0.196 sr, far more than a cloth across a hall subtends, and
-// one such ray decided 74.7 percent of the sun red DC of probe 7669. At 256 the
-// weight falls to 0.049 sr and the hit count for any source quadruples.
-//
+// Each batch is a separate dispatch. The output holds the exact linear running
+// mean, so no accumulation buffer or nonlinear history filter is needed.
 // Cost is bake time only: the payload size and the per-frame read are unchanged.
 //
-// MUST match BakedGI::kBakeGatherRays (BakedGI.h) and BAKE_RAYS
-// (BakedGI_RayDebug.hlsl).
+// MUST match BakedGI::kBakeGatherRays / kBakeGatherBatches (BakedGI.h) and
+// BAKE_RAYS / BAKE_BATCHES (BakedGI_RayDebug.hlsl).
 #define GATHER_RAYS 256
+#define GATHER_BATCHES 8
 
 // Trilinear evaluation of a previous iteration's response table at worldPos,
 // projected with the receiver normal — the series-expansion feedback term.
@@ -219,22 +217,20 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    // The seed index. seedDir 0xFFFFFFFF means "this thread's own direction",
-    // which is the shipped stream. Any other value pairs this pass with one
-    // fibonacci bin, so the same gather directions are used and only wDelta
-    // differs. BakedGI_RayDebug.hlsl uses this exact expression; the two must
-    // stay identical or its self-check reports a MISMATCH.
+    // The seed index. seedDir 0xFFFFFFFF means "this thread's own direction".
+    // Any other value pairs this pass with one fibonacci bin. The batch seed
+    // keeps adjacent sun states independent and gives every batch a new rotation.
     const uint seedDir = (BakeParams.seedDir == 0xFFFFFFFFu) ? dir : BakeParams.seedDir;
+    const uint batchSeed = BakedGIBatchSeed(probe, seedDir, BakeParams.batchIndex);
+    const float3x3 gatherRotation = BakedGIBatchRotation(batchSeed);
     RNG rng;
-    rng.state = pcg_hash(probe * 131u + seedDir * 7919u + 0x9e3779b9u);
+    rng.state = batchSeed;
     rng.inc   = 1;
 
     // --- Gather: indirect field around the probe under the delta light ---
     //
-    // The RNG stream starts here, at the seed above, with no draw spent before
-    // it: the seed, then the 256 gather directions. Any table written by an older
-    // build does not match this stream, so a change to the draw order invalidates
-    // the cache. Reproduce the stream in BakedGI_RayDebug.hlsl exactly.
+    // Directions come from the rotated fibonacci set and consume no RNG draws.
+    // The RNG remains available to alpha-mask traversal in bake order.
     StructuredBuffer<float4> responsePrev = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
     StructuredBuffer<float2> visMoments   = ResourceDescriptorHeap[BakeParams.visSRVIdx];
 
@@ -248,12 +244,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         // Uniform sphere sampling; the cosine lobe lives in the projection
         // basis (e_lm = A_l * integral L(w) Y_lm(w) dw — reciprocity identity).
-        float u1 = next_float(rng);
-        float u2 = next_float(rng);
-        float z   = 1.0f - 2.0f * u1;
-        float phi = 2.0f * PI * u2;
-        float s   = sqrt(max(0.0f, 1.0f - z * z));
-        float3 gdir = float3(s * cos(phi), s * sin(phi), z);
+        const float3 gdir = BakedGIRotatedFibonacci(r, GATHER_RAYS, gatherRotation);
 
         RayDesc gRay;
         gRay.Origin    = probePos;
@@ -313,8 +304,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
             acc[lm] += basis[lm] * L;
     }
 
-    float norm = (4.0f * PI / (float)GATHER_RAYS);
+    const float norm = (4.0f * PI / (float)GATHER_RAYS);
+    const float batchWeight = 1.0f / (float)(BakeParams.batchIndex + 1u);
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
-        response[slot + lm2] = float4(acc[lm2] * norm * BakedGIA_l(lm2), 0.0f);
+    {
+        const float3 batchValue = acc[lm2] * norm * BakedGIA_l(lm2);
+        const float3 previousMean = response[slot + lm2].rgb;
+        const float3 mean = (BakeParams.batchIndex == 0u)
+            ? batchValue : lerp(previousMean, batchValue, batchWeight);
+        response[slot + lm2] = float4(mean, 0.0f);
+    }
 }

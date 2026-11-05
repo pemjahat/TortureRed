@@ -30,7 +30,8 @@
 //     and, appended 2026-11-04 for the sky-visibility A/B: skyVisSHSRVIdx 68,
 //     skyVisMode 72, Size 76.
 //   BakedGIVisParams     (BakedGI_Visibility.hlsl): skyVisSHUAVIdx 40, Size 44
-//   BakedGIBakeParams    (BakedGI_Bake.hlsl):   seedDir 68, sunState 72, Size 76
+//   BakedGIBakeParams    (BakedGI_Bake.hlsl):   seedDir 68, sunState 72,
+//                            batchIndex 76, Size 80
 //   BakedGIRayDebugParams (BakedGI_RayDebug.hlsl): seedDir 56, sunState 60,
 //                            source 64, Size 68
 //   BakedGIDilationParams (BakedGI_Dilate.hlsl): writeMeta 36, Size 40
@@ -56,7 +57,8 @@ static_assert(sizeof(BakedGIVisParams)                         == 44, "vis param
 
 static_assert(offsetof(BakedGIBakeParams, seedDir)             == 68, "bake params: seedDir moved");
 static_assert(offsetof(BakedGIBakeParams, sunState)            == 72, "bake params: sunState moved");
-static_assert(sizeof(BakedGIBakeParams)                        == 76, "bake params: size changed");
+static_assert(offsetof(BakedGIBakeParams, batchIndex)          == 76, "bake params: batchIndex moved");
+static_assert(sizeof(BakedGIBakeParams)                        == 80, "bake params: size changed");
 
 static_assert(offsetof(BakedGIRayDebugParams, seedDir)         == 56, "ray-debug params: seedDir moved");
 static_assert(offsetof(BakedGIRayDebugParams, sunState)        == 60, "ray-debug params: sunState moved");
@@ -163,8 +165,9 @@ constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
 // Version 4 drops the tenth float4 of both response tables: the record is 9
 // float4 now, so a version-3 payload is the wrong length and its strides are
 // wrong. Older files cannot restore the runtime data this build requires.
-// Reject them.
-constexpr uint32_t kProbeCacheVersion = 4;
+// Version 5 changes the estimator to eight rotated fibonacci batches. Reject
+// older files so a cache load cannot silently bypass the new sampling.
+constexpr uint32_t kProbeCacheVersion = 5;
 
 #pragma pack(push, 4)
 struct ProbeCacheHeader
@@ -492,7 +495,9 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     std::cout << "[BakedGI] Baking probe grid: " << m_DimX << "x" << m_DimY << "x" << m_DimZ
               << " : " << m_Spacing << "m (" << m_ProbeCount << " probes, "
               << kBakeIterations << " series iterations, "
-              << kBakeGatherRays << " gather rays for each of " << kDirections << " directions"
+              << kBakeGatherBatches << " batches x " << kBakeGatherRays
+              << " rotated fibonacci rays (" << (kBakeGatherBatches * kBakeGatherRays)
+              << " total) for each of " << kDirections << " directions"
               << " + " << kSunStates << " sun hour-state passes, "
               << m_DilationIterations << " dilation iterations)"
               << " — world " << (mx.x - mn.x) << "x" << (mx.y - mn.y) << "x" << (mx.z - mn.z) << "m" << std::endl;
@@ -597,56 +602,50 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         // shipped seed even when the caller pairs the sun with a bin.
         p.seedDir            = kSunSeedOwnDir;
 
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
-        cmdList->SetPipelineState(m_BakePSO.Get());
-        cmdList->Dispatch((m_ProbeCount + 7) / 8, kDirections / 8, 1);
-
-        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
-        cmdList->ResourceBarrier(1, &barrier);
-
-        // ---- Sun: one response for EACH hour state, toward that state's direction.
-        //
-        // The binned transport asks "how does the probe respond to a delta light
-        // from W_j". The runtime fold then has to pretend a fibonacci bin describes
-        // the sun, which it is up to 34 degrees from, and the fold ends up
-        // averaging visibility over that whole cone. These passes ask the right
-        // question instead: a delta light at the sun's own direction for that hour.
-        //
-        // 17 dispatches over the SAME PSO and the same feedback cage. isSunPass
-        // only redirects wDelta, the buffer and the record stride; sunState picks
-        // the record. The series still converges against its own operator, which is
-        // what a sky-fed shortcut could not do.
-        //
-        // seedDir = st, NOT the own-direction default: each state must get its own
-        // 256-ray draw. Adjacent states are 11.25 degrees apart and the fold blends
-        // them, so shared rays would make the blend inherit a correlated error
-        // instead of averaging two independent ones.
-        if (m_SunResponse[0].resource)
+        // Each batch overwrites or updates the running mean in the same output
+        // record. The other ping-pong buffer remains the feedback source.
+        for (uint32_t batch = 0; batch < kBakeGatherBatches; ++batch)
         {
-            for (uint32_t st = 0; st < kSunStates; ++st)
+            p.batchIndex = batch;
+            cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &p, 0);
+            cmdList->SetPipelineState(m_BakePSO.Get());
+            cmdList->Dispatch((m_ProbeCount + 7) / 8, kDirections / 8, 1);
+
+            D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(m_Response[cur].resource.Get());
+            cmdList->ResourceBarrier(1, &barrier);
+
+            // ---- Sun: one response for EACH hour state, toward that state's direction.
+            // isSunPass redirects the delta direction, table and record stride.
+            // The feedback operator and the batch sequence stay unchanged.
+            //
+            // seedDir = st, NOT the own-direction default: each state gets an
+            // independent batch sequence. The hour fold then averages independent
+            // errors instead of inheriting one correlated draw.
+            if (m_SunResponse[0].resource)
             {
-                BakedGIBakeParams sp = p;
-                sp.isSunPass          = 1u;
-                sp.sunState           = st;
-                const DirectX::XMFLOAT3 d = SunDirectionAtHourCPU(st);
-                sp.sunDirX            = d.x;
-                sp.sunDirY            = d.y;
-                sp.sunDirZ            = d.z;
-                sp.responseUAVIdx     = (uint32_t)m_SunResponse[cur].uavIndex;
-                sp.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - cur].srvIndex;
-                sp.seedDir            = st;
+                for (uint32_t st = 0; st < kSunStates; ++st)
+                {
+                    BakedGIBakeParams sp = p;
+                    sp.isSunPass          = 1u;
+                    sp.sunState           = st;
+                    const DirectX::XMFLOAT3 d = SunDirectionAtHourCPU(st);
+                    sp.sunDirX            = d.x;
+                    sp.sunDirY            = d.y;
+                    sp.sunDirZ            = d.z;
+                    sp.responseUAVIdx     = (uint32_t)m_SunResponse[cur].uavIndex;
+                    sp.responsePrevSRVIdx = (uint32_t)m_SunResponse[1 - cur].srvIndex;
+                    sp.seedDir            = st;
 
-                cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &sp, 0);
-                cmdList->SetPipelineState(m_BakePSO.Get());
-                cmdList->Dispatch((m_ProbeCount + 7) / 8, 1, 1);
+                    cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIBakeParams) / 4, &sp, 0);
+                    cmdList->SetPipelineState(m_BakePSO.Get());
+                    cmdList->Dispatch((m_ProbeCount + 7) / 8, 1, 1);
+                }
+
+                // Order this batch before the next running-mean read or feedback read.
+                D3D12_RESOURCE_BARRIER sunBarrier =
+                    CD3DX12_RESOURCE_BARRIER::UAV(m_SunResponse[cur].resource.Get());
+                cmdList->ResourceBarrier(1, &sunBarrier);
             }
-
-            // One barrier for the whole write set: every state's dispatch wrote
-            // into the same buffer, and the next iteration reads all of it back as
-            // the feedback table.
-            D3D12_RESOURCE_BARRIER sunBarrier =
-                CD3DX12_RESOURCE_BARRIER::UAV(m_SunResponse[cur].resource.Get());
-            cmdList->ResourceBarrier(1, &sunBarrier);
         }
 
         // Snapshot this term's table for the debug view. The LAST term needs no
