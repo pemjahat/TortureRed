@@ -658,15 +658,15 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
     // DDGIParams (30 DWORDs — the largest consumer of this slot).
-    // BakedGIRayDebugParams (18 DWORDs), BakedGIDilationParams (10 DWORDs),
-    // BakedGIIterFoldParams (3 DWORDs), and BakedGIPhotonEmitParams (26 DWORDs)
-    // are smaller than DDGIParams. They do not change the slot size.
+    // BakedGIRayDebugParams (18 DWORDs), BakedGIIterFoldParams (3 DWORDs), and
+    // BakedGIPhotonEmitParams (26 DWORDs) are smaller than DDGIParams. They do
+    // not change the slot size.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
         std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
         std::max(sizeof(BakedGIUpdateParams), std::max(sizeof(BakedGIVisParams),
         std::max(sizeof(BakedGIRayDebugParams), std::max(sizeof(BakedGIIterFoldParams),
-        std::max(sizeof(BakedGIDilationParams), std::max(sizeof(BakedGIPhotonEmitParams),
-        sizeof(DDGIParams))))))))));
+        std::max(sizeof(BakedGIPhotonEmitParams),
+        sizeof(DDGIParams)))))))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
@@ -960,7 +960,7 @@ void Renderer::CreateBakedGIPipelines()
     m_BakedGI.CreatePipelines(m_Device.Get(), m_RootSignature.Get());
 }
 
-bool Renderer::BakeGIProbes(Model* model, float spacing, uint32_t dilationIterations)
+bool Renderer::BakeGIProbes(Model* model, float spacing)
 {
     if (!m_RayTracingSupported || !model)
         return false;
@@ -978,7 +978,7 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, uint32_t dilationIterat
                                     model->GetDrawNodeBufferAddress(),
                                     model->GetGlobalIndexBufferAddress(),
                                     model->GetGlobalVertexBufferAddress(),
-                                    spacing, dilationIterations);
+                                    spacing);
     if (ok)
     {
         // Probe disk cache — off while BakedGI::kProbeCacheEnabled is false.

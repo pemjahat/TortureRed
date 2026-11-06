@@ -180,30 +180,33 @@ float BakedGIRayRecShadowStatus(float rec6w)
 //   bit 3: dead by DDGI rule 2 — nearest frontface beyond 3x spacing
 //          (unreachable while depths clamp at 2x spacing — DDGI's own code
 //          neuters this rule identically; kept for fidelity)
-//   bit 4: FILLED by bake-time donor dilation; runtime data exists, but the
-//          fixed-origin depth moments remain untrusted for Chebyshev weights
+//   bit 4: FILLED by bake-time donor dilation — RETIRED: no writer sets this
+//          bit since the dilation pass was removed (2026-11-06, dead probes'
+//          cells rarely enter a receiver's trilinear cage, so the donor-filled
+//          data was never fetched). The bit stays reserved so the meta bit
+//          numbering and every existing comment stay stable.
 // ---------------------------------------------------------------------------
 #define BAKED_GI_META_VALID         0x1u
 #define BAKED_GI_META_OLD_VALID     0x2u
 #define BAKED_GI_META_DEAD_BACKFACE 0x4u
 #define BAKED_GI_META_DEAD_FAR      0x8u
-#define BAKED_GI_META_FILLED        0x10u
+#define BAKED_GI_META_FILLED        0x10u // RETIRED: no writer since the dilation removal
 
-// Bake, dilation, and debug consumers use this helper: data exists when either
-// geometric validity or donor-backed fill is present.
+// Bake and debug consumers use this helper: data exists when the probe is
+// geometrically valid. The FILLED bit is retired (no writer), so this is the
+// VALID test; the historical spelling stays for the placement view's gate.
 bool BakedGIProbeHasData(uint meta)
 {
     return (meta & (BAKED_GI_META_VALID | BAKED_GI_META_FILLED)) != 0u;
 }
 
-// Runtime receiver eligibility. VALID always qualifies. FILLED qualifies only
-// when the Application publishes raw-versus-dilated runtime mode as dilated.
-// Raw A/B mode therefore ignores every FILLED bit without changing the meta buffer.
+// Runtime receiver eligibility: VALID only. A probe that failed the geometric
+// classification has no trusted runtime data, and the retired FILLED path that
+// once admitted donor-backed probes no longer exists. For every VALID probe
+// this is the same verdict the previous two-path form gave.
 bool BakedGIProbeHasRuntimeData(uint meta)
 {
-    if ((meta & BAKED_GI_META_VALID) != 0u)
-        return true;
-    return (FrameCB.bakedGIUseFilled != 0u) && ((meta & BAKED_GI_META_FILLED) != 0u);
+    return (meta & BAKED_GI_META_VALID) != 0u;
 }
 
 // DDGI's classification ray set (D3D12_Research DDGICommon.hlsli,
@@ -264,6 +267,142 @@ float3x3 BakedGIBatchRotation(uint batchSeed)
 float3 BakedGIRotatedFibonacci(uint i, uint n, float3x3 rotation)
 {
     return normalize(mul(rotation, BakedGISphericalFibonacci(i, n)));
+}
+
+// ---------------------------------------------------------------------------
+// GUIDED GATHER — the defensive mixture sampler (task033, section 3).
+//
+// Transport iterations 1+ sample each batch from a mixture: the first
+// BAKED_GI_GUIDE_UNIFORM_RAYS rays stay uniform (a fresh small fibonacci set,
+// the alpha = 1/4 stratum), the rest draw from a per-record direction CDF
+// tabulated from the PREVIOUS iteration's table. The record IS the band-2
+// projection of this thread's own integrand,
+//     R_i[lm] = A_l * integral Y_lm(w) L_i(w) dw
+// so the reconstruction L_hat = sum_lm (R_lm / A_l) Y_lm is a smoothed image
+// of L_i: the guide signal needs no trial pass and no histogram buffer (the
+// GPU Lightmass structure this adapts — docs/task033-gpu-lightmass-
+// adaptation-assessment.md section 3). Iteration 0 stays plain uniform: no
+// predecessor table is trustworthy yet as a guide for its own variance, and
+// its stream is bit-identical to the pre-guiding bake.
+//
+// UNBIASEDNESS. The mixture splits the integral by its weights:
+//     alpha * integral f  +  (1 - alpha) * integral f,   alpha = 64/256
+// The uniform stratum contributes 64 rays at weight 4pi/64 each; the guided
+// stratum contributes 192 rays at weight (1/192) * cellSolidAngle / p_j. Both
+// reduce to the SAME 4pi/GATHER_RAYS norm the plain batch used, times
+// 1/(K p_j) for a guided ray. So every batch — uniform or guided — is an
+// unbiased estimate of the same quantity, the running mean over batches and
+// the runtime fold keep their exact identities. The "defensive floor" of
+// task033 is STRUCTURAL here: the uniform stratum covers every direction the
+// CDF clamps away, and p_j > 0 wherever a guided ray can land. A dead
+// (all-zero) record degrades the guided stratum to uniform, weight 1.
+//
+// REPLAY DISCIPLINE. BakedGIGuideBuild and BakedGIGuideSample are the ONE
+// spelling of the sampler: the bake and the ray-debug replay call them with
+// the same responsePrev content and the same seed, so every draw reproduces.
+// The draw order inside BakedGIGuideSample is FIXED: cell pick, cos stratum,
+// phi stratum — three consecutive draws before the ray's traversal.
+// Uniform-stratum rays draw nothing.
+// ---------------------------------------------------------------------------
+#define BAKED_GI_GUIDE_CELLS        64u  // equal-area cells: 8 polar bands x 8 azimuth segments
+#define BAKED_GI_GUIDE_UNIFORM_RAYS 64u  // uniform-stratum rays of a guided batch (alpha = 1/4)
+
+struct BakedGIGuide
+{
+    float cdf[BAKED_GI_GUIDE_CELLS]; // running sum of the clamped cell luminance
+    float total;                     // cdf[last]; <= 0 selects the uniform fallback
+};
+
+// Cell center of cell j. Eight equal cos(theta) slabs x eight equal phi arcs
+// tile the full sphere into K cells of solid angle 4pi/K each.
+float3 BakedGIGuideCellCenter(uint j)
+{
+    const float cosC = 1.0f - ((float)(j >> 3u) + 0.5f) * 0.25f;
+    const float phiC = ((float)(j & 7u) + 0.5f) * (PI * 0.25f);
+    const float sinC = sqrt(saturate(1.0f - cosC * cosC));
+    return float3(cos(phiC) * sinC, sin(phiC) * sinC, cosC);
+}
+
+// Tabulates L_hat over the cells and returns the cumulative weights. `slot`
+// is the CALLER'S record in responsePrev — the same slot arithmetic the
+// thread uses on its own write target, because the two tables share the
+// layout (sky: stride 16, sun: stride 17; the caller already owns the pair).
+BakedGIGuide BakedGIGuideBuild(StructuredBuffer<float4> respPrev, uint slot)
+{
+    BakedGIGuide g;
+    float3 coeff[9];
+    [unroll]
+    for (uint lm = 0; lm < 9; ++lm)
+        coeff[lm] = respPrev[slot + lm].rgb / BakedGIA_l(lm);
+
+    float cum = 0.0f;
+    [loop]
+    for (uint j = 0; j < BAKED_GI_GUIDE_CELLS; ++j)
+    {
+        float basis[9];
+        EvalSH9Basis(BakedGIGuideCellCenter(j), basis);
+        float3 Lhat = float3(0.0f, 0.0f, 0.0f);
+        [unroll]
+        for (uint l2 = 0; l2 < 9; ++l2)
+            Lhat += coeff[l2] * basis[l2];
+        // The clamp is the guide's own: a band-2 reconstruction overshoots
+        // negative in dark regions, and a probability cannot be negative.
+        // Whatever the clamp removes, the uniform stratum still covers.
+        cum += max(0.0f, Luminance(Lhat));
+        g.cdf[j] = cum;
+    }
+    g.total = cum;
+    return g;
+}
+
+// One guided-ray direction. THREE fixed-order draws: cell pick, cos stratum,
+// phi stratum. `weight` is the multiplier the shared 4pi/GATHER_RAYS norm
+// needs: 1/(K p_j), which is exactly 1 when the guide is uniform — so the
+// dead-guide fallback keeps the batch's weights untouched.
+float3 BakedGIGuideSample(BakedGIGuide g, inout RNG rng, out float weight)
+{
+    const float uCell = next_float(rng);
+    const float uCos  = next_float(rng);
+    const float uPhi  = next_float(rng);
+
+    uint  j;
+    float p_j;
+    if (g.total > 0.0f)
+    {
+        // Lower bound on the first cell whose cumulative sum EXCEEDS the
+        // threshold — a strict compare never selects a zero-weight cell
+        // short of fp rounding at the u ~ 1 edge, which the guard below
+        // absorbs. The CDF is monotone by construction.
+        const float threshold = uCell * g.total;
+        uint lo = 0u;
+        uint hi = BAKED_GI_GUIDE_CELLS - 1u;
+        [loop]
+        while (lo < hi)
+        {
+            const uint mid = (lo + hi) >> 1u;
+            if (g.cdf[mid] > threshold) hi = mid; else lo = mid + 1u;
+        }
+        j = lo;
+        const float lower = (j > 0u) ? g.cdf[j - 1u] : 0.0f;
+        p_j = (g.cdf[j] - lower) / g.total;
+    }
+    else
+    {
+        // Dead guide: the record is zero, so the guided stratum goes uniform.
+        j   = min((uint)(uCell * (float)BAKED_GI_GUIDE_CELLS), BAKED_GI_GUIDE_CELLS - 1u);
+        p_j = 1.0f / (float)BAKED_GI_GUIDE_CELLS;
+    }
+    // Keeps 1/(K p_j) finite on the fp rounding edge. The event has zero
+    // probability in exact arithmetic, but a NaN would poison the stored
+    // table (the bake's own rule).
+    p_j = max(p_j, 1.0f / 16777216.0f);
+
+    const float cosT = 1.0f - ((float)(j >> 3u) + uCos) * 0.25f;
+    const float phi  = ((float)(j & 7u) + uPhi) * (PI * 0.25f);
+    const float sinT = sqrt(saturate(1.0f - cosT * cosT));
+
+    weight = 1.0f / ((float)BAKED_GI_GUIDE_CELLS * p_j);
+    return float3(cos(phi) * sinT, sin(phi) * sinT, cosT);
 }
 
 // ---------------------------------------------------------------------------

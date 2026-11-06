@@ -35,6 +35,24 @@
 // skips EvalResponseIndirect and the two streams still agree. Lane 0 of each
 // group does all the work.
 //
+// GUIDED STREAM. The replay targets the FINAL transport iteration, and that
+// iteration is a GUIDED batch set (iterations > 0 are guided; the C++ asserts
+// kBakeIterations >= 2). Per batch, the replay rebuilds the guide from
+// respPrev with BakedGIGuideBuild — the same function, the same record slot,
+// the same table content the bake read — then each guided ray draws three
+// floats through BakedGIGuideSample at the top of its loop iteration, before
+// its traversal, exactly as the bake does. The first
+// BAKED_GI_GUIDE_UNIFORM_RAYS rays of a batch are the uniform fibonacci
+// stratum and draw nothing. Iteration 0 is uniform and not replayed here: the
+// self-check compares the FINAL table only.
+//
+// VERSION GATE. The bake and the replay ship in one binary, so a resident
+// table always matches this sampler. The persisted path is the Probes/ cache,
+// and the guided sampler bumps kProbeCacheVersion, so an old file is REJECTED
+// at load. If any other path ever leaves a stale table resident, the
+// self-check reports MISMATCH loudly — that is the gate working, not a
+// defect to silence.
+//
 // ONE DELTA SOURCE at a time, chosen by RayDbg.source. The bake writes two tables
 // for each probe: the sky quadrature (16 fibonacci bins, stride
 // BAKED_GI_DIRECTIONS) and the sun hour states (17 states, stride
@@ -66,6 +84,10 @@ ConstantBuffer<BakedGIRayDebugParams> RayDbg  : register(b2);
 #define BAKE_BATCHES 8u  // must match GATHER_BATCHES in BakedGI_Bake.hlsl
 #define TOTAL_BAKE_RAYS (BAKE_RAYS * BAKE_BATCHES)
 #define DEBUG_RAYS  64u  // record slots for each direction; BakedGI::kDebugGatherRays
+// The mixture's alpha is structural (alpha = 1/4): see BakedGI_Bake.hlsl.
+#if (BAKE_RAYS != 4 * BAKED_GI_GUIDE_UNIFORM_RAYS)
+#error "guided replay: the uniform stratum must be exactly 1/4 of a batch (alpha = 0.25)"
+#endif
 
 // Ray-record layout, in float4s for each ray. The re-accumulated table starts
 // at BakedGI::kRayDebugTableBase, which the C++ side and BakedGI_Debug.hlsl
@@ -417,17 +439,32 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // traced delta direction does not reach. Only a non-zero product puts anything
     // into the direct half of L, so those rays are the evidence. Keep the weight
     // for every ray and decide the slots once the whole direction is known.
+    //
+    // The final bake iteration is GUIDED, so this pass rebuilds the guide per
+    // batch and draws the sampling floats exactly as the bake did. The build
+    // reads respPrev but draws nothing, so the two passes stay aligned.
     // -------------------------------------------------------------------------
+
+    // The guide reads the thread's OWN record in respPrev, the same slot
+    // arithmetic the bake's final iteration used for both tables.
+    const uint guideSlot = (probe * kRespStride + kRespIdx) * BAKED_GI_RESPONSE_F4;
+
     [loop]
     for (uint b1 = 0; b1 < BAKE_BATCHES; ++b1)
     {
         const uint batchSeed = BakedGIBatchSeed(probe, seedDir, b1);
         const float3x3 rotation = BakedGIBatchRotation(batchSeed);
         rng.state = batchSeed;
+        const BakedGIGuide guide = BakedGIGuideBuild(respPrev, guideSlot);
         [loop]
         for (uint r1 = 0; r1 < BAKE_RAYS; ++r1)
         {
-            const float3 gdir = BakedGIRotatedFibonacci(r1, BAKE_RAYS, rotation);
+            float w1; // the guide's weight multiplier; unused in this pass
+            float3 gdir;
+            if (r1 < BAKED_GI_GUIDE_UNIFORM_RAYS)
+                gdir = BakedGIRotatedFibonacci(r1, BAKED_GI_GUIDE_UNIFORM_RAYS, rotation);
+            else
+                gdir = BakedGIGuideSample(guide, rng, w1);
             const RayProbe p1 = ProbeRay(rng, probePos, wDelta, gdir);
             g_q[b1 * BAKE_RAYS + r1] = p1.q;
         }
@@ -530,13 +567,19 @@ void main(uint3 dtid : SV_DispatchThreadID)
         const uint batchSeed = BakedGIBatchSeed(probe, seedDir, b);
         const float3x3 rotation = BakedGIBatchRotation(batchSeed);
         rng.state = batchSeed;
+        const BakedGIGuide guide = BakedGIGuideBuild(respPrev, guideSlot);
         float3 acc[9] = (float3[9])0;
 
         [loop]
         for (uint r = 0; r < BAKE_RAYS; ++r)
         {
             const uint sourceRay = b * BAKE_RAYS + r;
-            const float3 gdir = BakedGIRotatedFibonacci(r, BAKE_RAYS, rotation);
+            float  rayWeight = 1.0f;
+            float3 gdir;
+            if (r < BAKED_GI_GUIDE_UNIFORM_RAYS)
+                gdir = BakedGIRotatedFibonacci(r, BAKED_GI_GUIDE_UNIFORM_RAYS, rotation);
+            else
+                gdir = BakedGIGuideSample(guide, rng, rayWeight);
             const RayProbe p = ProbeRay(rng, probePos, wDelta, gdir);
 
             // Misses and backface rejects carry no L or Efb. A shaded hit uses
@@ -553,7 +596,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 EvalSH9Basis(p.gdir, basis);
                 [unroll]
                 for (uint lm = 0; lm < 9; ++lm)
-                    acc[lm] += basis[lm] * L;
+                    acc[lm] += basis[lm] * L * rayWeight;
             }
 
             const int sl = g_slot[sourceRay];
@@ -561,7 +604,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 WRITE_RECORD(debug, recBase, (uint)sl, sourceRay, p, L, Efb);
         }
 
-        // Match the bake's running mean in the same order and precision.
+        // Match the bake's running mean in the same order and precision. The
+        // mixture's per-ray weight is already inside acc (rayWeight), so this
+        // shared norm is the same expression the bake uses.
         const float norm = (4.0f * PI / (float)BAKE_RAYS);
         const float batchWeight = 1.0f / (float)(b + 1u);
         [unroll]

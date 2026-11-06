@@ -28,6 +28,17 @@
 // path (no double counting), and the sky's occluded first bounce is
 // reconstructed at runtime from the SH9 sky-visibility field (see
 // BakedGI_Update.hlsl).
+//
+// GUIDED GATHER (task033 section 3). Iterations 1 and 2 replace the dense
+// uniform ray set with the defensive mixture: a uniform fibonacci stratum
+// plus per-record guided draws from a CDF built off the PREVIOUS iteration's
+// table — the record is the band-2 projection of this thread's own integrand,
+// so its reconstruction is the guide signal, with no trial pass and no extra
+// buffer. Every batch stays an unbiased estimate of the same integral (the
+// guide block in BakedGI.hlsli owns the derivation), so the running mean and
+// the fold keep their exact identities. Iteration 0 stays uniform. The
+// ray-debug replay shares the same build/sample functions, so a dump
+// reproduces the draws.
 // =============================================================================
 #include "CommonTracing.hlsl"
 
@@ -37,9 +48,13 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // BakedGI.hlsli references FrameCB — include after the declarations above.
 #include "BakedGI.hlsli"
 
-// Gather rays for each direction and batch. Every ray carries the same solid
-// angle, 4*PI/GATHER_RAYS, because the rotated fibonacci set is uniform over
-// the full sphere. Eight independent rotations give 2048 rays per record.
+// Gather rays for each direction and batch. Iteration 0 traces a uniform
+// rotated fibonacci set: every ray carries the same solid angle,
+// 4*PI/GATHER_RAYS. Iterations 1 and 2 sample the GUIDED MIXTURE instead
+// (BakedGI.hlsli's guide block owns the math): BAKED_GI_GUIDE_UNIFORM_RAYS
+// uniform-stratum rays from a fresh 64-point set, then guide-drawn rays with
+// weight 1/(K p_j) under the same 4*PI/GATHER_RAYS norm. Eight independent
+// batches give 2048 rays per record.
 //
 // Each batch is a separate dispatch. The output holds the exact linear running
 // mean, so no accumulation buffer or nonlinear history filter is needed.
@@ -49,6 +64,11 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // BAKE_RAYS / BAKE_BATCHES (BakedGI_RayDebug.hlsl).
 #define GATHER_RAYS 256
 #define GATHER_BATCHES 8
+// The mixture's alpha is structural: the uniform stratum is exactly 1/4 of a
+// batch, so a guided ray's weight and a uniform ray's weight share one norm.
+#if (GATHER_RAYS != 4 * BAKED_GI_GUIDE_UNIFORM_RAYS)
+#error "guided mixture: the uniform stratum must be exactly 1/4 of a batch (alpha = 0.25)"
+#endif
 
 // Trilinear evaluation of a previous iteration's response table at worldPos,
 // projected with the receiver normal — the series-expansion feedback term.
@@ -229,10 +249,24 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     // --- Gather: indirect field around the probe under the delta light ---
     //
-    // Directions come from the rotated fibonacci set and consume no RNG draws.
-    // The RNG remains available to alpha-mask traversal in bake order.
+    // Iteration 0: directions come from the rotated fibonacci set and consume
+    // no RNG draws; the RNG remains available to alpha-mask traversal in bake
+    // order — bit-identical to the pre-guiding stream. Iterations > 0: the
+    // guided mixture (BakedGI.hlsli). The guide CDF is built from
+    // responsePrev — the PREVIOUS iteration's table, fixed for the whole
+    // iteration by the ping-pong, so one build per batch sees the same data
+    // every batch sees. Sampling draws happen at the TOP of each guided ray's
+    // loop iteration, before its traversal, in the fixed order
+    // BakedGIGuideSample documents — the replay discipline. The per-ray
+    // branch is uniform across the wave: `guided` is a root constant and
+    // `r` is the shared loop counter.
     StructuredBuffer<float4> responsePrev = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
     StructuredBuffer<float2> visMoments   = ResourceDescriptorHeap[BakeParams.visSRVIdx];
+
+    const bool guided = BakeParams.iteration > 0u;
+    BakedGIGuide guide; // read only when guided, so the unset state is inert
+    if (guided)
+        guide = BakedGIGuideBuild(responsePrev, slot);
 
     float3 acc[9] = (float3[9])0;
     // Dynamic loop on purpose: [unroll] here produces a kernel with 64
@@ -244,7 +278,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         // Uniform sphere sampling; the cosine lobe lives in the projection
         // basis (e_lm = A_l * integral L(w) Y_lm(w) dw — reciprocity identity).
-        const float3 gdir = BakedGIRotatedFibonacci(r, GATHER_RAYS, gatherRotation);
+        // Guided rays carry weight 1/(K p_j); uniform rays carry 1. The norm
+        // below is shared, so the two strata sum to the exact mixture.
+        float  rayWeight = 1.0f;
+        float3 gdir;
+        if (!guided)
+            gdir = BakedGIRotatedFibonacci(r, GATHER_RAYS, gatherRotation);
+        else if (r < BAKED_GI_GUIDE_UNIFORM_RAYS)
+            gdir = BakedGIRotatedFibonacci(r, BAKED_GI_GUIDE_UNIFORM_RAYS, gatherRotation);
+        else
+            gdir = BakedGIGuideSample(guide, rng, rayWeight);
 
         RayDesc gRay;
         gRay.Origin    = probePos;
@@ -301,9 +344,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
         EvalSH9Basis(gdir, basis);
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
-            acc[lm] += basis[lm] * L;
+            acc[lm] += basis[lm] * L * rayWeight;
     }
 
+    // Shared by both strata: a uniform ray is 4*PI/GATHER_RAYS * 1, a guided
+    // ray is 4*PI/GATHER_RAYS * 1/(K p_j), and the mixture's alpha = 64/256
+    // makes the per-ray weights reduce to this single norm (guide block,
+    // BakedGI.hlsli).
     const float norm = (4.0f * PI / (float)GATHER_RAYS);
     const float batchWeight = 1.0f / (float)(BakeParams.batchIndex + 1u);
     [unroll]

@@ -185,7 +185,7 @@ public:
                     D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                     D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                    float spacing, uint32_t dilationIterations);
+                    float spacing);
 
     // Per-frame: fold the live sun/sky state into the lit-probe buffer.
     // hour selects the two baked sun states that bracket it. The sky term reads
@@ -206,9 +206,6 @@ public:
     uint32_t          GetDimX() const { return m_DimX; }
     uint32_t          GetDimY() const { return m_DimY; }
     uint32_t          GetDimZ() const { return m_DimZ; }
-    // Actual bake count after the grid-diameter clamp. The UI request remains
-    // separate, so a later rebuild can use a different count.
-    uint32_t          GetDilationIterations() const { return m_DilationIterations; }
     uint32_t          GetLitSRVIndex() const { return (uint32_t)m_LitProbes.srvIndex; }
     uint32_t          GetLitSkySRVIndex() const { return (uint32_t)m_LitProbesSky.srvIndex; }
     uint32_t          GetLitSunSRVIndex() const { return (uint32_t)m_LitProbesSun.srvIndex; }
@@ -223,16 +220,6 @@ public:
     uint32_t          GetSunResponseSRVIndex() const
     {
         return m_SunResponseValid ? (uint32_t)m_SunResponse[m_FinalSunResponse].srvIndex : 0u;
-    }
-    // Runtime A/B selection. The setter changes only the selection state. The
-    // Application owns refold invalidation because the live lit table depends on it.
-    void              SetUseDilatedTransport(bool useDilated) { m_UseDilatedTransport = useDilated; }
-    bool              UseDilatedTransport() const { return m_UseDilatedTransport; }
-
-    bool              HasDilatedTransport() const { return m_DilatedTransportValid; }
-    bool              IsUsingDilatedTransport() const
-    {
-        return m_UseDilatedTransport && m_DilatedTransportValid;
     }
 
     // ---------------------------------------------------------------------
@@ -253,7 +240,7 @@ public:
     //
     // The selection is runtime state, so a switch needs no rebake — only a probe
     // fold, which is the Application's call because the live lit table depends on
-    // it (the same contract as SetUseDilatedTransport).
+    // it.
     //
     // The SH buffer exists only after a bake that ran the visibility dispatch.
     // A Probes/ cache load restores no SH section, so HasSkyVisSH() is false
@@ -328,19 +315,14 @@ public:
     }
 
     // Raw getters above serve ray debug and Efb. Only the runtime fold uses
-    // these two update getters. They select dilated finals only when the user
-    // selected dilated transport and a positive-count bake created the tables.
+    // these two update getters; both hand the raw finals to the fold.
     uint32_t          GetUpdateResponseSRVIndex() const
     {
-        return IsUsingDilatedTransport()
-             ? (uint32_t)m_DilatedResponse[m_FinalDilatedResponse].srvIndex
-             : GetResponseSRVIndex();
+        return GetResponseSRVIndex();
     }
     uint32_t          GetUpdateSunResponseSRVIndex() const
     {
-        return IsUsingDilatedTransport()
-             ? (uint32_t)m_DilatedSunResponse[m_FinalDilatedSunResponse].srvIndex
-             : GetSunResponseSRVIndex();
+        return GetSunResponseSRVIndex();
     }
     bool              HasSunResponse() const { return m_SunResponseValid; }
     // True only when the resident sun table can serve THIS hour.
@@ -855,7 +837,7 @@ public:
     // from the format itself, so it is left as the human set it.
     static constexpr bool kProbeCacheEnabled = false;
 
-    // Disk cache (Probes/ — the ShaderCache pattern), format version 4.
+    // Disk cache (Probes/ — the ShaderCache pattern).
     //
     // After a bake, FOUR outputs are read back on the same list
     // (RecordCacheReadback, before executing) and written to
@@ -864,10 +846,8 @@ public:
     //   2. the meta words,
     //   3. the visibility moments,
     //   4. the per-probe SUN table, all 17 hour states, appended.
-    // Positive dilation counts append the final dilated sky and sun tables.
     // One file for all 17 states, which is the human's decision. Section 4 costs
-    // 17 x 9 float4 x 16 B = 2448 B for each probe. Version 4 dropped the tenth
-    // float4 of both response tables, so a version-3 file is rejected.
+    // 17 x 9 float4 x 16 B = 2448 B for each probe.
     //
     // A later RecordBake with the same grid config, the same state count and the
     // same latitude restores the state with plain buffer copies instead of 51
@@ -882,12 +862,6 @@ private:
     // including the per-probe sun response pair. There is no variant that skips
     // the sun: the fold always has two hour states to interpolate.
     bool CreateProbeBuffers();
-    // Positive-count bakes and cache loads allocate separate runtime transport
-    // pairs and one meta scratch buffer. Zero-count bakes allocate none of them.
-    bool CreateDilationBuffers();
-    // Runs after every raw transport iteration and raw debug fold. The first
-    // iteration reads raw finals. Later iterations read only dilation pairs.
-    bool RecordDilation(ID3D12GraphicsCommandList* cmdList);
     // Debug-only outputs of the bake: the per-term transport snapshots
     // (m_ResponseIter, kIterSnapshotCount tables) and the folded per-probe
     // response balls (m_EfbBall, kBakeIterations). Created on the DISPATCH path
@@ -904,8 +878,7 @@ private:
     // Called inside RecordBake after the grid is computed; on a hit RecordBake
     // returns true immediately.
     //
-    // The base cache holds four sections: raw sky, final meta, visibility, and
-    // raw sun. Positive counts also restore the final dilated sky and sun sections.
+    // The cache holds four sections: raw sky, final meta, visibility, and raw sun.
     bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
                       const std::string& scenePath);
 
@@ -917,16 +890,6 @@ private:
     GPUBuffer m_SunResponse[2];
     bool      m_SunResponseValid = false;
     uint32_t  m_FinalSunResponse = 0;
-    // Bake-time dilation owns separate runtime tables. Raw pairs above retain
-    // every transport-iteration byte for ray debug and Efb after these writes.
-    GPUBuffer m_DilatedResponse[2];
-    GPUBuffer m_DilatedSunResponse[2];
-    GPUBuffer m_DilationMeta;
-    bool      m_DilatedTransportValid = false;
-    bool      m_UseDilatedTransport = true;
-    uint32_t  m_FinalDilatedResponse = 0;
-    uint32_t  m_FinalDilatedSunResponse = 0;
-    uint32_t  m_DilationIterations = 0;
     GPUBuffer m_LitProbes;    // per-frame lit SH9 RGB, TOTAL (runtime fetch source)
     GPUBuffer m_LitProbesSky; // per-frame lit SH9 RGB, sky-sourced split (debug)
     GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)
@@ -965,7 +928,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LeakDebugPSO; // fullscreen leak map (post-composite, alpha-blended)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RayDebugPSO;  // on-demand ray-debug re-trace (compute)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IterFoldPSO;  // per-term response-ball fold (compute, debug)
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DilatePSO;    // bake-time transport dilation (compute)
     Microsoft::WRL::ComPtr<ID3D12Resource> m_MetaReadback; // per-bake validity stats readback
     Microsoft::WRL::ComPtr<ID3D12Resource> m_CacheReadback; // per-bake serialization readback (response|meta|vis)
     Microsoft::WRL::ComPtr<ID3D12Resource> m_CacheUpload;   // cache-load staging — must outlive the recorded list

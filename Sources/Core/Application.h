@@ -80,8 +80,6 @@ private:
     bool m_DebugDepthLabels        = false;  // Depth-duel labels for occluded records
     bool m_CullStatsOverlay        = false;  // Meshlet culling stats on-screen table
     float m_BakedGISpacing      = 1.0f;  // BakedGI probe grid spacing (m) — used at the next rebuild
-    int   m_BakedGIDilationIterations = 1; // Six-neighbor dilation count for the next bake; default is one, zero disables it
-    bool  m_BakedGIUseDilatedTransport = true; // Runtime A/B selection; persists across bakes and never triggers one
     // Sky-visibility mode: 0 = SH9 (the default: the raw SH9 field the visibility
     // bake projects), 1 = V = 0 (the No Sky Visibility diagnostic). Runtime
     // selection only: it persists across bakes, triggers no bake, and asks for a

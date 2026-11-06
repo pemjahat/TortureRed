@@ -454,13 +454,15 @@ struct FrameConstants {
     uint   _sunDirPad1;             //           16-byte boundary this field needs
     float4 bakedGISunDir;           // 1152: xyz = to-sun unit direction, w = sun exists
 
-    // Runtime data eligibility for FILLED probes. The receiver shaders accept
-    // FILLED only when this flag is one. Raw A/B mode publishes zero, so FILLED
-    // meta bits stay on disk but cannot enter a runtime cage.
+    // Runtime data eligibility for FILLED probes — RETIRED and INERT: no bake
+    // stage sets the FILLED meta bit since the dilation feature was removed
+    // (2026-11-06), and the CPU publishes 0. The FIELD stays because
+    // FrameConstants is append-only by house discipline; removing a mid-struct
+    // field would shift the ray-debug and photon offsets.
     // Appended after the float4. Measured on both sides: offset 1168. The upload
     // buffer rounds the byte count to 256, so the constant-buffer binding covers
     // this field.
-    uint bakedGIUseFilled;          // 1168: 1 = runtime cage accepts FILLED probes
+    uint bakedGIUseFilled;          // 1168: retired — always 0
 
     // The delta source the last dump replayed, and the sky bin ON DISPLAY. These
     // describe the RECORDS IN THE BUFFER, not the UI selection, so a label can
@@ -750,21 +752,6 @@ struct BakedGIIterFoldParams {
     uint probeCount;        // probes in the grid; threads at or past it return
     uint tableSRVIdx;       // SRV: the transport table of ONE bake term (probeCount x 16 x 10 float4)
     uint ballUAVIdx;        // RW: probeCount x 9 float4 SH9 — one response ball for each probe
-};
-
-// Root constants for one bake-time dilation dispatch. One thread handles one
-// (probe, record) pair and copies or averages all 10 float4 values in that record.
-// The sky dispatch writes meta through record zero. The sun dispatch reuses the
-// same donor weights without writing meta. Every field is a 4-byte scalar.
-struct BakedGIDilationParams {
-    uint dimX, dimY, dimZ;
-    uint probeCount;
-    uint recordCount;       // 16 sky records or 17 sun records
-    uint tableSRVIdx;       // raw final table on iteration zero, then dilated input
-    uint tableUAVIdx;       // dilated destination only; never a raw transport table
-    uint metaSRVIdx;
-    uint metaUAVIdx;
-    uint writeMeta;         // one for sky, zero for sun
 };
 
 // -----------------------------------------------------------------------------

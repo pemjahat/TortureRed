@@ -607,10 +607,10 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIPhotonCount     = gi.HasPhotonMap() ? gi.GetPhotonTotal() : 0u;
         m_FrameConstants.bakedGIPhotonSunState  = gi.HasPhotonMap() ? gi.GetPhotonSunState() : 0u;
         m_FrameConstants.bakedGIPhotonFluxScale = gi.HasPhotonMap() ? gi.GetPhotonFluxScale() : 1.0f;
-        // Runtime FILLED eligibility follows the same effective getter that selects
-        // the tables. Raw A/B mode publishes zero even when meta holds FILLED.
-        const bool useFilled = gi.IsUsingDilatedTransport();
-        m_FrameConstants.bakedGIUseFilled          = useFilled ? 1u : 0u;
+        // FILLED runtime eligibility is retired with the dilation feature: no
+        // bake stage sets the FILLED meta bit any more, so the flag is inert.
+        // The FIELD stays: FrameConstants is append-only by house discipline.
+        m_FrameConstants.bakedGIUseFilled          = 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
         FillEfbBallConstants();
@@ -888,8 +888,7 @@ void Application::Render()
         // The sun states are baked for every hour, so the bake needs no direction
         // from the UI: each state's direction comes from
         // BakedGI::SunDirectionAtHourCPU and the RNG seed from the state index.
-        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing,
-                                                   (uint32_t)std::max(0, m_BakedGIDilationIterations));
+        const bool baked = m_Renderer.BakeGIProbes(&m_Model, m_BakedGISpacing);
         // Trigger 2: a completed bake rewrote the tables, so the resident lit
         // table describes the previous one. Fold again on the next opportunity.
         // A failed bake leaves the tables alone, and the fold gate already checks
@@ -2061,45 +2060,6 @@ void Application::RenderImGui()
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Grid spacing used by the next \"Rebuild GI Probes\" (auto-grows to fit the probe cap).");
 
-                ImGui::InputInt("Dilation Iterations", &m_BakedGIDilationIterations);
-                m_BakedGIDilationIterations = std::max(0, m_BakedGIDilationIterations);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Six-neighbor transport dilation for the next bake.\n"
-                                      "One iteration is the default.\n"
-                                      "Zero disables dilation and allocates no dilation buffers.\n"
-                                      "Positive counts fill invalid probes from valid or earlier filled neighbors.\n"
-                                      "The bake clamps the count to the grid's Manhattan diameter.");
-
-                ImGui::SameLine();
-                if (ImGui::Checkbox("Use Dilated Transport (A/B)", &m_BakedGIUseDilatedTransport))
-                {
-                    BakedGI& abGI = m_Renderer.GetBakedGI();
-                    abGI.SetUseDilatedTransport(m_BakedGIUseDilatedTransport);
-                    m_ProbeFoldWanted = true;
-                    m_ProbeFoldHour = -1.0f;
-                    m_FrameConstants.bakedGIUseFilled = abGI.IsUsingDilatedTransport() ? 1u : 0u;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Runtime A/B selection. It does not trigger a bake.\n"
-                                      "Dilated uses the separate bake-time dilation tables and admits FILLED probes.\n"
-                                      "Raw uses the raw tables and ignores FILLED probes in runtime receiver cages.\n"
-                                      "A positive bake keeps this selection. Zero iterations always use raw transport.");
-
-                {
-                    const BakedGI& abGI = m_Renderer.GetBakedGI();
-                    const bool tablesResident = abGI.HasDilatedTransport();
-                    const char* runtimeSource = abGI.IsUsingDilatedTransport()
-                                              ? "Dilated"
-                                              : (tablesResident ? "Raw A/B" : "Raw (no dilation tables)");
-                    ImGui::Text("Runtime transport: %s", runtimeSource);
-                    if (abGI.IsValid())
-                        ImGui::Text("Last bake dilation: %u iterations", abGI.GetDilationIterations());
-                    if (!tablesResident)
-                    {
-                        ImGui::TextDisabled("The current bake has no dilation tables. Zero always uses raw transport.");
-                    }
-                }
-
                 // --- Sky visibility: which V the sky fold multiplies ---
                 // Two entries. SH9 is the 9-coefficient projection of the sky
                 // visibility from the visibility rays, and it is the default.
@@ -2506,7 +2466,6 @@ void Application::RenderImGui()
                                       "BLUE = newly bad: the old 1cm test said valid, DDGI's rule\n"
                                       "(>= 25% backfaces among 32 stable rays) kills it.\n"
                                       "Yellow = newly valid (old test killed it, DDGI keeps it).\n"
-                                      "Cyan = FILLED: invalid origin with donor-backed runtime transport.\n"
                                       "Lit Irradiance: SH ball per probe — each sphere point evaluates the probe's lit SH9 at its own normal (directional structure of the baked+lit field).\n"
                                       "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
                                       "sky = sky bounces + occluded sky direct (V-gated), sun = sun bounces only (direct sun never enters probes).\n"
@@ -2517,7 +2476,6 @@ void Application::RenderImGui()
                                       "blocked), raw and un-gained. Red = invalid probe. Nothing draws when the current bake\n"
                                       "holds no SH9 data. The DC term alone is the sphere MEAN, not the display value.\n"
                                       "Ray Fan: the 64 gather rays of ONE delta record of one probe (the Ray Debug Probe above), as thin boxes.\n"
-                                      "Ray Fan stays raw when runtime dilation fills the selected probe.\n"
                                       "  The record is the one the last dump replayed: the sun hour state (Ray Debug Source Sun) or\n"
                                       "  one of the 16 fibonacci sky bins (Ray Debug Source Sky, which records ALL 16 in one\n"
                                       "  dump). The line under the channel combo names the record on screen.\n"
@@ -2535,7 +2493,6 @@ void Application::RenderImGui()
                                       "the Efb term added, and where. The ball's DC reads as the feedback's share of that term's\n"
                                       "transport. Term 1 is black by construction: the bake gates feedback off there. Needs a bake\n"
                                       "from the dispatch path; a Probes/ cache load has no per-term tables and draws nothing.\n"
-                                      "Efb stays raw and VALID-only when runtime dilation fills a probe.\n"
                                       "Cage Trace: ONE probe (the Ray Debug Probe above). It derives the chain — the record\n"
                                       "group on screen (the sun hour state, or the displayed sky bin), that record's largest\n"
                                       "FEEDBACK-DOMINATED ray (a shaded ray whose Efb term\n"
@@ -2803,7 +2760,7 @@ void Application::RenderImGui()
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.15f, 1.0f));
                             ImGui::TextWrapped("Warning: the dumped probe is INVALID. Channels 4 "
                                                "(Efb) and 6 (Direct vs Efb) are degenerate and drawn "
-                                               "dimmed. Runtime FILLED data does not change this raw replay.");
+                                               "dimmed.");
                             ImGui::PopStyleColor();
                         }
 

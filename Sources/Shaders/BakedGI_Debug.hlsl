@@ -1167,7 +1167,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN ||
         mode == BAKED_GI_DEBUG_EFB || mode == BAKED_GI_DEBUG_SKYVIS)
     {
-        // Lit views show donor-backed runtime data. Efb remains a raw bake view
+        // Lit views show the probes the runtime fetch admits (VALID; the
+        // FILLED donor path is retired). Efb remains a raw bake view
         // and admits only geometrically valid probes. Sky Visibility draws EVERY
         // probe: an invalid probe is a red ball, which is the whole point of the
         // view, so it is not gated here.
@@ -1357,12 +1358,9 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const uint  m         = metaWord;
     const bool  ddgiValid = (m & BAKED_GI_META_VALID)     != 0u;
     const bool  oldValid  = (m & BAKED_GI_META_OLD_VALID) != 0u;
-    const bool  filled    = (m & BAKED_GI_META_FILLED)    != 0u;
     if (ddgiValid)
         o.color = oldValid ? float4(0.1f, 0.9f, 0.2f, 1.0f)   // valid under both
                            : float4(0.9f, 0.9f, 0.2f, 1.0f);  // newly valid (old test killed it)
-    else if (filled)
-        o.color = float4(0.1f, 0.85f, 0.95f, 1.0f);            // donor-backed runtime data
     else
         o.color = oldValid ? float4(0.2f, 0.4f, 1.0f, 1.0f)   // NEWLY BAD (old test kept it)
                            : float4(0.95f, 0.15f, 0.15f, 1.0f); // bad under both

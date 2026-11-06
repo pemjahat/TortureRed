@@ -34,7 +34,6 @@
 //                            batchIndex 76, Size 80
 //   BakedGIRayDebugParams (BakedGI_RayDebug.hlsl): seedDir 56, sunState 60,
 //                            source 64, Size 68
-//   BakedGIDilationParams (BakedGI_Dilate.hlsl): writeMeta 36, Size 40
 // Every field in these blocks is a 4-byte scalar, so these are plain cumulative
 // sums; the guards exist to catch a field inserted in the middle.
 // =============================================================================
@@ -64,12 +63,6 @@ static_assert(offsetof(BakedGIRayDebugParams, seedDir)         == 56, "ray-debug
 static_assert(offsetof(BakedGIRayDebugParams, sunState)        == 60, "ray-debug params: sunState moved");
 static_assert(offsetof(BakedGIRayDebugParams, source)          == 64, "ray-debug params: source moved");
 static_assert(sizeof(BakedGIRayDebugParams)                    == 68, "ray-debug params: size changed");
-
-static_assert(offsetof(BakedGIDilationParams, recordCount)     == 16, "dilation params: recordCount moved");
-static_assert(offsetof(BakedGIDilationParams, tableSRVIdx)     == 20, "dilation params: table SRV moved");
-static_assert(offsetof(BakedGIDilationParams, metaSRVIdx)      == 28, "dilation params: meta SRV moved");
-static_assert(offsetof(BakedGIDilationParams, writeMeta)       == 36, "dilation params: writeMeta moved");
-static_assert(sizeof(BakedGIDilationParams)                    == 40, "dilation params: size changed");
 
 // -----------------------------------------------------------------------------
 // Sky-visibility SH9 normalization (the A/B's other V source).
@@ -144,7 +137,7 @@ static_assert(BakedGI::kRayDebugBufF4s    == 8336u, "ray debug: buffer float4 co
 static_assert(BakedGI::kRayDebugBufBytes  == 133376u, "ray debug: buffer size moved");
 static_assert(BakedGI::kRayDebugReadbackBytes == 135680u, "ray debug: readback size moved");
 // The response record shrank from 10 float4 to 9 when the cone visibility left
-// slot 9. The stride is read by the bake, the dilation, the term fold, the ray
+// slot 9. The stride is read by the bake, the term fold, the ray
 // debug and the CPU readback, so a regression must fail somewhere that names it.
 static_assert(BakedGI::kResponseFloat4s == 9u, "response record: stride changed");
 static_assert(BakedGI::kRayDebugTableBytes == 2304u, "ray debug: stored table size moved");
@@ -167,6 +160,12 @@ static_assert((uint32_t)BakedGI::SkyVisMode::NoVisibility == 1u, "sky visibility
 static_assert(BakedGI::kPhotonCap == BAKED_GI_PHOTON_CAP, "photon map: capacity mirror changed");
 static_assert(BakedGI::kPhotonF4  == BAKED_GI_PHOTON_F4,  "photon map: record stride mirror changed");
 static_assert(BakedGI::kPhotonNoSRV == 0xFFFFFFFFu, "photon map: sentinel changed");
+// The ray-debug replay reproduces the FINAL transport iteration's gather and
+// assumes it is GUIDED (BakedGI_RayDebug.hlsl builds a guide unconditionally).
+// Iterations > 0 are guided (BakedGI_Bake.hlsl), so this holds while at least
+// two iterations run. One iteration would leave the replay tracing a uniform
+// stream against a stored table it can no longer match.
+static_assert(BakedGI::kBakeIterations >= 2, "guided gather: the replay needs the final iteration guided");
 
 // =============================================================================
 // Probes/ disk cache — the ShaderCache pattern applied to the bake outputs.
@@ -175,14 +174,16 @@ namespace
 {
 
 constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
-// Version 2 added the 17 sun states. Version 3 appends the actual dilation
-// count and, for a positive count, the final dilated sky and sun tables.
-// Version 4 drops the tenth float4 of both response tables: the record is 9
+// Version 2 added the 17 sun states. Version 3 appended the dilation sections.
+// Version 4 dropped the tenth float4 of both response tables: the record is 9
 // float4 now, so a version-3 payload is the wrong length and its strides are
 // wrong. Older files cannot restore the runtime data this build requires.
-// Version 5 changes the estimator to eight rotated fibonacci batches. Reject
-// older files so a cache load cannot silently bypass the new sampling.
-constexpr uint32_t kProbeCacheVersion = 5;
+// Version 5 changed the estimator to eight rotated fibonacci batches. Version
+// 6 changed the gather sampler to the guided mixture, whose RNG stream the
+// ray-debug replay depends on. Version 7 REMOVES the bake-time dilation
+// feature: the dilated payload sections and the header's dilation count are
+// gone, so older files are the wrong length. Reject older files.
+constexpr uint32_t kProbeCacheVersion = 7;
 
 #pragma pack(push, 4)
 struct ProbeCacheHeader
@@ -203,15 +204,11 @@ struct ProbeCacheHeader
     // table of the wrong directions. Nothing else in this header detects that.
     uint32_t sunStates; // BakedGI::kSunStates at write time
     float    sunUpCos;  // the authored sun's Y component the directions derive from
-
-    // Appended for version 3. Positive counts append the two final dilated
-    // tables after the raw sun table. The final meta section contains FILLED.
-    uint32_t dilationIterations;
 };
 #pragma pack(pop)
 
-// 14 fields of 4 bytes, no padding under pack(4).
-static_assert(sizeof(ProbeCacheHeader) == 56, "cache header: fields are 4-byte, no padding expected");
+// 13 fields of 4 bytes, no padding under pack(4).
+static_assert(sizeof(ProbeCacheHeader) == 52, "cache header: fields are 4-byte, no padding expected");
 
 // FNV-1a 64 over a byte range. Used ONLY for the sun-table round-trip check: two
 // runs of the app print one hash each, and equal hashes prove that the file
@@ -395,20 +392,6 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
         }
     }
 
-    // --- Bake-time transport dilation (compute) ---
-    {
-        std::cout << "[BakedGI] compiling dilation shader..." << std::endl;
-        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
-        computeDesc.pRootSignature = rootSignature;
-        auto cs = GraphicsHelper::CompileShader("Shaders/BakedGI_Dilate.hlsl", "main", "cs_6_6");
-        std::cout << "[BakedGI] dilation shader: " << (cs.empty() ? "FAILED" : "ok") << std::endl;
-        if (!cs.empty())
-        {
-            computeDesc.CS = { cs.data(), cs.size() };
-            device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_DilatePSO));
-        }
-    }
-
     // --- First-bounce photon-map emit (compute, on demand, debug-first) ---
     {
         std::cout << "[BakedGI] compiling photon emit shader..." << std::endl;
@@ -432,7 +415,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
                          D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
                          D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
                          D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
-                         float spacing, uint32_t dilationIterations)
+                         float spacing)
 {
     if (!device || !cmdList || !rootSignature || !model || !m_BakePSO)
         return false;
@@ -446,26 +429,6 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // The sun table belongs to the previous bake's sun and grid. Clear the flag
     // first, so an early return cannot leave a stale sun table readable.
     m_SunResponseValid = false;
-    // Dilation resources belong to one positive-count bake. Release them even
-    // on a zero-count request, but retain descriptor slots for the next bake.
-    // The descriptor heap has no free operation. Assigning {} here would leak slots.
-    auto releaseDilationBuffer = [](GPUBuffer& buffer)
-    {
-        buffer.resource.Reset();
-        buffer.size = 0;
-        buffer.state = D3D12_RESOURCE_STATE_COMMON;
-        buffer.cpuPtr = nullptr;
-        buffer.gpuAddress = 0;
-    };
-    m_DilatedTransportValid = false;
-    m_DilationIterations = 0;
-    m_FinalDilatedResponse = 0;
-    m_FinalDilatedSunResponse = 0;
-    releaseDilationBuffer(m_DilatedResponse[0]);
-    releaseDilationBuffer(m_DilatedResponse[1]);
-    releaseDilationBuffer(m_DilatedSunResponse[0]);
-    releaseDilationBuffer(m_DilatedSunResponse[1]);
-    releaseDilationBuffer(m_DilationMeta);
     // The per-term capture is produced by the dispatch path below. Cleared here
     // so the cache-load early return cannot leave a previous bake's balls
     // standing as if they described this grid.
@@ -507,15 +470,6 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     m_GridMin = mn;
     m_Valid = false; // set at the end; the buffers below are the source of truth
 
-    // Beyond the Manhattan diameter no axial iteration can reach a new cell.
-    const uint32_t dilationDiameter = (m_DimX - 1u) + (m_DimY - 1u) + (m_DimZ - 1u);
-    m_DilationIterations = std::min(dilationIterations, dilationDiameter);
-    if (dilationIterations != 0u && !m_DilatePSO)
-    {
-        std::cerr << "[BakedGI] Dilation requested but the dilation PSO is missing" << std::endl;
-        return false;
-    }
-
     // The grid identity is (re)established. Bumped here rather than on the
     // success path so the cache-load early return below is covered too: both
     // paths end up with this grid. A bump on a bake that later fails only costs
@@ -533,8 +487,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
               << kBakeGatherBatches << " batches x " << kBakeGatherRays
               << " rotated fibonacci rays (" << (kBakeGatherBatches * kBakeGatherRays)
               << " total) for each of " << kDirections << " directions"
-              << " + " << kSunStates << " sun hour-state passes, "
-              << m_DilationIterations << " dilation iterations)"
+              << " + " << kSunStates << " sun hour-state passes)"
               << " — world " << (mx.x - mn.x) << "x" << (mx.y - mn.y) << "x" << (mx.z - mn.z) << "m" << std::endl;
 
     // --- Probes/ disk cache: on a hit (file exists + grid header matches),
@@ -554,8 +507,6 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     std::cout << "[BakedGI] sky-visibility SH9 buffer: " << GetSkyVisSHBytes() << " B ("
               << kSkyVisSHCoeffs * sizeof(float) << " B for each probe, "
               << m_ProbeCount << " probes)" << std::endl;
-    if (m_DilationIterations != 0u && !CreateDilationBuffers())
-        return false;
 
     // Debug-only capture buffers (term snapshots + folded balls). A failure here
     // does not void the bake: the capture is a debug aid, so record without it
@@ -739,13 +690,8 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         m_EfbBallsValid = true;
     }
 
-    // Dilation runs only after all raw transport iterations and raw debug folds.
-    // It writes separate runtime tables and never modifies a raw response pair.
-    if (m_DilationIterations != 0u && !RecordDilation(cmdList))
-    {
-        m_Valid = false;
-        return false;
-    }
+    // Dilation was removed (2026-11-06): dead probes' cells rarely enter a
+    // receiver's trilinear cage, so donor-filled data was never fetched.
 
     // ---- Sky-visibility SH9: leave the write state ONCE, on the bake list ----
     //
@@ -810,16 +756,13 @@ void BakedGI::LogBakeStats() const
     }
 
     uint32_t ddgiValid = 0, oldValid = 0, newlyBad = 0, newlyValid = 0;
-    uint32_t deadBackface = 0, deadFar = 0, filled = 0, unfilled = 0;
+    uint32_t deadBackface = 0, deadFar = 0;
     for (uint32_t i = 0; i < m_ProbeCount; ++i)
     {
         const uint32_t m = meta[i];
         const bool v  = (m & 0x1u) != 0; // BAKED_GI_META_VALID (DDGI criteria)
         const bool ov = (m & 0x2u) != 0; // BAKED_GI_META_OLD_VALID (1cm test)
-        const bool f  = (m & 0x10u) != 0; // BAKED_GI_META_FILLED (donor-backed data)
         ddgiValid += v ? 1u : 0u;
-        filled    += f ? 1u : 0u;
-        unfilled  += (!v && !f) ? 1u : 0u;
         oldValid  += ov ? 1u : 0u;
         newlyBad   += (!v && ov) ? 1u : 0u;
         newlyValid += (v && !ov) ? 1u : 0u;
@@ -838,8 +781,6 @@ void BakedGI::LogBakeStats() const
     std::cout << "[BakedGI] Criteria swap flips: " << newlyBad
               << " valid -> BAD (blue in placement view), " << newlyValid
               << " bad -> valid (yellow)" << std::endl;
-    std::cout << "[BakedGI] Dilation (" << m_DilationIterations << " iterations): "
-              << filled << " filled, " << unfilled << " invalid and unfilled" << std::endl;
 }
 
 // -----------------------------------------------------------------------------
@@ -2455,106 +2396,6 @@ bool BakedGI::CreateProbeBuffers()
     return true;
 }
 
-bool BakedGI::CreateDilationBuffers()
-{
-    const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
-    const uint64_t sunElems = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s;
-
-    // A positive/zero/positive bake sequence must reuse every descriptor slot.
-    // First allocation assigns slots. Later allocations retain the same values.
-    auto createDilationBuffer = [](GPUBuffer& buffer, uint64_t elementSize,
-                                   uint64_t elementCount, const char* debugName)
-    {
-        const int previousSrv = buffer.srvIndex;
-        const int previousUav = buffer.uavIndex;
-        const int previousCpuUav = buffer.cpuUavIndex;
-        if (!CreateStructuredBuffer(buffer, elementSize, elementCount,
-                                    D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, debugName))
-        {
-            return false;
-        }
-        assert((previousSrv < 0 || buffer.srvIndex == previousSrv) &&
-               (previousUav < 0 || buffer.uavIndex == previousUav) &&
-               buffer.cpuUavIndex == previousCpuUav);
-        return true;
-    };
-
-    if (!createDilationBuffer(m_DilatedResponse[0], sizeof(float) * 4, responseElems, "SB_BakedGIDilated0") ||
-        !createDilationBuffer(m_DilatedResponse[1], sizeof(float) * 4, responseElems, "SB_BakedGIDilated1") ||
-        !createDilationBuffer(m_DilatedSunResponse[0], sizeof(float) * 4, sunElems, "SB_BakedGIDilatedSun0") ||
-        !createDilationBuffer(m_DilatedSunResponse[1], sizeof(float) * 4, sunElems, "SB_BakedGIDilatedSun1") ||
-        !createDilationBuffer(m_DilationMeta, sizeof(uint32_t), m_ProbeCount, "SB_BakedGIDilationMeta"))
-    {
-        std::cerr << "[BakedGI] Failed to create dilation buffers" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-bool BakedGI::RecordDilation(ID3D12GraphicsCommandList* cmdList)
-{
-    if (m_DilationIterations == 0u)
-        return true;
-    if (!cmdList || !m_DilatePSO || !m_DilationMeta.resource ||
-        !m_DilatedResponse[0].resource || !m_DilatedResponse[1].resource ||
-        !m_DilatedSunResponse[0].resource || !m_DilatedSunResponse[1].resource)
-    {
-        return false;
-    }
-
-    GPUBuffer* metaSource = &m_Meta;
-    GPUBuffer* metaDest   = &m_DilationMeta;
-    for (uint32_t it = 0; it < m_DilationIterations; ++it)
-    {
-        const uint32_t dst = it & 1u;
-        const uint32_t src = 1u - dst;
-        const GPUBuffer& skySource = (it == 0u) ? m_Response[m_FinalResponse]
-                                                : m_DilatedResponse[src];
-        const GPUBuffer& sunSource = (it == 0u) ? m_SunResponse[m_FinalSunResponse]
-                                                : m_DilatedSunResponse[src];
-
-        BakedGIDilationParams p = {};
-        p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
-        p.probeCount = m_ProbeCount;
-        p.recordCount = kDirections;
-        p.tableSRVIdx = (uint32_t)skySource.srvIndex;
-        p.tableUAVIdx = (uint32_t)m_DilatedResponse[dst].uavIndex;
-        p.metaSRVIdx = (uint32_t)metaSource->srvIndex;
-        p.metaUAVIdx = (uint32_t)metaDest->uavIndex;
-        p.writeMeta = 1u;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIDilationParams) / 4, &p, 0);
-        cmdList->SetPipelineState(m_DilatePSO.Get());
-        cmdList->Dispatch((m_ProbeCount + 63u) / 64u, kDirections, 1);
-
-        BakedGIDilationParams sp = p;
-        sp.recordCount = kSunStates;
-        sp.tableSRVIdx = (uint32_t)sunSource.srvIndex;
-        sp.tableUAVIdx = (uint32_t)m_DilatedSunResponse[dst].uavIndex;
-        sp.writeMeta = 0u;
-        cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIDilationParams) / 4, &sp, 0);
-        cmdList->Dispatch((m_ProbeCount + 63u) / 64u, kSunStates, 1);
-
-        D3D12_RESOURCE_BARRIER barriers[3] = {
-            CD3DX12_RESOURCE_BARRIER::UAV(m_DilatedResponse[dst].resource.Get()),
-            CD3DX12_RESOURCE_BARRIER::UAV(m_DilatedSunResponse[dst].resource.Get()),
-            CD3DX12_RESOURCE_BARRIER::UAV(metaDest->resource.Get()),
-        };
-        cmdList->ResourceBarrier(3, barriers);
-        m_FinalDilatedResponse = dst;
-        m_FinalDilatedSunResponse = dst;
-        std::swap(metaSource, metaDest);
-    }
-
-    // Keep the public meta resource final on both parities. The other resource
-    // becomes scratch and retains no separate runtime consumer.
-    if (metaSource != &m_Meta)
-        std::swap(m_Meta, m_DilationMeta);
-    m_DilatedTransportValid = true;
-    std::cout << "[BakedGI] Dilation recorded (" << m_DilationIterations
-              << " iterations, separate runtime tables)" << std::endl;
-    return true;
-}
-
 // Debug-only capture, created on the dispatch path only: the term snapshots and
 // the folded per-probe response balls that the "Efb Contribution" view reads.
 //
@@ -2664,7 +2505,7 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         return false;
 
     // The version test comes FIRST and it logs. An older file cannot restore the
-    // raw and dilated data this build needs. A silent rejection would look like
+    // data this build needs. A silent rejection would look like
     // a missing file and cost a session.
     if (h.magic != kProbeCacheMagic)
         return false;
@@ -2672,7 +2513,7 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     {
         std::cout << "[BakedGI] Probe cache REJECTED: version " << h.version
                   << ", this build writes and reads version " << kProbeCacheVersion
-                  << " (raw and dilated transport layout). Delete "
+                  << " (raw transport layout). Delete "
                   << cachePath.string() << " and bake again." << std::endl;
         return false;
     }
@@ -2683,12 +2524,6 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         std::fabs(h.gridMinY - m_GridMin.y) > 1e-4f ||
         std::fabs(h.gridMinZ - m_GridMin.z) > 1e-4f)
     {
-        return false;
-    }
-    if (h.dilationIterations != m_DilationIterations)
-    {
-        std::cout << "[BakedGI] Probe cache REJECTED: dilation count " << h.dilationIterations
-                  << " does not match requested count " << m_DilationIterations << std::endl;
         return false;
     }
     // The 17 state directions are one function of the authored sun's vertical
@@ -2703,17 +2538,14 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         return false;
     }
 
-    // Payload order: raw response | meta | vis | raw sun. Positive counts append
-    // final dilated response | final dilated sun. No scratch table is serialized.
+    // Payload order: raw response | meta | vis | raw sun. No scratch table is
+    // serialized.
     const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
     const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t dilatedResponseOffset = sunOffset + sunBytes;
-    const uint64_t dilatedSunOffset = dilatedResponseOffset + responseBytes;
-    const uint64_t total = dilatedResponseOffset
-                         + ((m_DilationIterations != 0u) ? responseBytes + sunBytes : 0u);
+    const uint64_t total = sunOffset + sunBytes;
 
     std::vector<char> blob(static_cast<size_t>(total));
     in.read(blob.data(), static_cast<std::streamsize>(total));
@@ -2730,18 +2562,11 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     // needs it.
     if (!CreateProbeBuffers())
         return false;
-    if (m_DilationIterations != 0u && !CreateDilationBuffers())
-        return false;
     m_FinalResponse = h.finalResponse;
     // The cache carries no sky-visibility SH9 section, so the buffer created
     // above holds undefined bytes. Mark it invalid: the fold then zeroes V and
     // the UI reports SH9 as unavailable, instead of reading a NaN field.
     m_SkyVisSHValid = false;
-    if (m_DilationIterations != 0u)
-    {
-        m_FinalDilatedResponse = (m_DilationIterations - 1u) & 1u;
-        m_FinalDilatedSunResponse = m_FinalDilatedResponse;
-    }
 
     // One UPLOAD staging buffer for every section — kept alive as a member until
     // the next bake (the recorded list outlives this call).
@@ -2766,17 +2591,12 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     }
 
     struct Copy { GPUBuffer* dst; uint64_t offset; uint64_t bytes; };
-    std::vector<Copy> copies = {
+    const std::vector<Copy> copies = {
         { &m_Response[m_FinalResponse], 0,             responseBytes },
         { &m_Meta,                      responseBytes, metaBytes     },
         { &m_Visibility,                responseBytes + metaBytes, visBytes },
         { &m_SunResponse[m_FinalResponse], sunOffset,  sunBytes      },
     };
-    if (m_DilationIterations != 0u)
-    {
-        copies.push_back({ &m_DilatedResponse[m_FinalDilatedResponse], dilatedResponseOffset, responseBytes });
-        copies.push_back({ &m_DilatedSunResponse[m_FinalDilatedSunResponse], dilatedSunOffset, sunBytes });
-    }
     for (const Copy& c : copies)
     {
         c.dst->Transition(cmdList, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -2789,7 +2609,6 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     // method-change path also treats the resident table as missing and rebakes.
     m_FinalSunResponse = m_FinalResponse;
     m_SunResponseValid = (m_SunResponse[0].resource != nullptr);
-    m_DilatedTransportValid = (m_DilationIterations != 0u);
 
     m_LoadedFromCache = true;
     m_Valid = true;
@@ -2821,20 +2640,13 @@ bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandLis
                   << std::endl;
         return false;
     }
-    if (m_DilationIterations != 0u && !m_DilatedTransportValid)
-    {
-        std::cout << "[BakedGI] Probe cache NOT written: dilated tables are unavailable" << std::endl;
-        return false;
-    }
 
     const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
     const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t dilatedResponseOffset = sunOffset + sunBytes;
-    const uint64_t total = dilatedResponseOffset
-                         + ((m_DilationIterations != 0u) ? responseBytes + sunBytes : 0u);
+    const uint64_t total = sunOffset + sunBytes;
 
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_READBACK;
@@ -2848,21 +2660,16 @@ bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandLis
     }
     GraphicsHelper::SetObjectName(m_CacheReadback.Get(), "RB_BakedGICache");
 
-    // Raw response | meta | vis | raw sun occupy the base payload. Positive
-    // counts append the final dilated response and dilated sun. TryLoadCache and
-    // WriteCacheFile use the same offsets. Keep all three places in step.
+    // Raw response | meta | vis | raw sun are the whole payload.
+    // TryLoadCache and WriteCacheFile use the same offsets. Keep all three
+    // places in step.
     struct Copy { GPUBuffer* src; uint64_t dstOffset; uint64_t bytes; };
-    std::vector<Copy> copies = {
+    const std::vector<Copy> copies = {
         { &m_Response[m_FinalResponse],    0,             responseBytes },
         { &m_Meta,                         responseBytes, metaBytes     },
         { &m_Visibility,                   responseBytes + metaBytes, visBytes },
         { &m_SunResponse[m_FinalSunResponse], sunOffset,  sunBytes      },
     };
-    if (m_DilationIterations != 0u)
-    {
-        copies.push_back({ &m_DilatedResponse[m_FinalDilatedResponse], dilatedResponseOffset, responseBytes });
-        copies.push_back({ &m_DilatedSunResponse[m_FinalDilatedSunResponse], dilatedResponseOffset + responseBytes, sunBytes });
-    }
     for (const Copy& c : copies)
     {
         c.src->Transition(cmdList, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2893,16 +2700,13 @@ void BakedGI::WriteCacheFile(const std::string& scenePath)
     // well-formed table of the wrong directions, and nothing reports it.
     h.sunStates = kSunStates;
     h.sunUpCos  = (float)kEquinoxSunY;
-    h.dilationIterations = m_DilationIterations;
 
     const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
     const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t dilatedResponseOffset = sunOffset + sunBytes;
-    const uint64_t total = dilatedResponseOffset
-                         + ((m_DilationIterations != 0u) ? responseBytes + sunBytes : 0u);
+    const uint64_t total = sunOffset + sunBytes;
 
     uint8_t* mapped = nullptr;
     if (FAILED(m_CacheReadback->Map(0, nullptr, reinterpret_cast<void**>(&mapped))))
@@ -2928,13 +2732,6 @@ void BakedGI::WriteCacheFile(const std::string& scenePath)
               static_cast<std::streamsize>(visBytes));
     out.write(reinterpret_cast<const char*>(mapped + sunOffset),
               static_cast<std::streamsize>(sunBytes));
-    if (m_DilationIterations != 0u)
-    {
-        out.write(reinterpret_cast<const char*>(mapped + dilatedResponseOffset),
-                  static_cast<std::streamsize>(responseBytes));
-        out.write(reinterpret_cast<const char*>(mapped + dilatedResponseOffset + responseBytes),
-                  static_cast<std::streamsize>(sunBytes));
-    }
 
     // The round-trip hook. Hashed from the SAME bytes that were just written, so
     // a load-side hash that differs proves a transport or ordering fault rather
