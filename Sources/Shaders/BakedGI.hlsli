@@ -9,12 +9,11 @@
 //   bake stores the INDIRECT-ONLY directional-irradiance SH9 RGB response to a
 //   unit delta light at W_i. One record holds 9 float4 and nothing else — there
 //   is no visibility scalar in it. The 16 records are the SKY quadrature basis:
-//     e_sky = sum_i wq * L_sky(W_i) * [ R_i  +  A_l Y_lm(W_i) V(W_i) ]
-//             (sky bounces)              (occluded first-bounce sky)
-//   V(W_i) is the DIRECT sky visibility. It comes from one per-probe raw SH9
-//   field, BAKED_GI_SKYVIS_SH, which the visibility pass projects from the same
-//   1024 rays it traces for the depth moments. The fold reconstructs that field
-//   at W_i. Nothing per-bin is stored for it.
+//     e_sky = sum_i wq * L_sky(W_i) * R_i          (sky bounces — the fold)
+//   The occluded first-bounce sky (the old A_l Y_lm(W_i) V(W_i) term) is
+//   FETCH-SIDE since option A: the runtime fetch blends the probes' per-bin
+//   sky visibility (the visibility bake's bin fractions) with the receiver's
+//   cage weights and folds it through the fold's ambient matrix.
 //   Per probe and per SUN HOUR STATE k (17 states along the equinox arc), the
 //   bake stores the same kind of response for a unit light at the sun's direction
 //   at hour 6 + 0.75 k. The fold interpolates TWO of them:
@@ -440,47 +439,14 @@ float3 BakedGIGuideSample(BakedGIGuide g, inout RNG rng, out float weight)
 #define BAKED_GI_VIS_DISPATCH_X 4096u // visibility-bake dispatch X tile (C++ mirrors this)
 
 // ---------------------------------------------------------------------------
-// SKY-VISIBILITY SH9 — the ONE source of the V in the runtime fold's
-// `A_l Y_lm(W_i) V(W_i)` term.
-//
-// This buffer holds 9 RAW SH9 coefficients for each probe, projected from the
-// SAME 16x16x4 = 1024 visibility rays the moment map already traces, so it adds
-// no traversal and no ray budget:
-//
-//     L_lm = (4pi / 1024) * sum_s V_s * Y_lm(d_s)     V_s binary, 0 or 1
-//
-// This field costs no shadow ray and carries the whole visibility field, so the
-// fold either reconstructs it or zeros V — there is no third source.
-//
-// NO cosine A_l factor and NO normalisation by Y00: the runtime fold multiplies
-// V by a per-bin response, so it needs the visibility FIELD, and not an
-// irradiance. Reconstruct with plain EvalSH9Basis and clamp to [0, 1].
-//
-// WHY THE CLAMP IS MANDATORY. A band-limited reconstruction overshoots. The
-// sun-visibility thread measured a band-2 fit of a visibility field leaving
-// [0, 1] by +28 percent (ARCHITECTURE-TortureRed-Visibility: "A normalised
-// kernel is a convex combination; an SH projection is a reconstruction"). A mean
-// cannot leave [0, 1]. This field can, so the fold clamps it back into the range
-// the quantity must stay in.
-//
-// Accumulation is an equal-weight mean over the sample distribution, so a fully
-// open probe reconstructs to exactly 1: (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2
-// = 1. The octahedral sample density is not exactly uniform in solid angle, so
-// the fit is a low-order approximation of the field.
-//
-// WHAT TO EXPECT FROM THIS FIELD. Band 2 resolves about two to three bins, so a
-// LOCALISED aperture spreads over its neighbours instead of staying in one bin.
-// A CPU mirror of this projection reports a 20-degree aperture on one bin axis
-// as 0.40 on that bin and 0.14 on a neighbour. A ground plane reads 0.45..0.59
-// across the low bins. Smoothing of that size is the expected behaviour of a
-// band-2 field, not a defect.
-//
-// MEMORY. 9 floats = 36 B for each probe. 418,176 B at 11,616 probes and
-// 4.72 MB at the 131,072-probe cap. It is a bake output, not a per-frame
-// payload: the fold reads 36 B for each probe on a fold frame and nothing on a
-// clean one.
+// SKY-VISIBILITY SH9 — RETIRED 2026-11-06. The fold's per-probe V term is gone
+// (option A: the sky ambient is fetch-side, blended per receiver with the cage
+// weights through the per-BIN fractions and the fold's ambient matrix), so the
+// raw SH9 field and its V debug view had no consumer left. The buffer, its
+// projection in the visibility bake and view 3 are deleted; FrameConstants::
+// bakedGISkyVisSRVIndex stays as a permanently inert field (append-only
+// discipline). The per-bin fractions live in the visibility bake's bin buffer.
 // ---------------------------------------------------------------------------
-#define BAKED_GI_SKYVIS_SH_COEFFS 9u
 
 // --- Octahedral mapping (unit direction <-> [0,1]^2), Y-up on the xz plane ---
 float2 BakedGISignNotZero(float2 v)
@@ -715,9 +681,20 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
     for (uint k1 = 0; k1 < 8; ++k1) { sumFull += wFull[k1]; sumBF += wBF[k1]; }
     const uint tier = (sumFull > 1e-4f) ? 2u : ((sumBF > 1e-4f) ? 1u : 0u);
 
-    // Pass 2 — blend SH coefficients with the selected tier's weights.
+    // Pass 2 — blend SH coefficients with the selected tier's weights. The
+    // sky-ambient bins (option A) ride the SAME weights: each cage member
+    // contributes its per-bin visibility exactly where it contributes its
+    // bounce, so the ambient inherits the tier's leak gating by construction.
     float3 coef[9] = (float3[9])0;
     float  wsum = 0.0f;
+    // Ambient inputs, declared before the uniform branch so every lane of the
+    // wave agrees they exist. The ambient is UNCONDITIONAL (2026-11-06: the
+    // mode toggle is gone) — the gate is DATA PRESENCE alone: both SRVs
+    // non-sentinel (bins resident and the first fold wrote the matrix). The
+    // sentinels are per-frame constants, so the branch never diverges.
+    const bool ambientOn = (FrameCB.bakedGIVisBinsSRVIndex != 0xFFFFFFFFu) &&
+                           (FrameCB.bakedGIAmbientMatrixSRVIndex != 0xFFFFFFFFu);
+    float vblend[BAKED_GI_DIRECTIONS] = (float[BAKED_GI_DIRECTIONS])0;
     [unroll]
     for (uint k2 = 0; k2 < 8; ++k2)
     {
@@ -729,11 +706,45 @@ float3 SampleBakedGIProbeFrom(uint litSrvIndex, float3 worldPos, float3 N, float
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
             coef[lm] += lit[flat * 9u + lm].rgb * w;
+        if (ambientOn)
+        {
+            // SB_BakedGISkyVisBins (the visibility bake writes it; the fold's
+            // BakedGI.cpp end-of-bake transition leaves it in PIXEL|NON_PIXEL).
+            StructuredBuffer<float> visBins = ResourceDescriptorHeap[FrameCB.bakedGIVisBinsSRVIndex];
+            [unroll]
+            for (uint b = 0u; b < BAKED_GI_DIRECTIONS; ++b)
+                vblend[b] += visBins[flat * 16u + b] * w;
+        }
         wsum += w;
     }
 
     if (wsum < 1e-6f)
         return float3(0.0f, 0.0f, 0.0f);
+
+    // Occluded direct sky (option A): fold the blended per-bin visibility
+    // through the fold's ambient matrix, ONCE, before the shared /wsum
+    // normalization. Linearity: blending V per bin then folding once equals
+    // folding per member and blending — and when every cage member holds the
+    // SAME bins, vblend = V * wsum, so the added term is exactly the old
+    // fold-V output for that V. A walled-off member now contributes neither
+    // its bounce nor its sky.
+    if (ambientOn)
+    {
+        // SB_BakedGISkyAmbientMatrix — the fold (BakedGI_Update.hlsl, probe 0)
+        // writes this once per dispatch; BakedGI::RecordUpdate leaves it in
+        // PIXEL|NON_PIXEL. Grep note: the fetch reaches it through
+        // FrameCB.bakedGIAmbientMatrixSRVIndex, not the buffer name.
+        StructuredBuffer<float4> skyMatrix = ResourceDescriptorHeap[FrameCB.bakedGIAmbientMatrixSRVIndex];
+        [unroll]
+        for (uint ab = 0u; ab < BAKED_GI_DIRECTIONS; ++ab)
+        {
+            if (vblend[ab] <= 0.0f)
+                continue;
+            [unroll]
+            for (uint alm = 0; alm < 9; ++alm)
+                coef[alm] += skyMatrix[ab * 9u + alm].rgb * vblend[ab];
+        }
+    }
 
     // Evaluate directional irradiance at N (lit coefficients use the same
     // plain-SH convention as the sky SH9 buffer).

@@ -80,14 +80,9 @@ private:
     bool m_DebugDepthLabels        = false;  // Depth-duel labels for occluded records
     bool m_CullStatsOverlay        = false;  // Meshlet culling stats on-screen table
     float m_BakedGISpacing      = 1.0f;  // BakedGI probe grid spacing (m) — used at the next rebuild
-    // Sky-visibility mode: 0 = SH9 (the default: the raw SH9 field the visibility
-    // bake projects), 1 = V = 0 (the No Sky Visibility diagnostic). Runtime
-    // selection only: it persists across bakes, triggers no bake, and asks for a
-    // probe fold. The combo greys out SH9 when the bake holds no SH9 data, and
-    // No Sky Visibility stays usable with no bake at all.
-    int   m_BakedGISkyVisMode   = (int)BakedGI::SkyVisMode::SH9;
     bool  m_PendingGIProbeBake  = false; // BakedGI bake request (auto-set after scene load / Rebuild button)
-    int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance, 3 sky visibility,
+    int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance,
+                                         // 3 RETIRED (was sky visibility; gone with SkyVisSH, 2026-11-06),
                                          // 4 unused, 5 lit sky source, 6 lit sun source,
                                          // 7 ray fan, 8 Efb contribution, 9 cage trace
     float m_BakedGIDebugScale   = 1.0f;  // Lit-ball gain (DC-normalized shading multiplier)

@@ -134,7 +134,10 @@ void Application::Initialize()
     m_FrameConstants.bakedGIDimY = 0;
     m_FrameConstants.bakedGIDimZ = 0;
     m_FrameConstants.bakedGIDebugView = 0;
-    m_FrameConstants.bakedGISkyVisSRVIndex = BakedGI::kSkyVisNoSRV;
+    // RETIRED and INERT: the SH9 sky-visibility field and its V debug view are
+    // gone (2026-11-06, option A follow-up). Nothing reads this; the sentinel
+    // is published once here. The FIELD stays: FrameConstants is append-only.
+    m_FrameConstants.bakedGISkyVisSRVIndex = 0xFFFFFFFFu;
     m_FrameConstants.bakedGIDebugScale = 1.0f;
     // Ray-debug constants: the SRV index starts at the "no buffer" sentinel
     // (0xFFFFFFFF), not 0, because 0 is a legal descriptor index. The Ray Fan
@@ -178,6 +181,13 @@ void Application::Initialize()
     m_FrameConstants.bakedGIPhotonCount = 0;
     m_FrameConstants.bakedGIPhotonSunState = 0;
     m_FrameConstants.bakedGIPhotonFluxScale = 1.0f;
+    // Fetch-side sky ambient (option A): the sentinels until a bake fills the
+    // bins and a fold writes the matrix — the fetch is bounce-only until then.
+    m_FrameConstants.bakedGIVisBinsSRVIndex = BakedGI::kSkyVisBinsNoSRV;
+    m_FrameConstants.bakedGIAmbientMatrixSRVIndex = BakedGI::kSkyAmbientMatrixNoSRV;
+    // RETIRED and INERT: the ambient-mode flag. The ambient is unconditional
+    // now (2026-11-06); nothing reads the field. Published once, 0, forever.
+    m_FrameConstants.bakedGIAmbientSky = 0;
     // DDGI defaults: off until the ImGui method selector picks it. The atlas and
     // the probe buffers do not exist until SetupDDGI runs, so ddgiValid stays 0.
     m_FrameConstants.ddgiMode = 0;
@@ -590,11 +600,6 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIProbeSkySRVIndex   = gi.IsValid() ? gi.GetLitSkySRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeSunSRVIndex   = gi.IsValid() ? gi.GetLitSunSRVIndex() : 0u;
         m_FrameConstants.bakedGIProbeVisSRVIndex   = gi.IsValid() ? gi.GetVisibilitySRVIndex() : 0u;
-        // The raw SH9 sky-visibility field, for the V debug view (3).
-        // It is published whether or not the fold uses it: the view diagnoses the
-        // bake, not the current mode. The getter returns kSkyVisNoSRV when the
-        // resident bake has no SH section, and the view early-outs on it.
-        m_FrameConstants.bakedGISkyVisSRVIndex     = gi.GetSkyVisSHSRVIndex();
         // Photon map (view 10). Published from the RESIDENT map's getters, the
         // same contract as the ray-debug fields: a label or a dot cannot
         // describe a state the deposits do not come from. No map publishes the
@@ -607,6 +612,12 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIPhotonCount     = gi.HasPhotonMap() ? gi.GetPhotonTotal() : 0u;
         m_FrameConstants.bakedGIPhotonSunState  = gi.HasPhotonMap() ? gi.GetPhotonSunState() : 0u;
         m_FrameConstants.bakedGIPhotonFluxScale = gi.HasPhotonMap() ? gi.GetPhotonFluxScale() : 1.0f;
+        // Fetch-side sky ambient (option A), always on. The getters
+        // self-sentinel: no bin data publishes kSkyVisBinsNoSRV, no fold yet
+        // publishes the matrix sentinel — and the fetch gates on the two
+        // sentinels alone, so it never reads a stale or absent buffer.
+        m_FrameConstants.bakedGIVisBinsSRVIndex       = gi.GetSkyVisBinsSRVIndex();
+        m_FrameConstants.bakedGIAmbientMatrixSRVIndex = gi.GetSkyAmbientMatrixSRVIndex();
         // FILLED runtime eligibility is retired with the dilation feature: no
         // bake stage sets the FILLED meta bit any more, so the flag is inert.
         // The FIELD stays: FrameConstants is append-only by house discipline.
@@ -2060,88 +2071,6 @@ void Application::RenderImGui()
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Grid spacing used by the next \"Rebuild GI Probes\" (auto-grows to fit the probe cap).");
 
-                // --- Sky visibility: which V the sky fold multiplies ---
-                // Two entries. SH9 is the 9-coefficient projection of the sky
-                // visibility from the visibility rays, and it is the default.
-                // No Sky Visibility zeroes V as a diagnostic and needs no bake
-                // data at all. The switch never asks for a bake: it invalidates
-                // the probe fold and nothing else.
-                {
-                    BakedGI& abGI = m_Renderer.GetBakedGI();
-                    const bool shAvailable = abGI.HasSkyVisSH();
-                    const BakedGI::SkyVisMode selected =
-                        (BakedGI::SkyVisMode)m_BakedGISkyVisMode;
-                    bool changed = false;
-                    if (ImGui::BeginCombo("Sky Visibility",
-                                          BakedGI::SkyVisModeName(selected)))
-                    {
-                        for (uint32_t m = 0u; m < BakedGI::kSkyVisModeCount; ++m)
-                        {
-                            const BakedGI::SkyVisMode mode = (BakedGI::SkyVisMode)m;
-                            // SH9 is the ONE entry that needs a bake which ran
-                            // the visibility dispatch. No Sky Visibility never
-                            // does, so it stays selectable with no bake and no
-                            // cache.
-                            const bool needsSH = (mode == BakedGI::SkyVisMode::SH9);
-                            if (needsSH)
-                                ImGui::BeginDisabled(!shAvailable);
-                            if (ImGui::Selectable(BakedGI::SkyVisModeName(mode),
-                                                  mode == selected))
-                            {
-                                m_BakedGISkyVisMode = (int)m;
-                                changed = true;
-                            }
-                            if (needsSH)
-                                ImGui::EndDisabled();
-                        }
-                        ImGui::EndCombo();
-                    }
-                    if (changed)
-                    {
-                        abGI.SetSkyVisMode((BakedGI::SkyVisMode)m_BakedGISkyVisMode);
-                        m_ProbeFoldWanted = true;
-                        m_ProbeFoldHour   = -1.0f;
-                    }
-                    // AllowWhenDisabled: the tooltip is what explains a disabled
-                    // item, so it must work in that state too.
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip("Which V the sky term A_l Y_lm(W_i) V(W_i) uses.\n"
-                                          "SH9: raw SH9 visibility, projected from the 16x16x4 = 1024\n"
-                                          "rays the depth-moment bake already traces, then reconstructed\n"
-                                          "at W_i and clamped to [0, 1]. This is the default and the only\n"
-                                          "source of a non-zero V.\n"
-                                          "No Sky Visibility: V = 0. A diagnostic, not a shipping mode. It\n"
-                                          "removes only the direct first-bounce sky term, so the bounces\n"
-                                          "R_i and the sun term stay. The image difference isolates how much\n"
-                                          "the V term contributes.\n"
-                                          "The switch triggers no bake, no dump and no GPU wait: it folds\n"
-                                          "the probe grid again on the next frame.");
-
-                    // Report the mode the fold USES, not the mode that was
-                    // selected: an SH9 selection with no SH data folds with V = 0.
-                    const BakedGI::SkyVisMode effective = abGI.GetEffectiveSkyVisMode();
-                    ImGui::Text("Sky visibility in use: %s",
-                                BakedGI::SkyVisModeName(effective));
-                    if (effective != abGI.GetSkyVisMode())
-                    {
-                        ImGui::TextDisabled("%s is selected but this bake holds no SH9 data, "
-                                            "so the fold uses %s.",
-                                            BakedGI::SkyVisModeName(abGI.GetSkyVisMode()),
-                                            BakedGI::SkyVisModeName(effective));
-                    }
-                    if (shAvailable)
-                    {
-                        ImGui::Text("SH9 buffer: %llu B (%u B for each probe)",
-                                    (unsigned long long)abGI.GetSkyVisSHBytes(),
-                                    BakedGI::kSkyVisSHCoeffs * 4u);
-                    }
-                    else
-                    {
-                        ImGui::TextDisabled("The current bake has no SH9 sky-visibility data. "
-                                            "A Probes/ cache load carries no SH9 section.");
-                    }
-                }
-
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
                 if (ImGui::IsItemHovered())
@@ -2411,16 +2340,17 @@ void Application::RenderImGui()
                 // The 16 sun-direction boxes are the Ray Fan's DeltaDirections
                 // channel: the same 16 boxes and the same weight ramp, at the one
                 // cell the fan is already at.
-                // Probe debug views. The table SKIPS view 4, which draws nothing:
-                // the shader, the renderer and every `m_BakedGIDebugView == N` test
-                // below name a view by number, so the numbers 5..9 must not move
-                // down to fill the gap.
+                // Probe debug views. The table SKIPS views 3 and 4, which draw
+                // nothing: 3 was the Sky Visibility view, retired with its
+                // SkyVisSH data source (2026-11-06), and 4 was never a view.
+                // The shader, the renderer and every `m_BakedGIDebugView == N`
+                // test below name a view by number, so the numbers 5..10 must
+                // not move down to fill the gap.
                 struct ProbeViewEntry { const char* label; int view; };
                 static constexpr ProbeViewEntry kProbeViews[] = {
                     { "Off",              0 },
                     { "Placement",        1 },
                     { "Lit Irradiance",   2 },
-                    { "Sky Visibility",   3 },
                     { "Lit Sky Source",   5 },
                     { "Lit Sun Source",   6 },
                     { "Ray Fan",          7 },
@@ -2470,11 +2400,6 @@ void Application::RenderImGui()
                                       "Lit Sky / Lit Sun Source: same ball reading the update-pass SPLIT buffers —\n"
                                       "sky = sky bounces + occluded sky direct (V-gated), sun = sun bounces only (direct sun never enters probes).\n"
                                       "The three lit views always sum: total = sky + sun.\n"
-                                      "Sky Visibility: SH ball per probe — each sphere point evaluates the probe's sky-visibility\n"
-                                      "SH9 field at its own normal, so the ball shows the DIRECTIONAL direct sky visibility.\n"
-                                      "Grayscale = the reconstructed V at that direction (white = 1 = open sky, black = 0 =\n"
-                                      "blocked), raw and un-gained. Red = invalid probe. Nothing draws when the current bake\n"
-                                      "holds no SH9 data. The DC term alone is the sphere MEAN, not the display value.\n"
                                       "Ray Fan: the 64 gather rays of ONE delta record of one probe (the Ray Debug Probe above), as thin boxes.\n"
                                       "  The record is the one the last dump replayed: the sun hour state (Ray Debug Source Sun) or\n"
                                       "  one of the 16 fibonacci sky bins (Ray Debug Source Sky, which records ALL 16 in one\n"

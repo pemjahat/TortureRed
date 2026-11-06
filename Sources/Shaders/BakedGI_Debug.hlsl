@@ -19,15 +19,10 @@
 //                      sun bounces only (direct sun never enters the probes).
 //                      Modes 2/5/6 read the three update-pass outputs and
 //                      always sum: total = sky + sun.
-//   3 Sky Visibility — SH ball per probe, like the lit views: each sphere point
-//                      evaluates the probe's sky-visibility SH9 field at its own
-//                      normal, so the ball shows the DIRECTIONAL visibility and
-//                      not one number per probe. Grayscale = the reconstructed V
-//                      in [0, 1]. The DC term is that field's sphere MEAN and is
-//                      NOT the display value: a mean of a mostly blocked sphere
-//                      is small, so a DC-coloured ball reads almost black.
-//                      Red = invalid probe. Nothing draws when the bake holds no
-//                      SH9 data.
+//   3                 — RETIRED 2026-11-06 with the SkyVisSH field it read
+//                      (option A: the ambient is fetch-side, so the raw SH9
+//                      visibility field had no consumer). VSMain early-outs
+//                      on index 3, exactly like index 4.
 //   4                 — no view. VSMain early-outs on index 4, so a stale value
 //                      draws nothing and not a placement cube set.
 //   7 Ray Fan        — thin oriented box for each of the 64 gather rays of ONE
@@ -160,9 +155,9 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 
 #define BAKED_GI_DEBUG_PLACEMENT  1u
 #define BAKED_GI_DEBUG_LIT        2u
-#define BAKED_GI_DEBUG_SKYVIS     3u
-// 4u draws nothing. Keep the gap: the UI, the renderer and this file all name the
-// views by number, so a renumber moves five of them.
+// 3u and 4u draw nothing. 3 was the Sky Visibility view, retired with its
+// SkyVisSH data source (2026-11-06). Keep the gaps: the UI, the renderer and
+// this file all name the views by number, so a renumber moves five of them.
 #define BAKED_GI_DEBUG_LIT_SKY    5u
 #define BAKED_GI_DEBUG_LIT_SUN    6u
 #define BAKED_GI_DEBUG_RAYFAN     7u
@@ -379,40 +374,6 @@ float3 OrientedBoxVertex(float3 origin, float3 w, float len, float halfWidth, fl
 // as the regime channel's "Efb dominates", because both report an obstruction; the
 // channels are never drawn together.
 #define BAKED_GI_RAYFAN_VHIT_BLOCK_COLOR   float3(0.95f, 0.25f, 0.20f)
-
-// ---------------------------------------------------------------------------
-// Direct sky visibility from the per-probe raw SH9 field.
-//
-// ONE expression, shared by the views that show a V: view 3 evaluates it at a
-// sphere normal (a directional ball). Both use the buffer the fold uses, so a
-// view cannot show a V the frame does not.
-//
-// The DC term alone is the field's sphere MEAN: the mean of a band-limited field
-// over the sphere is L_00 * Y00 (0.28209479177387814), because every higher band
-// integrates to zero. No view displays that number any more — it is a scalar for
-// a directional quantity, and it reads almost black.
-//
-// The caller MUST test FrameCB.bakedGISkyVisSRVIndex against BAKED_GI_SKYVIS_NO_SRV
-// before it declares the SRV: 0 is a live descriptor of another resource, so a
-// read through it is undefined rather than empty.
-// ---------------------------------------------------------------------------
-#define BAKED_GI_SKYVIS_NO_SRV 0xFFFFFFFFu
-
-// Invalid-probe colour of view 3. The same red the other views use for "invalid
-// probe", so one colour means one thing across the whole overlay.
-static const float3 kBakedGISkyVisInvalidColor = float3(0.95f, 0.15f, 0.15f);
-
-// V reconstructed at dir, clamped to the [0, 1] range a visibility must stay in.
-float BakedGISkyVisAt(StructuredBuffer<float> sh, uint probe, float3 dir)
-{
-    float basis[BAKED_GI_SKYVIS_SH_COEFFS];
-    EvalSH9Basis(dir, basis);
-    float v = 0.0f;
-    [unroll]
-    for (uint c = 0; c < BAKED_GI_SKYVIS_SH_COEFFS; ++c)
-        v += sh[probe * BAKED_GI_SKYVIS_SH_COEFFS + c] * basis[c];
-    return saturate(v);
-}
 
 // Record component 3 of a ray: 0 = sky miss, 1 = backface reject, 2 = shaded.
 // rec3.w PACKS the status with the source ray index (BakedGI.hlsli), so decode
@@ -712,11 +673,13 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
 
     const uint   mode    = FrameCB.bakedGIDebugView;
 
-    // Index 4 draws nothing. Without this test a stale 4 falls through to the
-    // Placement branch at the end of this function and paints a full cube set
-    // with the A/B colours, which reads as a live view. The UI cannot select 4,
-    // so this early-out is a guard and not a path.
-    if (mode == 4u)
+    // Indices 3 and 4 draw nothing. 3 was the Sky Visibility view, retired with
+    // its SkyVisSH data source; 4 was never a view. Without this test a stale
+    // value falls through to the Placement branch at the end of this function
+    // and paints a full cube set with the A/B colours, which reads as a live
+    // view. The UI cannot select either, so this early-out is a guard and not
+    // a path.
+    if (mode == 3u || mode == 4u)
         return o;
 
     const uint3  dims    = uint3(FrameCB.bakedGIDimX, FrameCB.bakedGIDimY, FrameCB.bakedGIDimZ);
@@ -1165,15 +1128,12 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const bool   hasData  = BakedGIProbeHasData(metaWord);
 
     if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN ||
-        mode == BAKED_GI_DEBUG_EFB || mode == BAKED_GI_DEBUG_SKYVIS)
+        mode == BAKED_GI_DEBUG_EFB)
     {
         // Lit views show the probes the runtime fetch admits (VALID; the
         // FILLED donor path is retired). Efb remains a raw bake view
-        // and admits only geometrically valid probes. Sky Visibility draws EVERY
-        // probe: an invalid probe is a red ball, which is the whole point of the
-        // view, so it is not gated here.
-        const bool skyVisView = (mode == BAKED_GI_DEBUG_SKYVIS);
-        if (mode == BAKED_GI_DEBUG_EFB ? !valid : (!skyVisView && !hasData))
+        // and admits only geometrically valid probes.
+        if (mode == BAKED_GI_DEBUG_EFB ? !valid : !hasData)
             return o;
 
         // UV-sphere vertex: unit sphere position doubles as the eval normal.
@@ -1188,35 +1148,6 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float sph   = (float)si / (float)DBG_N_STACKS * PI;         // [0, PI]
         const float theta = (float)li / (float)DBG_N_SLICES * 2.0f * PI;  // [0, 2PI]
         const float3 n = float3(sin(sph) * cos(theta), cos(sph), sin(sph) * sin(theta));
-
-        // --- Sky Visibility (3): grayscale = V at this sphere normal ---
-        // The SH9 field is directional, so this ball shows the visibility of each
-        // direction instead of one number per probe. Raw saturated V: white = 1
-        // (open sky), black = 0 (blocked), grey = a partly open direction. No gain
-        // is applied, so the ramp keeps V's own units and a grey pixel is read as
-        // a fraction without a scale factor.
-        if (skyVisView)
-        {
-            // The sentinel test comes BEFORE the SRV declaration: 0 is a live
-            // descriptor of another resource, so a read through it is undefined.
-            // With no SH9 data the view draws nothing rather than a false colour.
-            if (FrameCB.bakedGISkyVisSRVIndex == BAKED_GI_SKYVIS_NO_SRV)
-                return o;
-
-            if (!valid)
-            {
-                o.color = float4(kBakedGISkyVisInvalidColor, 1.0f);
-            }
-            else
-            {
-                StructuredBuffer<float> skyVis = ResourceDescriptorHeap[FrameCB.bakedGISkyVisSRVIndex];
-                o.color = float4(BakedGISkyVisAt(skyVis, probe, n).xxx, 1.0f);
-            }
-
-            const float3 world = probePos + n * (spacing * 0.12f);
-            o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
-            return o;
-        }
 
         float basis[9];
         EvalSH9Basis(n, basis);
@@ -1348,8 +1279,8 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         return o;
     }
 
-    // The only remaining per-probe view is Placement (1). Sky Visibility (3)
-    // draws a sphere above, with the other ball views.
+    // The only remaining per-probe view is Placement (1). The lit views draw
+    // their spheres above, in their own branch.
     //
     // Classification A/B (meta bits, see BakedGI.hlsli): the DDGI criteria vs the
     // old 1cm test, so the criteria swap's flips are visible in place. BLUE is the

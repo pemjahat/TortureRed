@@ -204,15 +204,13 @@ struct FrameConstants {
                                     // 7 ray fan (one probe's gather rays),
                                     // 8 efb contribution (per-probe SH ball of R^k - R^0 for one bake term;
                                     //   the term is the UI's "Iteration" 1..3 — see bakedGIEfbIterSRVIndex)
-    // Per-probe raw SH9 SKY VISIBILITY: 9 floats for each probe, stride 4 B.
-    // StructuredBuffer<float>, written by the visibility bake and read by the V
-    // view (bakedGIDebugView 3). It is the ONE source of the V the fold
-    // multiplies, so no response-table slot carries a visibility any more.
-    //
-    // 0xFFFFFFFF means "no SH data": no bake has run, or a Probes/ cache load
-    // restored the tables without this section. 0 is a legal descriptor index, so
-    // it cannot mean "none" — the view early-outs on the sentinel before it
-    // declares the SRV. BakedGI::kSkyVisNoSRV is the C++ spelling.
+    // RETIRED and INERT (2026-11-06): the raw SH9 sky-visibility field is gone
+    // — the fold's V term moved fetch-side (option A), and the V debug view
+    // (bakedGIDebugView 3) retired with the field. Nothing reads this any more;
+    // the CPU publishes the 0xFFFFFFFF sentinel once at startup. The FIELD
+    // stays because FrameConstants is append-only by house discipline:
+    // removing a mid-struct field would shift the ray-debug and photon
+    // offsets.
     uint   bakedGISkyVisSRVIndex;
     float  bakedGIDebugScale;       // lit-ball gain (DC-normalized shading multiplier)
 
@@ -508,14 +506,43 @@ struct FrameConstants {
     //                           built by LogPhotonStats from the count
     //                           readback, or the kPhotonIdxNoSRV sentinel.
     //
-    // Appended last on purpose: every earlier offset is unchanged. All five
+    // Appended on purpose: every earlier offset is unchanged. All five
     // are 4-byte scalars after a uint, so no pad is needed on either side.
-    // Measured on both sides: 1180, 1184, 1188, 1192, 1196, sizeof 1200.
+    // Measured on both sides: 1180, 1184, 1188, 1192, 1196. The three
+    // ambient fields below extend the block (1200, 1204, 1208).
     uint  bakedGIPhotonSRVIndex;    // 1180: deposits SRV, or 0xFFFFFFFF
     uint  bakedGIPhotonCount;       // 1184: deposited photon count
     uint  bakedGIPhotonSunState;    // 1188: hour state of the resident map
     float bakedGIPhotonFluxScale;   // 1192: rays / quadArea (albedo recovery)
     uint  bakedGIPhotonIdxSRVIndex; // 1196: stored-deposit index list SRV, or 0xFFFFFFFF
+
+    // Fetch-side sky ambient (option A), always on. The fold's V term is gone:
+    // the occluded direct sky is evaluated PER RECEIVER in the runtime fetch,
+    // blended with the same trilinear x backface x Chebyshev cage weights that
+    // gate the bounce, so the ambient inherits the leak gating. The gate is
+    // the two SRVs' sentinels below: the fetch adds the ambient when BOTH are
+    // live (bins resident, matrix written by the first fold).
+    //
+    //   bakedGIVisBinsSRVIndex     StructuredBuffer<float>, 16 open-ray
+    //                              fractions per probe (one for each fold
+    //                              bin), or the no-bins sentinel.
+    //   bakedGIAmbientMatrixSRVIndex  StructuredBuffer<float4>, the fold's
+    //                              16x9 ambient matrix M[i][lm] =
+    //                              (2pi/16) x L_sky(W_i) x A_l x Y_lm(W_i),
+    //                              or the sentinel.
+    //   bakedGIAmbientSky          RETIRED and INERT (2026-11-06): the
+    //                              on/off mode toggle is gone and the ambient
+    //                              is unconditional; the CPU publishes 0 once
+    //                              at startup and nothing reads it. The FIELD
+    //                              stays because FrameConstants is
+    //                              append-only by house discipline.
+    //
+    // Appended last on purpose: every earlier offset is unchanged. All three
+    // are 4-byte scalars after a uint, so no pad is needed on either side.
+    // Measured on both sides: 1200, 1204, 1208, sizeof 1212.
+    uint  bakedGIVisBinsSRVIndex;      // 1200: per-bin sky visibility SRV, or 0xFFFFFFFF
+    uint  bakedGIAmbientMatrixSRVIndex; // 1204: the fold's ambient matrix SRV, or 0xFFFFFFFF
+    uint  bakedGIAmbientSky;            // 1208: retired — always 0
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -585,7 +612,7 @@ struct BakedGIBakeParams {
 //
 // OFFSETS, measured on both sides after the 2026-10-29 cleanup:
 // sunIrradianceX 0, hour 12, responseSRVIdx 16, litSunUAVIdx 32, dimZ 60,
-// sunResponseSRVIdx 64, sizeof 68. The offsets are contiguous: nothing here is a
+// sunResponseSRVIdx 64. The offsets are contiguous: nothing here is a
 // pad. SharedTypes.h is compiled from source on both sides, so a shifted layout
 // costs only a shader cache wipe.
 struct BakedGIUpdateParams {
@@ -604,22 +631,19 @@ struct BakedGIUpdateParams {
     uint  dimX, dimY, dimZ;
     uint  sunResponseSRVIdx; // SRV: per-probe sun response, stride BAKED_GI_SUN_STATES
 
-    // ---- Sky visibility source for the fold's V ----
+    // ---- Sky-ambient matrix output ----
     //
-    // APPENDED after the fields above, so every earlier offset is unchanged.
-    // Measured on both sides: skyVisSHSRVIdx 68, skyVisMode 72, sizeof 76 (19
-    // dwords). The shared root slot 12 is sized by the 30-dword DDGIParams, so
-    // this struct does not grow the slot.
+    // The fold's V term is GONE (the sky ambient is fetch-side now — option A).
+    // What stays in the fold is the per-frame AMBIENT MATRIX write: thread 0
+    // stores M[i][lm] = (2pi/16) * L_sky(W_i) * A_l * Y_lm(W_i), a 16x9 RGB
+    // block the runtime fetch multiplies by the receiver's cage-blended
+    // per-bin visibility. Written every fold dispatch (the sky is a pure
+    // function of the hour, so a clean frame reuses the last matrix).
     //
-    // The buffer holds 9 raw SH9 coefficients for each probe, stride 4 bytes, so
-    // 36 B for each probe. It is the sky visibility projected from the SAME
-    // 16x16x4 rays the depth-moment map uses, with no cosine A_l factor. Read it
-    // only when skyVisMode is 0: the CPU sends 0 only when the buffer exists, so
-    // index 0 never reaches a read.
-    uint  skyVisSHSRVIdx; // SRV: per-probe sky-visibility SH9, stride 9 floats
-    uint  skyVisMode;     // 0 = SH9 buffer (the default), 1 = V = 0 (no buffer read).
-                          // These are BakedGI::SkyVisMode's values, and there are
-                          // exactly two.
+    // Measured on both sides after the fold-V removal: skyMatrixUAVIdx 68,
+    // sizeof 72 (18 dwords). The shared root slot 12 is sized by the 30-dword
+    // DDGIParams, so this struct does not grow the slot.
+    uint  skyMatrixUAVIdx; // RW: 16x9 float4, the fold's ambient matrix
 };
 
 
@@ -734,11 +758,15 @@ struct BakedGIVisParams {
     uint  visUAVIdx;        // RW output: probeCount x 324 (M1, M2) depth moments
     uint  metaUAVIdx;       // RW output: per-probe validity bits (DDGI classification
                             // + old-criteria diagnostic bit — see BakedGI.hlsli)
-    // APPENDED: RW output for the sky-visibility SH9 A/B, 9 floats for each probe
-    // (stride 4 bytes, probeCount * 9 elements). The visibility pass writes it
-    // from the same rays that fill the moments, so it costs no extra traversal.
-    // Measured with dxc: offset 40, sizeof 44 (11 dwords) — under the shared slot.
-    uint  skyVisSHUAVIdx;
+    // RW output for the per-bin sky visibility — the open-ray FRACTION of each
+    // of the 16 fold bins (the BakedGIDeltaDirection set), 16 floats for each
+    // probe. The fetch-side sky ambient (option A) reads these bins through the
+    // receiver's cage weights; the same 1024 visibility rays supply them, so it
+    // costs no extra traversal. Measured on both sides: offset 40, sizeof 44
+    // (11 dwords), below the 30-dword DDGIParams that sizes root slot 12.
+    // (The raw SH9 sky-visibility field this struct once carried is retired —
+    // 2026-11-06, with the fold's V term it served.)
+    uint  skyVisBinsUAVIdx;
 };
 
 // Root constants for the per-term response-ball fold (debug view 8). One

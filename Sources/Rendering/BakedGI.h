@@ -223,95 +223,62 @@ public:
     }
 
     // ---------------------------------------------------------------------
-    // SKY VISIBILITY MODE: what supplies the V in the runtime fold's
-    // `A_l Y_lm(W_i) V(W_i)` term.
+    // SKY AMBIENT (option A): the occluded direct sky is FETCH-SIDE, always on.
     //
-    //   SH9           raw SH9 visibility for each probe, projected from the
-    //                 SAME 16x16x4 = 1024 rays the depth-moment bake already
-    //                 traces, and reconstructed at W_i. Free in ray cost. The
-    //                 DEFAULT, and the only mode that produces a V.
-    //   NoVisibility  V = 0. A diagnostic: it removes only the direct
-    //                 first-bounce sky term and keeps the bounces R_i and the
-    //                 sun term. The image difference isolates how much the V
-    //                 term contributes.
+    // The fold no longer folds a per-probe V term into Lit — the capture
+    // reconciliation proved the folded ambient over-reports ground truth by
+    // 3-45x, because the cage delivers edge probes' ambient onto covered
+    // receivers and the fetch cannot gate what is already folded in. Instead:
+    //   - the visibility bake stores the OPEN FRACTION of each of the 16 fold
+    //     bins (about 32 of the 1024 rays per bin; zero extra rays);
+    //   - the fold writes a probe-independent ambient matrix
+    //     M[i][lm] = (2pi/16) x L_sky(W_i) x A_l x Y_lm(W_i) once per dispatch;
+    //   - the FETCH blends the cage members' bins with the SAME trilinear x
+    //     backface x Chebyshev weights that gate the bounce, then folds the
+    //     blend through M. A walled-off member now contributes neither its
+    //     bounce nor its sky — the ambient inherits the leak gating.
     //
-    // The V comes from a FIELD, not from one scalar for each bin: a scalar cannot
-    // resolve an aperture inside a cell.
+    // There is NO MODE: the ambient is unconditional (the human's decision,
+    // 2026-11-06 — the on/off diagnostic toggle went with it). The gate is
+    // DATA PRESENCE alone: the fetch adds the ambient when both SRVs are
+    // non-sentinel (bins resident AND the first fold wrote the matrix), and
+    // the image is bounce-only for the sentinel-guarded frames before that.
     //
-    // The selection is runtime state, so a switch needs no rebake — only a probe
-    // fold, which is the Application's call because the live lit table depends on
-    // it.
-    //
-    // The SH buffer exists only after a bake that ran the visibility dispatch.
-    // A Probes/ cache load restores no SH section, so HasSkyVisSH() is false
-    // there and GetEffectiveSkyVisMode() falls back to NoVisibility.
-    // NoVisibility needs no bake data and never falls back.
-    //
-    // 36 B for each probe = 418,176 B at 11,616 probes, 4.72 MB at the
-    // kMaxProbeCount cap.
+    // The raw SH9 sky-visibility FIELD is RETIRED (2026-11-06): the V debug
+    // view that read it went with it, so the field had no consumer left.
+    // Bins: 16 floats = 64 B for each probe = 726 KB at 11,616 probes,
+    // 8.0 MB at the kMaxProbeCount cap. Matrix: 16x9 float4, once.
     // ---------------------------------------------------------------------
-    static constexpr uint32_t kSkyVisSHCoeffs = 9; // raw SH9 scalars for each probe
+    static constexpr uint32_t kSkyVisBinsPerProbe = 16; // one open fraction for each fold bin
+    static constexpr uint32_t kSkyAmbientMatrixFloat4s = 16u * 9u; // the fold's M[i][lm], RGB
 
-    // "No SH data" sentinel for FrameConstants::bakedGISkyVisSRVIndex. 0 is a
-    // legal descriptor index, so it cannot mean "none": the two V debug views
-    // early-out on this value before they declare the SRV.
-    static constexpr uint32_t kSkyVisNoSRV = 0xFFFFFFFFu;
+    // "No data" sentinels for the FrameConstants fields. 0 is a legal
+    // descriptor index, so it cannot mean "none": the fetch early-outs on the
+    // sentinel before it declares the SRV.
+    static constexpr uint32_t kSkyVisBinsNoSRV = 0xFFFFFFFFu;
+    static constexpr uint32_t kSkyAmbientMatrixNoSRV = 0xFFFFFFFFu;
 
-    // The values are also the shader's `skyVisMode` dwords, so one numbering
-    // serves the enum, the constant buffer and BakedGI_Update.hlsl. Keep the
-    // three in step: the shader tests 0 for the SH buffer.
-    enum class SkyVisMode : uint32_t
+    // True when the resident bake carries per-bin visibility. False before any
+    // bake, after a cache load from an older build, and after a bake whose
+    // visibility dispatch did not run.
+    bool              HasSkyVisBins() const { return m_SkyVisBinsValid; }
+    // The SRV index of the per-bin visibility, or kSkyVisBinsNoSRV.
+    uint32_t          GetSkyVisBinsSRVIndex() const
     {
-        SH9          = 0u, // BakedGISkyVisSH (BakedGI_Visibility.hlsl). The default.
-        NoVisibility = 1u, // V = 0 for the direct sky term, diagnostic only
-    };
-
-    // The same spelling for the UI and for a log line. One helper, so the text
-    // and the number cannot drift.
-    static const char* SkyVisModeName(SkyVisMode mode)
-    {
-        switch (mode)
-        {
-        case SkyVisMode::NoVisibility: return "No Sky Visibility";
-        case SkyVisMode::SH9:
-        default:                       return "SH9";
-        }
+        return m_SkyVisBinsValid ? (uint32_t)m_SkyVisBins.srvIndex : kSkyVisBinsNoSRV;
     }
-
-    static constexpr uint32_t kSkyVisModeCount = 2u;
-
-    // Changes only the selection. The Application owns fold invalidation.
-    void              SetSkyVisMode(SkyVisMode mode) { m_SkyVisMode = mode; }
-    SkyVisMode        GetSkyVisMode() const { return m_SkyVisMode; }
-    // True when the resident bake carries SH coefficients. False before any
-    // bake, after a cache load, and after a bake whose buffer could not be
-    // created.
-    bool              HasSkyVisSH() const { return m_SkyVisSHValid; }
-    // The mode the FOLD will actually use, and the mode the UI must report.
-    // A selected SH9 with no data degrades to V = 0 rather than reading an
-    // absent buffer, and there is no other source left to degrade to.
-    // NoVisibility always survives: it reads no bake data at all.
-    SkyVisMode        GetEffectiveSkyVisMode() const
+    // The SRV index of the ambient matrix, or the sentinel until the first
+    // fold of this process wrote it (the matrix is probe independent and
+    // outlives re-bakes; its content is a pure function of the sky).
+    uint32_t          GetSkyAmbientMatrixSRVIndex() const
     {
-        if (m_SkyVisMode == SkyVisMode::SH9 && !m_SkyVisSHValid)
-            return SkyVisMode::NoVisibility;
-        return m_SkyVisMode;
+        return m_SkyMatrixWritten ? (uint32_t)m_SkyAmbientMatrix.srvIndex
+                                  : kSkyAmbientMatrixNoSRV;
     }
-    // True only when the fold reads the SH buffer.
-    bool              IsUsingSkyVisSH() const
+    // Bytes the bin buffer costs for the current grid. 0 before a bake.
+    uint64_t          GetSkyVisBinsBytes() const
     {
-        return GetEffectiveSkyVisMode() == SkyVisMode::SH9;
-    }
-    // The SRV index of the SH buffer, or kSkyVisNoSRV when the resident bake has
-    // no SH section. Callers must test for the sentinel: 0 is a legal descriptor.
-    uint32_t          GetSkyVisSHSRVIndex() const
-    {
-        return m_SkyVisSHValid ? (uint32_t)m_SkyVisSH.srvIndex : kSkyVisNoSRV;
-    }
-    // Bytes the SH buffer costs for the current grid. 0 before a bake.
-    uint64_t          GetSkyVisSHBytes() const
-    {
-        return m_SkyVisSHValid ? (uint64_t)m_ProbeCount * kSkyVisSHCoeffs * sizeof(float) : 0ull;
+        return m_SkyVisBinsValid ? (uint64_t)m_ProbeCount * kSkyVisBinsPerProbe * sizeof(float) : 0ull;
     }
 
     // Raw getters above serve ray debug and Efb. Only the runtime fold uses
@@ -878,7 +845,9 @@ private:
     // Called inside RecordBake after the grid is computed; on a hit RecordBake
     // returns true immediately.
     //
-    // The cache holds four sections: raw sky, final meta, visibility, and raw sun.
+    // The cache holds five sections: raw sky, final meta, visibility, raw sun,
+    // and the per-bin sky visibility (option A — the fetch-side ambient reads
+    // it, so the cache restores it).
     bool TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
                       const std::string& scenePath);
 
@@ -895,16 +864,22 @@ private:
     GPUBuffer m_LitProbesSun; // per-frame lit SH9 RGB, sun-sourced split (debug)
     GPUBuffer m_Meta;      // per-probe validity (bit 0)
     GPUBuffer m_Visibility; // per-probe octahedral 16x16 depth moments (padded 18x18, float2 (M1, M2))
-    // Sky-visibility SH9 mode (see SkyVisMode): 9 raw SH coefficients for each
-    // probe, stride 4 B. The visibility pass writes it from the same rays that
-    // fill the moments, so it shares that pass's lifetime: it is created with the
-    // probe buffers and a cache load marks it invalid, because the cache format
-    // carries no SH section.
-    GPUBuffer m_SkyVisSH;
-    bool      m_SkyVisSHValid = false;
-    // The SELECTION. The fold uses GetEffectiveSkyVisMode(), which can differ
-    // while an SH9 selection waits for a bake.
-    SkyVisMode m_SkyVisMode = SkyVisMode::SH9;
+    // Per-bin sky visibility (option A): the open-ray fraction of each of the
+    // 16 fold bins, 16 floats for each probe. Written by the visibility
+    // dispatch (groupshared counters over the same 1024 rays), so it shares
+    // the moments' lifecycle. The cache format v8 carries a bin section, so a
+    // cache load RESTORES this one. (The raw SH9 sky-visibility field that
+    // once lived here is retired — 2026-11-06.)
+    GPUBuffer m_SkyVisBins;
+    bool      m_SkyVisBinsValid = false;
+    // The probe-independent ambient matrix, 16x9 float4, written once per fold
+    // dispatch by thread 0 and read by the runtime fetch. Fixed size, created
+    // once with the pipelines, and its content outlives re-bakes (a pure
+    // function of the sky), so there is no per-bake lifecycle.
+    GPUBuffer m_SkyAmbientMatrix;
+    bool      m_SkyMatrixWritten = false;
+    // (The ambient-mode SELECTION that lived here is gone — 2026-11-06: the
+    // ambient is unconditional, gated by data presence alone.)
 
     // Per-bake-term capture, debug-only (see HasEfbBalls). m_ResponseIter holds
     // terms 0..kBakeIterations-2 — the LAST term's table is m_Response

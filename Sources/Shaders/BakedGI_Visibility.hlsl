@@ -14,10 +14,18 @@
 // neighbor — BakedGIWrapVisTexel) makes the query's manual bilinear
 // continuous across the octahedral fold.
 //
-// The same 4 rays also fill the SKY-VISIBILITY SH9 A/B buffer: a binary
-// open/blocked value for each ray, projected into 9 raw SH9 coefficients for the
-// probe (see BAKED_GI_SKYVIS_SH_COEFFS in BakedGI.hlsli). The projection reuses
-// the traversal below, so it costs no extra ray and no extra alpha-mask draw.
+// The same rays also fill the PER-BIN sky-visibility buffer (option A): each
+// upper-hemisphere ray is assigned to its nearest of the 16 fold-bin directions
+// (BakedGIDeltaDirection), and each bin stores its OPEN FRACTION — about 32
+// rays per bin. The bin mean is the quadrature-correct V for the fold's 16-bin
+// scheme, and the runtime FETCH blends it with the receiver's cage weights, so
+// the sky ambient inherits the Chebyshev/backface leak gating. Groupshared
+// counters accumulate the open/total ray counts per bin; the counts are order
+// independent, so the atomics keep the pass deterministic.
+//
+// (History: this pass once also projected a raw SH9 sky-visibility field for
+// the fold's per-probe V term. Option A removed that term — the ambient is
+// fetch-side now — and the field retired with it, 2026-11-06.)
 //
 // Pure geometry — no lighting, no TOD dependence, baked once alongside the
 // transport bake (dispatched from BakedGI::RecordBake on the same list).
@@ -32,17 +40,13 @@ ConstantBuffer<BakedGIVisParams>  Vis     : register(b2);
 
 #define VIS_RAYS_PER_TEXEL 4
 
-// 4pi / N with equal weight for each of the 16x16x4 rays. A fully open probe
-// then reconstructs to 1: (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2 = 1.
-#define SKYVIS_SH_NORMALIZE \
-    (4.0f * PI / (float)(BAKED_GI_VIS_RES * BAKED_GI_VIS_RES * VIS_RAYS_PER_TEXEL))
-
 groupshared float2 g_Moments[BAKED_GI_VIS_RES][BAKED_GI_VIS_RES];
 
-// One row for each of the 256 threads, one column for each raw SH coefficient.
-// 256 * 9 * 4 B = 9,216 B of groupshared, a fixed size that no probe count
-// changes.
-groupshared float g_SkyVisSH[BAKED_GI_VIS_RES * BAKED_GI_VIS_RES][BAKED_GI_SKYVIS_SH_COEFFS];
+// Per-bin sky-visibility ray counts (option A): open and total for each of
+// the 16 fold bins, accumulated with InterlockedAdd straight from the ray
+// loop. 2 * 16 * 4 B = 128 B of groupshared.
+groupshared uint g_BinOpen[BAKED_GI_DIRECTIONS];
+groupshared uint g_BinTotal[BAKED_GI_DIRECTIONS];
 
 [numthreads(BAKED_GI_VIS_RES, BAKED_GI_VIS_RES, 1)]
 void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
@@ -150,6 +154,18 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
     }
 
     // --- Interior texel moments: 4 jittered distance-only rays ---
+    //
+    // The bin counters must read zero before ANY thread's first InterlockedAdd,
+    // so zero them here (16 lanes, one bin each) and barrier. The classification
+    // block above touches no groupshared, so this barrier is the first the
+    // group needs.
+    if (gt.y == 0u && gt.x < BAKED_GI_DIRECTIONS)
+    {
+        g_BinOpen[gt.x]  = 0u;
+        g_BinTotal[gt.x] = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
     RNG rng;
     rng.state = pcg_hash(probe * 7919u + gt.y * 61u + gt.x * 13u + 0x9e3779b9u);
     rng.inc   = 1;
@@ -161,8 +177,6 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
     };
 
     float m1 = 0.0f, m2 = 0.0f;
-    // Raw SH9 sums of the binary sky visibility of these same 4 rays.
-    float shSum[BAKED_GI_SKYVIS_SH_COEFFS] = (float[BAKED_GI_SKYVIS_SH_COEFFS])0;
     [loop]
     for (uint r = 0; r < VIS_RAYS_PER_TEXEL; ++r)
     {
@@ -196,17 +210,27 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
         // moment distance clamp above takes no part in this decision, and no
         // second traversal happens.
         const float vis = blocked ? 0.0f : 1.0f;
-        float shBasis[BAKED_GI_SKYVIS_SH_COEFFS];
-        EvalSH9Basis(dir, shBasis);
-        [unroll]
-        for (uint lm = 0; lm < BAKED_GI_SKYVIS_SH_COEFFS; ++lm)
-            shSum[lm] += vis * shBasis[lm];
+
+        // Per-bin accumulation (option A): an UPPER ray lands in the fold bin
+        // whose direction is closest to it (max dot). ~512 of the 1024 rays are
+        // upper, so each bin gets ~32 samples; the stored fraction resolves a
+        // sub-bin aperture to 1/32 steps. Lower rays carry no fold-bin sky.
+        if (dir.y > 0.0f)
+        {
+            uint bestBin = 0u;
+            float bestDot = -2.0f;
+            [unroll]
+            for (uint b = 0u; b < BAKED_GI_DIRECTIONS; ++b)
+            {
+                const float d = dot(dir, BakedGIDeltaDirection(b));
+                if (d > bestDot) { bestDot = d; bestBin = b; }
+            }
+            InterlockedAdd(g_BinTotal[bestBin], 1u);
+            if (vis > 0.0f)
+                InterlockedAdd(g_BinOpen[bestBin], 1u);
+        }
     }
     g_Moments[gt.y][gt.x] = float2(m1, m2) / (float)VIS_RAYS_PER_TEXEL;
-
-    [unroll]
-    for (uint sl = 0; sl < BAKED_GI_SKYVIS_SH_COEFFS; ++sl)
-        g_SkyVisSH[gt.y * BAKED_GI_VIS_RES + gt.x][sl] = shSum[sl];
 
     GroupMemoryBarrierWithGroupSync();
 
@@ -223,24 +247,17 @@ void main(uint3 gt : SV_GroupThreadID, uint3 gid : SV_GroupID)
         visOut[probeBase + i] = g_Moments[ic.y][ic.x];
     }
 
-    // --- Sky-visibility SH9: one lane for each coefficient ---
+    // --- Per-bin sky visibility (option A): one lane for each of the 16 bins ---
     //
-    // Lanes (0,0)..(0,8) each own ONE coefficient, sum the 256 groupshared rows
-    // and write their element once. No element is written twice, so the write is
-    // race-free without an atomic, and every probe gets all 9 values — a probe
-    // with no visible ray writes 9 zeros rather than nothing.
-    //
-    // The barrier above orders the groupshared writes. The `probe >= probeCount`
-    // return is group-uniform, so no group reaches this line with a partly
-    // written table.
-    RWStructuredBuffer<float> skyVisSHOut = ResourceDescriptorHeap[Vis.skyVisSHUAVIdx];
-    if (gt.x == 0u && gt.y < BAKED_GI_SKYVIS_SH_COEFFS)
+    // Lane (0, i) owns bin i. The counters are final after the barrier above
+    // (every InterlockedAdd happened before it), so a plain read is race-free.
+    // A bin that drew no upper ray (possible only by extreme sampling luck at
+    // this ray count) reports zero rather than dividing by nothing.
+    RWStructuredBuffer<float> skyVisBinsOut = ResourceDescriptorHeap[Vis.skyVisBinsUAVIdx];
+    if (gt.x == 0u && gt.y < BAKED_GI_DIRECTIONS)
     {
-        const uint  lm  = gt.y;
-        float acc = 0.0f;
-        [loop]
-        for (uint t = 0; t < BAKED_GI_VIS_RES * BAKED_GI_VIS_RES; ++t)
-            acc += g_SkyVisSH[t][lm];
-        skyVisSHOut[probe * BAKED_GI_SKYVIS_SH_COEFFS + lm] = acc * SKYVIS_SH_NORMALIZE;
+        const uint total = g_BinTotal[gt.y];
+        const float fraction = (total > 0u) ? (float)g_BinOpen[gt.y] / (float)total : 0.0f;
+        skyVisBinsOut[probe * BAKED_GI_DIRECTIONS + gt.y] = fraction;
     }
 }

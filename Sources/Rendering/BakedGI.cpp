@@ -26,10 +26,10 @@
 // that costs a day to find.
 //
 // Measured 2026-10-29, after the dead-slot cleanup.
-//   BakedGIUpdateParams  (BakedGI_Update.hlsl): 0, 12, 16, 32, 60, 64, Size 68
-//     and, appended 2026-11-04 for the sky-visibility A/B: skyVisSHSRVIdx 68,
-//     skyVisMode 72, Size 76.
-//   BakedGIVisParams     (BakedGI_Visibility.hlsl): skyVisSHUAVIdx 40, Size 44
+//   BakedGIUpdateParams  (BakedGI_Update.hlsl): 0, 12, 16, 32, 60, 64
+//     and, after the option-A fold-V removal: skyMatrixUAVIdx 68, Size 72.
+//   BakedGIVisParams     (BakedGI_Visibility.hlsl): skyVisBinsUAVIdx 40,
+//                            Size 44 (the SH9 field's slot is retired)
 //   BakedGIBakeParams    (BakedGI_Bake.hlsl):   seedDir 68, sunState 72,
 //                            batchIndex 76, Size 80
 //   BakedGIRayDebugParams (BakedGI_RayDebug.hlsl): seedDir 56, sunState 60,
@@ -43,15 +43,16 @@ static_assert(offsetof(BakedGIUpdateParams, responseSRVIdx)    == 16, "update pa
 static_assert(offsetof(BakedGIUpdateParams, litSunUAVIdx)      == 32, "update params: lit sun UAV moved");
 static_assert(offsetof(BakedGIUpdateParams, dimZ)              == 60, "update params: dimZ moved");
 static_assert(offsetof(BakedGIUpdateParams, sunResponseSRVIdx) == 64, "update params: sun response SRV moved");
-static_assert(offsetof(BakedGIUpdateParams, skyVisSHSRVIdx)    == 68, "update params: sky-vis SH SRV moved");
-static_assert(offsetof(BakedGIUpdateParams, skyVisMode)        == 72, "update params: sky-vis mode moved");
-static_assert(sizeof(BakedGIUpdateParams)                      == 76, "update params: size changed");
+// Option A: the fold-V fields are gone; the ambient matrix UAV is appended in
+// their place. Measured with dxc on both sides.
+static_assert(offsetof(BakedGIUpdateParams, skyMatrixUAVIdx)   == 68, "update params: ambient matrix UAV moved");
+static_assert(sizeof(BakedGIUpdateParams)                      == 72, "update params: size changed");
 
-// BakedGIVisParams: offsets measured with `dxc -Fc` too. skyVisSHUAVIdx 40,
+// BakedGIVisParams: offsets measured with `dxc -Fc` too. skyVisBinsUAVIdx 40,
 // sizeof 44. The shared root slot 12 is sized by the 30-dword DDGIParams, so
-// 11 dwords leave room for the next field as well.
+// 11 dwords leave room.
 static_assert(offsetof(BakedGIVisParams, metaUAVIdx)           == 36, "vis params: meta UAV moved");
-static_assert(offsetof(BakedGIVisParams, skyVisSHUAVIdx)       == 40, "vis params: sky-vis SH UAV moved");
+static_assert(offsetof(BakedGIVisParams, skyVisBinsUAVIdx)     == 40, "vis params: sky-vis bins UAV moved");
 static_assert(sizeof(BakedGIVisParams)                         == 44, "vis params: size changed");
 
 static_assert(offsetof(BakedGIBakeParams, seedDir)             == 68, "bake params: seedDir moved");
@@ -63,33 +64,6 @@ static_assert(offsetof(BakedGIRayDebugParams, seedDir)         == 56, "ray-debug
 static_assert(offsetof(BakedGIRayDebugParams, sunState)        == 60, "ray-debug params: sunState moved");
 static_assert(offsetof(BakedGIRayDebugParams, source)          == 64, "ray-debug params: source moved");
 static_assert(sizeof(BakedGIRayDebugParams)                    == 68, "ray-debug params: size changed");
-
-// -----------------------------------------------------------------------------
-// Sky-visibility SH9 normalization (the A/B's other V source).
-//
-// The visibility bake projects a binary visibility into raw SH9 with equal
-// weight for each of its 16x16x4 = 1024 rays and the factor 4*pi/N
-// (SKYVIS_SH_NORMALIZE, BakedGI_Visibility.hlsl):
-//
-//     L_lm = (4pi / N) * sum_s V_s * Y_lm(d_s)
-//
-// The reconstruction is then sum_lm L_lm Y_lm(d) with no cosine factor. For a
-// FULLY OPEN probe (V = 1 on every ray) only the DC term survives, and it must
-// reconstruct to exactly 1 at every direction:
-//
-//     (4pi/N) * N * Y00 * Y00 = 4pi * Y00^2 = 1
-//
-// Y00 = 0.28209479177387814 comes from EvalSH9Basis (Shaders/PBR.hlsl). This
-// check holds that identity, so a change to the normalization constant or to
-// the basis scale fails the build instead of biasing every probe's V.
-// -----------------------------------------------------------------------------
-namespace
-{
-constexpr double kSH9Y00       = 0.28209479177387814; // EvalSH9Basis, band 0
-constexpr double kSH9OpenValue = 4.0 * 3.14159265358979323846 * kSH9Y00 * kSH9Y00;
-}
-static_assert(kSH9OpenValue > 0.999999999 && kSH9OpenValue < 1.000000001,
-              "sky-vis SH9: the 4pi normalization does not reconstruct a fully open probe to 1");
 
 static_assert(offsetof(FrameConstants, bakedGIUseFilled)       == 1168, "runtime FILLED flag moved");
 // The two ray-debug source fields are appended after the last 4-byte scalar,
@@ -106,9 +80,17 @@ static_assert(offsetof(FrameConstants, bakedGIPhotonCount)     == 1184, "photon 
 static_assert(offsetof(FrameConstants, bakedGIPhotonSunState)  == 1188, "photon state field moved");
 static_assert(offsetof(FrameConstants, bakedGIPhotonFluxScale) == 1192, "photon flux scale moved");
 static_assert(offsetof(FrameConstants, bakedGIPhotonIdxSRVIndex) == 1196, "photon index list field moved");
-static_assert(sizeof(FrameConstants)                           == 1200, "FrameConstants size changed");
-// The SH9 sky-visibility SRV index. The two V views are its only readers, and the
-// response table carries no visibility. Measured with dxc on BakedGI_Debug.hlsl:
+// Fetch-side sky ambient (option A): three scalars appended after the photon
+// index list field. Measured with dxc on BakedGI_Debug.hlsl too. The flag at
+// 1208 is RETIRED and INERT: the ambient is unconditional now (2026-11-06),
+// and the field stays only because FrameConstants is append-only.
+static_assert(offsetof(FrameConstants, bakedGIVisBinsSRVIndex)      == 1200, "ambient bins SRV moved");
+static_assert(offsetof(FrameConstants, bakedGIAmbientMatrixSRVIndex) == 1204, "ambient matrix SRV moved");
+static_assert(offsetof(FrameConstants, bakedGIAmbientSky)            == 1208, "ambient flag moved");
+static_assert(sizeof(FrameConstants)                           == 1212, "FrameConstants size changed");
+// The retired SH9 sky-visibility SRV index. The FIELD is permanently inert
+// (the V views that read it are gone; FrameConstants is append-only), and the
+// assert keeps the offset stable for the fields after it. Measured with dxc:
 // 732. Nothing downstream moved, so the pads further on still hold.
 static_assert(offsetof(FrameConstants, bakedGISkyVisSRVIndex)  == 732, "sky-vis SRV index moved");
 
@@ -150,9 +132,6 @@ static_assert(BAKED_GI_RAY_SHADOW_BLOCKED == 2u, "ray record: shadow status BLOC
 // instance-count branch, so it is checked against the mirror it must agree with.
 static_assert(BakedGI::kRayFanChannelDeltaDirs == 7u, "ray fan: DeltaDirections channel moved");
 static_assert(BakedGI::kRayFanChannelVHitRay   == 8u, "ray fan: VHit Ray channel moved");
-static_assert(BakedGI::kSkyVisModeCount        == 2u, "sky visibility: mode count changed");
-static_assert((uint32_t)BakedGI::SkyVisMode::SH9          == 0u, "sky visibility: SH9 is not mode 0");
-static_assert((uint32_t)BakedGI::SkyVisMode::NoVisibility == 1u, "sky visibility: NoVisibility is not mode 1");
 // The photon deposit stride and capacity are read by the emit dispatch's
 // buffer sizing, the shader's slot clamp and the debug view's record walk, so
 // a change must fail somewhere that names it. The shader's mirrors are
@@ -180,10 +159,12 @@ constexpr uint32_t kProbeCacheMagic   = 0x42504744; // 'BGPD'
 // wrong. Older files cannot restore the runtime data this build requires.
 // Version 5 changed the estimator to eight rotated fibonacci batches. Version
 // 6 changed the gather sampler to the guided mixture, whose RNG stream the
-// ray-debug replay depends on. Version 7 REMOVES the bake-time dilation
-// feature: the dilated payload sections and the header's dilation count are
-// gone, so older files are the wrong length. Reject older files.
-constexpr uint32_t kProbeCacheVersion = 7;
+// ray-debug replay depends on. Version 7 removed the dilation sections. Version
+// 8 APPENDS the per-bin sky-visibility section (option A: the fetch-side sky
+// ambient reads it, so the cache must restore it). The retired SH9
+// sky-visibility field was NEVER serialized, so its removal changes no payload
+// layout and needs no version bump. Reject older files.
+constexpr uint32_t kProbeCacheVersion = 8;
 
 #pragma pack(push, 4)
 struct ProbeCacheHeader
@@ -405,6 +386,18 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
             device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_PhotonEmitPSO));
         }
     }
+
+    // --- Fetch-side sky ambient matrix (option A) ---
+    // Probe independent and fixed size (16x9 float4 = 2304 B), so it is created
+    // ONCE and outlives re-bakes: the fold rewrites it per dispatch, and its
+    // content is a pure function of the sky. m_SkyMatrixWritten stays false
+    // until the first fold, so the fetch never reads creation garbage.
+    if (!CreateStructuredBuffer(m_SkyAmbientMatrix, sizeof(float) * 4, kSkyAmbientMatrixFloat4s,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                "SB_BakedGISkyAmbientMatrix"))
+    {
+        std::cerr << "[BakedGI] Failed to create the sky ambient matrix" << std::endl;
+    }
 }
 
 bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
@@ -502,10 +495,10 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
     if (!CreateProbeBuffers())
         return false;
-    // The sky-visibility SH9 payload, reported once for each bake. 36 B for each
-    // probe: 418,176 B at 11,616 probes, 4.72 MB at the kMaxProbeCount cap.
-    std::cout << "[BakedGI] sky-visibility SH9 buffer: " << GetSkyVisSHBytes() << " B ("
-              << kSkyVisSHCoeffs * sizeof(float) << " B for each probe, "
+    // The per-bin sky-visibility payload, reported once for each bake. 64 B for
+    // each probe: the fetch-side sky ambient reads it through the cage weights.
+    std::cout << "[BakedGI] sky-visibility bins buffer: " << GetSkyVisBinsBytes() << " B ("
+              << kSkyVisBinsPerProbe * sizeof(float) << " B for each probe, "
               << m_ProbeCount << " probes)" << std::endl;
 
     // Debug-only capture buffers (term snapshots + folded balls). A failure here
@@ -543,7 +536,7 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
         vp.probeCount = m_ProbeCount;
         vp.visUAVIdx  = (uint32_t)m_Visibility.uavIndex;
         vp.metaUAVIdx = (uint32_t)m_Meta.uavIndex;
-        vp.skyVisSHUAVIdx = (uint32_t)m_SkyVisSH.uavIndex;
+        vp.skyVisBinsUAVIdx = (uint32_t)m_SkyVisBins.uavIndex;
 
         cmdList->SetComputeRoot32BitConstants(12, sizeof(BakedGIVisParams) / 4, &vp, 0);
         cmdList->SetPipelineState(m_VisBakePSO.Get());
@@ -551,22 +544,24 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
 
         // Barrier ALL THREE outputs: the transport iterations read the meta bits
         // the classification lane wrote (the visibility barrier alone would
-        // leave that write-read unordered), and the SH buffer is read by the
-        // per-frame fold after this list completes.
+        // leave that write-read unordered). The bin buffer is read by the
+        // runtime FETCH from the pixel stage on later frames, so it gets
+        // its pixel-read transition at the end of the bake, not here.
         D3D12_RESOURCE_BARRIER visBarriers[3] = {
             CD3DX12_RESOURCE_BARRIER::UAV(m_Visibility.resource.Get()),
             CD3DX12_RESOURCE_BARRIER::UAV(m_Meta.resource.Get()),
-            CD3DX12_RESOURCE_BARRIER::UAV(m_SkyVisSH.resource.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_SkyVisBins.resource.Get()),
         };
         cmdList->ResourceBarrier(3, visBarriers);
+        m_SkyVisBinsValid = true;
     }
     else
     {
         std::cerr << "[BakedGI] Visibility bake PSO missing — Chebyshev weights skipped" << std::endl;
-        // No dispatch wrote the SH buffer, so its bytes are undefined. Mark the
-        // SH data unavailable: the fold then zeroes V and the UI says so,
-        // instead of reading garbage coefficients.
-        m_SkyVisSHValid = false;
+        // No dispatch wrote the bins, so their bytes are undefined. Mark them
+        // unavailable: the fetch-side ambient then declines to read them,
+        // instead of reading garbage.
+        m_SkyVisBinsValid = false;
     }
 
     uint32_t cur = 0;
@@ -693,20 +688,23 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // Dilation was removed (2026-11-06): dead probes' cells rarely enter a
     // receiver's trilinear cage, so donor-filled data was never fetched.
 
-    // ---- Sky-visibility SH9: leave the write state ONCE, on the bake list ----
+    // ---- Per-bin sky visibility: leave the read state ONCE, on the bake list ----
     //
-    // The visibility dispatch wrote this buffer as a UAV and its barrier is
+    // The visibility dispatch wrote the bins as a UAV and its barrier is
     // recorded above, so this transition is ordered after that write and after
-    // every later UAV barrier of the bake. The per-frame fold reads the buffer
-    // through an SRV on a different command list, so the read state must be
-    // established here and once, not in RecordUpdate.
+    // every later UAV barrier of the bake. The runtime FETCH reads the bins
+    // from the PIXEL stage, so they need the combined read state — both flags,
+    // because a pixel-stage SRV read and any future compute reader are covered
+    // by one transition.
     //
     // A re-bake calls CreateProbeBuffers, which replaces the resource and sets
-    // its tracked state to UNORDERED_ACCESS again, so no stale state survives a
-    // bake. The buffer is transitioned only when a dispatch actually filled it:
-    // without the visibility PSO the bytes are undefined and nothing reads them.
-    if (m_SkyVisSHValid)
-        m_SkyVisSH.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // its tracked state to UNORDERED_ACCESS again, so no stale state survives
+    // a bake. The buffer is transitioned only when a dispatch actually filled
+    // it: without the visibility PSO the bytes are undefined and nothing
+    // reads them.
+    if (m_SkyVisBinsValid)
+        m_SkyVisBins.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                          | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     std::cout << "[BakedGI] Bake recorded (" << m_ProbeCount << " probes, "
               << "visibility: 16x16 depth moments x" << kVisStride << " texels/probe, "
@@ -2353,8 +2351,8 @@ bool BakedGI::CreateProbeBuffers()
     m_LitProbesSun  = {};
     m_Meta          = {};
     m_Visibility    = {};
-    m_SkyVisSH      = {};
-    m_SkyVisSHValid = false;
+    m_SkyVisBins    = {};
+    m_SkyVisBinsValid = false;
 
     const uint64_t responseElems = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s;
     // Sun table: one record for EACH hour state, per probe. 17 x 144 B = 2448 B
@@ -2376,23 +2374,19 @@ bool BakedGI::CreateProbeBuffers()
         !CreateStructuredBuffer(m_LitProbesSun, sizeof(float) * 4, (uint64_t)m_ProbeCount * kLitFloat4s,
                                  D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGILitSun") ||
         !CreateStructuredBuffer(m_Meta, sizeof(uint32_t), m_ProbeCount,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIMeta") ||
         !CreateStructuredBuffer(m_Visibility, sizeof(float) * 2, (uint64_t)m_ProbeCount * kVisStride,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility") ||
-        // Sky-visibility SH9 A/B data. Written by the SAME visibility dispatch,
-        // which indexes this buffer through Vis.skyVisSHUAVIdx, so it is part of
-        // the required chain and not an optional extra: a missing buffer would
-        // make the shader write through descriptor 0. 36 B for each probe.
-        !CreateStructuredBuffer(m_SkyVisSH, sizeof(float), (uint64_t)m_ProbeCount * kSkyVisSHCoeffs,
-                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGISkyVisSH"))
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIVisibility") ||
+        // Per-bin sky visibility (option A): 16 open-ray fractions for each
+        // probe, 64 B each. Written by the visibility dispatch
+        // (Vis.skyVisBinsUAVIdx), part of the required chain. The runtime
+        // fetch reads it through the receiver's cage weights.
+        !CreateStructuredBuffer(m_SkyVisBins, sizeof(float), (uint64_t)m_ProbeCount * kSkyVisBinsPerProbe,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGISkyVisBins"))
     {
         std::cerr << "[BakedGI] Failed to create probe buffers" << std::endl;
         return false;
     }
-    // The buffer exists but holds no bake yet. The visibility dispatch below
-    // fills it, and TryLoadCache clears the flag again because the cache has no
-    // SH section.
-    m_SkyVisSHValid = (m_SkyVisSH.resource != nullptr);
     return true;
 }
 
@@ -2538,14 +2532,16 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         return false;
     }
 
-    // Payload order: raw response | meta | vis | raw sun. No scratch table is
-    // serialized.
+    // Payload order: raw response | meta | vis | raw sun | sky-vis bins. No
+    // scratch table is serialized.
     const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
     const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t total = sunOffset + sunBytes;
+    const uint64_t binsBytes    = (uint64_t)m_ProbeCount * kSkyVisBinsPerProbe * sizeof(float);
+    const uint64_t binsOffset   = sunOffset + sunBytes;
+    const uint64_t total = binsOffset + binsBytes;
 
     std::vector<char> blob(static_cast<size_t>(total));
     in.read(blob.data(), static_cast<std::streamsize>(total));
@@ -2563,10 +2559,7 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
     if (!CreateProbeBuffers())
         return false;
     m_FinalResponse = h.finalResponse;
-    // The cache carries no sky-visibility SH9 section, so the buffer created
-    // above holds undefined bytes. Mark it invalid: the fold then zeroes V and
-    // the UI reports SH9 as unavailable, instead of reading a NaN field.
-    m_SkyVisSHValid = false;
+    // The BIN section IS in the file, so the copy below restores its validity.
 
     // One UPLOAD staging buffer for every section — kept alive as a member until
     // the next bake (the recorded list outlives this call).
@@ -2604,6 +2597,17 @@ bool BakedGI::TryLoadCache(ID3D12Device* device, ID3D12GraphicsCommandList* cmdL
         c.dst->Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
 
+    // The bins ride their own copy: the fetch reads them from the pixel stage,
+    // so they must NOT end in the loop's UNORDERED_ACCESS. Leave the combined
+    // read state, exactly as the visibility-bake path of a dispatched bake
+    // leaves them.
+    m_SkyVisBins.Transition(cmdList, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->CopyBufferRegion(m_SkyVisBins.resource.Get(), 0, m_CacheUpload.Get(),
+                              binsOffset, binsBytes);
+    m_SkyVisBins.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                          | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_SkyVisBinsValid = true;
+
     // Restore the sun bookkeeping EXACTLY as RecordBake leaves it after a bake.
     // Without m_SunResponseValid the fold reads an unbacked descriptor, and the
     // method-change path also treats the resident table as missing and rebakes.
@@ -2640,13 +2644,25 @@ bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandLis
                   << std::endl;
         return false;
     }
+    // The version-8 payload also requires the bin section: the fetch-side sky
+    // ambient is fetch-critical now, and undefined bytes would load as
+    // visibility fractions.
+    if (!m_SkyVisBinsValid)
+    {
+        std::cout << "[BakedGI] Probe cache NOT written: this bake produced no per-bin "
+                     "sky visibility, and the version-" << kProbeCacheVersion
+                  << " payload requires it" << std::endl;
+        return false;
+    }
 
     const uint64_t responseBytes = (uint64_t)m_ProbeCount * kDirections * kResponseFloat4s * 16;
     const uint64_t metaBytes     = (uint64_t)m_ProbeCount * sizeof(uint32_t);
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t total = sunOffset + sunBytes;
+    const uint64_t binsBytes    = (uint64_t)m_ProbeCount * kSkyVisBinsPerProbe * sizeof(float);
+    const uint64_t binsOffset   = sunOffset + sunBytes;
+    const uint64_t total = binsOffset + binsBytes;
 
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_READBACK;
@@ -2660,7 +2676,7 @@ bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandLis
     }
     GraphicsHelper::SetObjectName(m_CacheReadback.Get(), "RB_BakedGICache");
 
-    // Raw response | meta | vis | raw sun are the whole payload.
+    // Raw response | meta | vis | raw sun | sky-vis bins are the whole payload.
     // TryLoadCache and WriteCacheFile use the same offsets. Keep all three
     // places in step.
     struct Copy { GPUBuffer* src; uint64_t dstOffset; uint64_t bytes; };
@@ -2676,6 +2692,15 @@ bool BakedGI::RecordCacheReadback(ID3D12Device* device, ID3D12GraphicsCommandLis
         cmdList->CopyBufferRegion(m_CacheReadback.Get(), c.dstOffset, c.src->resource.Get(), 0, c.bytes);
         c.src->Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
+
+    // The bins ride their own copy: their read state differs from the loop's
+    // UNORDERED_ACCESS round-trip target, because the runtime fetch reads them
+    // from the pixel stage. Round-trip to the combined read state instead.
+    m_SkyVisBins.Transition(cmdList, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyBufferRegion(m_CacheReadback.Get(), binsOffset,
+                              m_SkyVisBins.resource.Get(), 0, binsBytes);
+    m_SkyVisBins.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                          | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;
 }
 
@@ -2706,7 +2731,9 @@ void BakedGI::WriteCacheFile(const std::string& scenePath)
     const uint64_t visBytes      = (uint64_t)m_ProbeCount * kVisStride * sizeof(float) * 2;
     const uint64_t sunBytes      = (uint64_t)m_ProbeCount * kSunStates * kResponseFloat4s * 16;
     const uint64_t sunOffset     = responseBytes + metaBytes + visBytes;
-    const uint64_t total = sunOffset + sunBytes;
+    const uint64_t binsBytes    = (uint64_t)m_ProbeCount * kSkyVisBinsPerProbe * sizeof(float);
+    const uint64_t binsOffset   = sunOffset + sunBytes;
+    const uint64_t total = binsOffset + binsBytes;
 
     uint8_t* mapped = nullptr;
     if (FAILED(m_CacheReadback->Map(0, nullptr, reinterpret_cast<void**>(&mapped))))
@@ -2732,6 +2759,8 @@ void BakedGI::WriteCacheFile(const std::string& scenePath)
               static_cast<std::streamsize>(visBytes));
     out.write(reinterpret_cast<const char*>(mapped + sunOffset),
               static_cast<std::streamsize>(sunBytes));
+    out.write(reinterpret_cast<const char*>(mapped + binsOffset),
+              static_cast<std::streamsize>(binsBytes));
 
     // The round-trip hook. Hashed from the SAME bytes that were just written, so
     // a load-side hash that differs proves a transport or ordering fault rather
@@ -2772,19 +2801,20 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
     p.metaSRVIdx      = (uint32_t)m_Meta.srvIndex;
     p.litUAVIdx       = (uint32_t)m_LitProbes.uavIndex;
     p.litSkyUAVIdx    = (uint32_t)m_LitProbesSky.uavIndex;
-    p.litSunUAVIdx    = (uint32_t)m_LitProbesSun.uavIndex;
+    p.litSunUAVIdx     = (uint32_t)m_LitProbesSun.uavIndex;
     p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
     p.spacing  = m_Spacing;
     p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
-    // Sky-visibility source for the V in the sky term. The EFFECTIVE mode is 0
-    // only when the resident bake holds SH data, and 1 for the NoVisibility
-    // diagnostic. Mode 1 reads no descriptor, so the SRV index is left at 0
-    // there and the shader never touches it. Exactly two modes exist.
-    {
-        const SkyVisMode skyVis = GetEffectiveSkyVisMode();
-        p.skyVisSHSRVIdx = (skyVis == SkyVisMode::SH9) ? GetSkyVisSHSRVIndex() : 0u;
-        p.skyVisMode     = (uint32_t)skyVis;
-    }
+    // Option A: the fold's V term is gone. What remains of the ambient here is
+    // the MATRIX write: probe 0 stores the 16x9 sky-quadrature block the fetch
+    // multiplies by the cage-blended per-bin visibility. The fold reads
+    // nothing else of the ambient — the gate is the SRVs' sentinels alone.
+    p.skyMatrixUAVIdx  = (uint32_t)m_SkyAmbientMatrix.uavIndex;
+
+    // The matrix alternates UAV (fold writes) and read state (fetch reads), so
+    // put it back in UAV for this write. First-fold case: creation left it in
+    // UAV and the Transition guard makes this free.
+    m_SkyAmbientMatrix.Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     cmdList->SetComputeRootSignature(rootSignature);
     cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
@@ -2798,4 +2828,13 @@ void BakedGI::RecordUpdate(ID3D12GraphicsCommandList* cmdList, ID3D12RootSignatu
         CD3DX12_RESOURCE_BARRIER::UAV(m_LitProbesSun.resource.Get()),
     };
     cmdList->ResourceBarrier(3, barriers);
+
+    // The fetch reads the matrix from the PIXEL stage on this and later
+    // frames, so leave the read state here and now. A Transition barrier is a
+    // full barrier, so it also orders the matrix write against the fetch.
+    // PIXEL comes FIRST in the state mask on purpose: the call wraps, and a
+    // single-line grep for the buffer must still show the pixel flag.
+    m_SkyAmbientMatrix.Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                                                | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_SkyMatrixWritten = true;
 }
