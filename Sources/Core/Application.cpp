@@ -168,6 +168,16 @@ void Application::Initialize()
         m_FrameConstants.bakedGISunWeight[sunDir].x = 0.0f;
     m_FrameConstants.bakedGILeakDebug = 0;
     m_FrameConstants.bakedGIVisCheck = 1; // step-3 weights on by default (A/B off = plain step-1 fetch)
+    // Photon map (view 10): the "no map" sentinel until a bake emits one, for
+    // the same reason as the ray-debug and Efb sentinels above — 0 is a legal
+    // descriptor index, and the shader early-outs on the sentinel. The index
+    // list sentinel follows the same rule: the list is derived data that the
+    // count readout builds, so it exists one step later than the deposits.
+    m_FrameConstants.bakedGIPhotonSRVIndex = BakedGI::kPhotonNoSRV;
+    m_FrameConstants.bakedGIPhotonIdxSRVIndex = BakedGI::kPhotonIdxNoSRV;
+    m_FrameConstants.bakedGIPhotonCount = 0;
+    m_FrameConstants.bakedGIPhotonSunState = 0;
+    m_FrameConstants.bakedGIPhotonFluxScale = 1.0f;
     // DDGI defaults: off until the ImGui method selector picks it. The atlas and
     // the probe buffers do not exist until SetupDDGI runs, so ddgiValid stays 0.
     m_FrameConstants.ddgiMode = 0;
@@ -585,6 +595,18 @@ void Application::Update(float deltaTime)
         // bake, not the current mode. The getter returns kSkyVisNoSRV when the
         // resident bake has no SH section, and the view early-outs on it.
         m_FrameConstants.bakedGISkyVisSRVIndex     = gi.GetSkyVisSHSRVIndex();
+        // Photon map (view 10). Published from the RESIDENT map's getters, the
+        // same contract as the ray-debug fields: a label or a dot cannot
+        // describe a state the deposits do not come from. No map publishes the
+        // sentinel, and the view early-outs on it. The index-list getter is
+        // its own authority: it publishes the sentinel until the readout
+        // builds a list for the resident generation, so a list can never
+        // describe a deposit buffer it was not built from.
+        m_FrameConstants.bakedGIPhotonSRVIndex  = gi.HasPhotonMap() ? gi.GetPhotonSRVIndex() : BakedGI::kPhotonNoSRV;
+        m_FrameConstants.bakedGIPhotonIdxSRVIndex = gi.GetPhotonIdxSRVIndex();
+        m_FrameConstants.bakedGIPhotonCount     = gi.HasPhotonMap() ? gi.GetPhotonTotal() : 0u;
+        m_FrameConstants.bakedGIPhotonSunState  = gi.HasPhotonMap() ? gi.GetPhotonSunState() : 0u;
+        m_FrameConstants.bakedGIPhotonFluxScale = gi.HasPhotonMap() ? gi.GetPhotonFluxScale() : 1.0f;
         // Runtime FILLED eligibility follows the same effective getter that selects
         // the tables. Raw A/B mode publishes zero even when meta holds FILLED.
         const bool useFilled = gi.IsUsingDilatedTransport();
@@ -882,6 +904,32 @@ void Application::Render()
         // and Render uploads the constants again after these pending blocks, so
         // refresh them here or that upload would carry the sentinel for one frame.
         FillEfbBallConstants();
+    }
+
+    // Photon-map emit — same synced-list pattern, debug only. The transport
+    // bake reads nothing from the photon grid: the map exists for the Photon
+    // Map view. Runs after the probe bake block so a pending re-bake and a
+    // pending emit in the same frame bake the NEW grid, not the old one.
+    if (m_PendingPhotonBake)
+    {
+        m_PendingPhotonBake = false;
+        m_Renderer.PhotonBakeGI(&m_Model, (uint32_t)std::max(0, m_PhotonSunState),
+                                (uint32_t)std::max(16, m_PhotonRays));
+        // The emit replaced the buffers, and Update's constants block (which
+        // ran before this one) carries the PREVIOUS map's SRV index. Refresh
+        // from the getters here, or this frame's upload would carry it for one
+        // frame — the same reason the probe-bake block refreshes the Efb balls.
+        // PhotonBakeGI ran LogPhotonStats, so the index-list getter already
+        // describes the new generation (or the sentinel, if the readout
+        // failed).
+        {
+            BakedGI& gi = m_Renderer.GetBakedGI();
+            m_FrameConstants.bakedGIPhotonSRVIndex  = gi.HasPhotonMap() ? gi.GetPhotonSRVIndex() : BakedGI::kPhotonNoSRV;
+            m_FrameConstants.bakedGIPhotonIdxSRVIndex = gi.GetPhotonIdxSRVIndex();
+            m_FrameConstants.bakedGIPhotonCount     = gi.HasPhotonMap() ? gi.GetPhotonTotal() : 0u;
+            m_FrameConstants.bakedGIPhotonSunState  = gi.HasPhotonMap() ? gi.GetPhotonSunState() : 0u;
+            m_FrameConstants.bakedGIPhotonFluxScale = gi.HasPhotonMap() ? gi.GetPhotonFluxScale() : 1.0f;
+        }
     }
 
     // DDGI grid setup — same pattern: a synced command list of its own before
@@ -2136,6 +2184,67 @@ void Application::RenderImGui()
 
                 if (ImGui::Button("Rebuild GI Probes"))
                     m_PendingGIProbeBake = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Re-bake the transport tables. Voids the photon map: its deposit\n"
+                                      "grid keys on the probe grid, so press \"Bake Photon Map\" again\n"
+                                      "after a rebuild.");
+
+                // --- Photon map: first-bounce sun deposits (debug-first) ---
+                // The transport bake reads nothing from this map. It exists so
+                // the "Photon Map" view can show where the sun's first-bounce
+                // flux lands for ONE hour state, before any decision to replace
+                // the gather's direct term with a photon gather.
+                ImGui::Separator();
+                ImGui::Text("Photon Map (first bounce)");
+                {
+                    const BakedGI& pgi = m_Renderer.GetBakedGI();
+
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::SliderInt("Photon Sun State", &m_PhotonSunState, 0,
+                                     (int)BakedGI::kSunStates - 1, "state %d");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("The hour state the next \"Bake Photon Map\" emits toward.\n"
+                                          "Hour = 6 + 0.75 x state (TRUE SOLAR TIME, the equinox arc the\n"
+                                          "17-state table bakes), so state 8 is noon. The emission direction\n"
+                                          "comes from the state, exactly like the bake's sun pass.");
+
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::SliderInt("Photon Rays / Axis", &m_PhotonRays, 64, 2048, "%d");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Emission grid resolution per axis; the total is the square.\n"
+                                          "Each ray carries an equal share of the quad's flux, so more rays\n"
+                                          "mean denser deposits and less cap pressure, never more flux.\n"
+                                          "512 x 512 = 262,144 rays is the default; Sponza-scale scenes\n"
+                                          "hold a few deposits per probe cell at that count.");
+
+                    ImGui::BeginDisabled(!pgi.IsValid());
+                    if (ImGui::Button("Bake Photon Map"))
+                        m_PendingPhotonBake = true;
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Emit first-bounce sun photons for the selected hour state.\n"
+                                          "One parallel-ray grid leaves a quad covering the scene's sun-side\n"
+                                          "projection; every first frontface hit is sunlit BY CONSTRUCTION\n"
+                                          "(no shadow ray) and deposits albedo x quadArea / N of flux under\n"
+                                          "the unit-delta convention. Needs a valid probe bake first — the\n"
+                                          "deposit grid keys on the probe grid. Debug only: the transport\n"
+                                          "bake is untouched.");
+
+                    if (pgi.HasPhotonMap())
+                    {
+                        const float hour = BakedGI::kSunStateHour0
+                                         + BakedGI::kSunStateStepHours * (float)pgi.GetPhotonSunState();
+                        ImGui::Text("Resident map: state %u (hour %.2f), %u deposits, %u dropped,",
+                                    pgi.GetPhotonSunState(), hour,
+                                    pgi.GetPhotonTotal(), pgi.GetPhotonDropped());
+                        ImGui::Text("%u / %u cells covered", pgi.GetPhotonCellsCovered(),
+                                    pgi.GetProbeCount());
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("No photon map. Bake the probes, then bake the map.");
+                    }
+                }
 
                 // --- Diagnostic: pair the sun's RNG seed with the dominant bin ---
                 // The bake seeds from the direction index, so the sun pass (dir 0)
@@ -2357,6 +2466,7 @@ void Application::RenderImGui()
                     { "Ray Fan",          7 },
                     { "Efb Contribution", 8 },
                     { "Cage Trace",       9 },
+                    { "Photon Map",      10 },
                 };
                 constexpr int kProbeViewCount = (int)IM_ARRAYSIZE(kProbeViews);
 
@@ -2434,7 +2544,14 @@ void Application::RenderImGui()
                                       "share of the gather, AMBER = middle, RED = smallest or a member the backface test culled.\n"
                                       "The dim wireframe is the trilinear cell of the PUSHED read point (hit + n*0.1*spacing);\n"
                                       "a cage face swapped for another cell means the push crossed that box. X-RAY: this view\n"
-                                      "skips the depth test. Needs a bake AND a dump — press \"Dump Probe Ray Debug\" first.");
+                                      "skips the depth test. Needs a bake AND a dump — press \"Dump Probe Ray Debug\" first.\n"
+                                      "Photon Map: one small cube per first-bounce sun deposit of the RESIDENT map (press\n"
+                                      "\"Bake Photon Map\" first; a re-bake voids the map). Dot spacing = deposit density, so\n"
+                                      "the view answers where the sun's flux lands and how dense the coverage is. Colour = the\n"
+                                      "deposit's diffuse albedo (power x rays / quadArea — physical, no gain), so a dot that\n"
+                                      "disagrees with the surface under it is a placement defect. Deposits sit ON surfaces, so\n"
+                                      "the depth test keeps each cube's front half. Needs a bake; the hour state is the one\n"
+                                      "the map was baked for, named under the button.");
 
                 if (m_BakedGIDebugView == 2 || m_BakedGIDebugView == 5 || m_BakedGIDebugView == 6 ||
                     m_BakedGIDebugView == 8)

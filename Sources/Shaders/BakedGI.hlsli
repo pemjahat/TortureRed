@@ -73,6 +73,22 @@ float3 BakedGISunDirectionAtHour(float hour, float latRad)
     return float3(-sin(H), cos(latRad) * cos(H), sin(latRad) * cos(H));
 }
 
+// ---------------------------------------------------------------------------
+// Photon map — first-bounce sun deposits (BakedGI_PhotonEmit.hlsl).
+//
+// DEBUG-FIRST: the transport bake does not read the photon grid yet. The
+// deposit layout (3 float4: position+power, power+n.s+sun distance, normal),
+// the cell capacity and the counts buffer's extra out-of-grid slot are defined
+// ONCE in Shared/SharedTypes.h (BAKED_GI_PHOTON_CAP / BAKED_GI_PHOTON_F4),
+// which every shader reaches through CommonTracing.hlsl -> Common.hlsl and the
+// CPU asserts reach through BakedGI.h. Nothing is redefined here.
+//
+// The deposit grid is SPARSE (record slot = cell * cap + slot), so the view
+// (BakedGI_Debug.hlsl, mode 10) never walks it densely: it reads the CPU-built
+// index list of the STORED deposits (FrameConstants::bakedGIPhotonIdxSRVIndex,
+// filled by BakedGI::LogPhotonStats), one entry per instance.
+// ---------------------------------------------------------------------------
+
 // Lambertian cosine-convolution band factors (Ramamoorthi 2001): A0 = pi,
 // A1 = 2pi/3, A2 = pi/4 — matches Sky_ProjectSH9.hlsl's irradiance basis.
 // Takes the SH9 COEFFICIENT index lm (0..8): band 0 = {0}, band 1 = {1,2,3},

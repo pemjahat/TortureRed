@@ -95,6 +95,26 @@ static const float PI           = 3.14159265358979f;
 #define BAKED_GI_RAY_SHADOW_OPEN    1u
 #define BAKED_GI_RAY_SHADOW_BLOCKED 2u
 
+// ---------------------------------------------------------------------------
+// Photon-map deposit layout (first-bounce sun deposits, debug-first). ONE
+// definition for three readers, the same contract as the ray record above: the
+// writer (BakedGI_PhotonEmit.hlsl), the viewer (BakedGI_Debug.hlsl) and the
+// CPU buffer sizing / asserts (BakedGI::kPhotonCap / kPhotonF4 in BakedGI.h).
+//
+// One deposit is 3 float4 = 48 B. The unit-delta convention holds (sun
+// irradiance 1), so a deposit's power is diffuseAlbedo * quadArea / N:
+//   rec0 = (position.xyz, Phi.r)
+//   rec1 = (Phi.g, Phi.b, n.s, sun-ray hit distance)
+//   rec2 = (surface normal.xyz, 0)
+// The counts buffer holds probeCount + 1 uints: one append counter for each
+// cell (it counts ATTEMPTS and rises past the cap), plus one slot for rays
+// whose hit left the probe grid. The CPU walks the same counters
+// (BakedGI::LogPhotonStats) to build the view's dense INDEX LIST: one entry
+// for each STORED deposit (cell * cap + slot), so an instance of view 10
+// reaches every occupied cell and not only the first cells of the grid.
+#define BAKED_GI_PHOTON_CAP 64u   // deposit slots for each grid cell
+#define BAKED_GI_PHOTON_F4  3u    // float4s for each deposit
+
 // Core Frame Constants
 struct FrameConstants {
     ROW_MAJOR float4x4 viewProj;
@@ -466,6 +486,34 @@ struct FrameConstants {
     // changes size or count.
     uint bakedGIRayDebugSource;     // 1172: 0 = SUN, 1 = SKY — the dumped source
     uint bakedGIRayDebugSkyDir;     // 1176: the displayed sky bin, or 0xFFFFFFFF
+
+    // Photon map (first-bounce sun deposits, view 10). The map is baked on
+    // demand for ONE hour state (BakedGI::RecordPhotonEmit), so these describe
+    // the RESIDENT map, not a UI selection — the same contract as the ray-debug
+    // source fields above.
+    //
+    //   bakedGIPhotonSRVIndex   StructuredBuffer<float4> deposits,
+    //                           BAKED_GI_PHOTON_F4 float4 each, or the
+    //                           kPhotonNoSRV sentinel (0 is a legal descriptor).
+    //   bakedGIPhotonCount      deposited photons = the view's instance count.
+    //   bakedGIPhotonSunState   the hour state the map was baked for.
+    //   bakedGIPhotonFluxScale  rays / quadArea. A deposit's power times this
+    //                           scale is its diffuse albedo, so the view colours
+    //                           by where the flux landed without an arbitrary
+    //                           gain.
+    //   bakedGIPhotonIdxSRVIndex StructuredBuffer<uint>, the dense index list
+    //                           of the STORED deposits (instance -> record),
+    //                           built by LogPhotonStats from the count
+    //                           readback, or the kPhotonIdxNoSRV sentinel.
+    //
+    // Appended last on purpose: every earlier offset is unchanged. All five
+    // are 4-byte scalars after a uint, so no pad is needed on either side.
+    // Measured on both sides: 1180, 1184, 1188, 1192, 1196, sizeof 1200.
+    uint  bakedGIPhotonSRVIndex;    // 1180: deposits SRV, or 0xFFFFFFFF
+    uint  bakedGIPhotonCount;       // 1184: deposited photon count
+    uint  bakedGIPhotonSunState;    // 1188: hour state of the resident map
+    float bakedGIPhotonFluxScale;   // 1192: rays / quadArea (albedo recovery)
+    uint  bakedGIPhotonIdxSRVIndex; // 1196: stored-deposit index list SRV, or 0xFFFFFFFF
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.
@@ -639,6 +687,39 @@ struct BakedGIRayDebugParams {
     // sizeof 68. The root-constant slot is sized by the 30-dword DDGIParams, so it
     // still fits. There is no sky-bin field: a SKY dispatch takes the bin from the
     // group index, which is why one dispatch can fill all 16 groups.
+};
+
+// Root constants (compute slot 12 / b2) for the on-demand photon-map emit
+// dispatch. DEBUG-FIRST: the transport bake does not read the photon grid yet.
+// One thread per sun ray; see Shaders/BakedGI_PhotonEmit.hlsl.
+//
+// ALL SCALARS, no vectors: HLSL never splits a vector across a 16-byte
+// boundary but C++ packs a float3 at 4 bytes, so the quad and sun directions
+// are spelled as individual floats — the same discipline BakedGIBakeParams
+// uses for gridMin. Every offset is then identical on both sides with no pad.
+//
+// 108 B = 27 dwords, below the 30-dword DDGIParams that sizes root slot 12.
+// Measured on both sides: sunState 44, quadOrigin 48, raysX 84, sizeof 108.
+struct BakedGIPhotonEmitParams {
+    float gridMinX, gridMinY, gridMinZ;
+    float spacing;
+    uint  dimX, dimY, dimZ;
+    uint  probeCount;                    // cells; counts[probeCount] is the out-of-grid slot
+    float sunDirX, sunDirY, sunDirZ;     // TO-SUN unit direction of the hour state
+    uint  sunState;                      // 0..BakedGI::kSunStates-1 (seed + labels)
+
+    // The emission quad: corner plus the two FULL-extent edge vectors. The CPU
+    // builds it from the scene bounds projected perpendicular to the sun, with
+    // the quad placed outside the scene on the sun side.
+    float quadOriginX, quadOriginY, quadOriginZ;
+    float quadRightX, quadRightY, quadRightZ;
+    float quadUpX, quadUpY, quadUpZ;
+
+    uint  raysX, raysY;                  // emission grid resolution (N = raysX * raysY)
+    uint  photonUAVIdx;                  // RW: deposits, BAKED_GI_PHOTON_F4 float4 each
+    uint  countUAVIdx;                   // RW: append counters, probeCount + 1 uints
+    uint  photonCap;                     // BAKED_GI_PHOTON_CAP (the CPU mirror sizes the buffer)
+    float rayTMax;                       // crosses the whole scene from the quad
 };
 
 // Root constants for the visibility-moment bake dispatch (step 3). One

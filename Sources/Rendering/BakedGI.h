@@ -627,6 +627,101 @@ public:
     // the fan draws a real one, and the log and the picture would disagree.
     void LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const;
 
+    // ---------------------------------------------------------------------
+    // PHOTON MAP — first-bounce sun deposits. DEBUG-FIRST.
+    //
+    // The transport bake does NOT read the photon grid yet. The map exists so
+    // the "Photon Map" debug view can show where the sun's first-bounce flux
+    // lands for ONE hour state, before any decision to replace the gather's
+    // direct term with a photon gather.
+    //
+    // Emission: one grid of parallel rays along the hour state's direction,
+    // stratified over a quad that covers the scene's projected bounds. The
+    // first frontface hit of each ray is sunlit BY CONSTRUCTION (no shadow
+    // ray), and deposits Phi = diffuseAlbedo * quadArea / N under the
+    // unit-delta convention (BakedGI_PhotonEmit.hlsl).
+    //
+    // A map describes ONE hour state of ONE bake's grid. RecordBake voids it;
+    // baking a new state replaces it. Lifecycle rule (defect 2): VOID FIRST,
+    // PUBLISH LAST. RecordPhotonEmit voids the published state BEFORE it
+    // recreates the buffers, and re-publishes only on success, so a failed
+    // press leaves the no-map sentinel over the new buffers — never the
+    // previous generation's totals. A failed bake means NO map.
+    // ---------------------------------------------------------------------
+    // Deposit capacity for each probe cell, and float4s per deposit. The
+    // shader's BAKED_GI_PHOTON_CAP / BAKED_GI_PHOTON_F4 (BakedGI.hlsli) are
+    // the mirrors; the record layout (position, power, n.s, sun distance,
+    // normal) is documented there.
+    static constexpr uint32_t kPhotonCap = 64;
+    static constexpr uint32_t kPhotonF4  = 3;
+    // "No photon map" sentinel for FrameConstants::bakedGIPhotonSRVIndex. 0 is
+    // a legal descriptor index, so it cannot mean "none": the view early-outs
+    // on this value before it declares the SRV. Same rule as kEfbBallNoSRV.
+    static constexpr uint32_t kPhotonNoSRV = 0xFFFFFFFFu;
+    // "No index list" sentinel for FrameConstants::bakedGIPhotonIdxSRVIndex,
+    // the same rule and the same value as kPhotonNoSRV under a name of its
+    // own: the list is DERIVED data (LogPhotonStats builds it from the count
+    // readback), so it can be absent while the deposits exist — a failed
+    // readout, a zero-deposit bake — and the view must decline to draw then.
+    // The shader spells it BAKED_GI_PHOTON_IDX_NO_SRV (BakedGI_Debug.hlsl).
+    static constexpr uint32_t kPhotonIdxNoSRV = 0xFFFFFFFFu;
+
+    // Records the emit dispatch for one hour state into cmdList, on a list the
+    // caller executes and waits on (the BakeGIProbes pattern). Requires a
+    // valid resident bake: the deposit grid keys on the probe grid. raysPerAxis
+    // is clamped to [16, 4096] and squared internally.
+    //
+    // VOID FIRST, PUBLISH LAST: the buffers are recreated on every call, so
+    // the published state is voided before the first creation and re-published
+    // only on success. Every failure return prints one console line with the
+    // reason, because the log is the only cross-check a capture cannot give.
+    bool RecordPhotonEmit(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                          ID3D12RootSignature* rootSignature, Model* model,
+                          D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
+                          D3D12_GPU_VIRTUAL_ADDRESS tlasAddress,
+                          D3D12_GPU_VIRTUAL_ADDRESS materialsAddress,
+                          D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
+                          D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
+                          D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
+                          uint32_t sunState, uint32_t raysPerAxis);
+    // Maps the count readback (GPU idle after the caller's wait) and logs the
+    // coverage: stored / cap-dropped / out-of-grid / cells covered. Fills the
+    // getters' numbers and builds the view's index list; call once after the
+    // emit list completed. The device creates the list buffer, the same way
+    // RecordMetaReadback takes one.
+    void LogPhotonStats(ID3D12Device* device);
+
+    // The resident map. False before the first emit and after every re-bake.
+    bool     HasPhotonMap() const { return m_PhotonValid; }
+    uint32_t GetPhotonSRVIndex() const { return (uint32_t)m_Photons.srvIndex; }
+    // Deposited photons (min(count, cap) summed). The view's instance count.
+    uint32_t GetPhotonTotal() const { return m_PhotonTotal; }
+    // The hour state the resident map was baked for, so a label cannot name
+    // another state.
+    uint32_t GetPhotonSunState() const { return m_PhotonSunState; }
+    // rays / quadArea. A deposit's power times this is its diffuse albedo.
+    float    GetPhotonFluxScale() const { return m_PhotonFluxScale; }
+    // Photons the cell cap dropped plus rays whose hit left the grid.
+    uint32_t GetPhotonDropped() const { return m_PhotonDropped; }
+    // Grid cells holding at least one deposit.
+    uint32_t GetPhotonCellsCovered() const { return m_PhotonCells; }
+    // The dense index list the view walks (instance -> stored deposit record),
+    // or kPhotonIdxNoSRV when no list describes the resident map: before the
+    // first emit, after every emit that LogPhotonStats has not read out yet,
+    // after a re-bake (the getter tests m_PhotonValid too, so a voided map
+    // cannot publish a live list index), and when the readout or the buffer
+    // creation failed. The list is one generation's DERIVED data, never a
+    // second source of truth: the entries are the counts the readout read.
+    uint32_t GetPhotonIdxSRVIndex() const
+    {
+        return (m_PhotonValid && m_PhotonIdxValid) ? (uint32_t)m_PhotonIndices.srvIndex
+                                                   : kPhotonIdxNoSRV;
+    }
+    // The emit leaves the deposit buffer in UNORDERED_ACCESS, so the read side
+    // moves it to a shader-read state before the view draws (the same
+    // placement rule as TransitionRayDebugForRead).
+    void     TransitionPhotonForRead(ID3D12GraphicsCommandList* cmdList);
+
     // Ray Fan colour channel that swaps the geometry: it draws the 16 fibonacci
     // sky-quadrature directions of the fan's probe, plus one marker box for the
     // sun's direction at the current hour, instead of the 64 gather rays. It
@@ -914,6 +1009,33 @@ private:
     mutable std::vector<RayCandidate> m_RayCandidates[kDirections];
     mutable uint32_t m_RayCandidateDirs = 0u;
     bool m_LoadedFromCache = false;
+
+    // Photon map (first-bounce sun deposits, debug-first). The buffers are
+    // (re)created by every RecordPhotonEmit; CreateStructuredBuffer reuses the
+    // descriptor slots, the same property the ray-debug dump relies on. The
+    // readback holds probeCount + 1 counters (the extra slot is the out-of-grid
+    // count). Lifecycle: RecordBake voids the map (the grid it keys on is
+    // gone); RecordPhotonEmit voids the published state before it recreates
+    // the buffers and re-publishes only on success, so no failure return can
+    // leave the previous generation's numbers over a new, empty buffer.
+    GPUBuffer m_Photons;      // probeCount * kPhotonCap * kPhotonF4 float4s
+    GPUBuffer m_PhotonCounts; // probeCount + 1 uints (append counters)
+    // The view's instance -> record list, m_PhotonTotal uints on an UPLOAD
+    // heap with a persistent Map (the SB_RtxdiNeighborOffsets pattern). The
+    // deposits are sparse, so without this list a dense view walk reaches only
+    // the first cells of the grid. Filled once per bake by LogPhotonStats on a
+    // synced GPU; voided by every emit (m_PhotonIdxValid) and by every re-bake
+    // (m_PhotonValid, which the getter also tests).
+    GPUBuffer m_PhotonIndices;
+    bool     m_PhotonIdxValid = false;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_PhotonCountReadback;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_PhotonEmitPSO;
+    bool     m_PhotonValid = false;
+    uint32_t m_PhotonTotal = 0;      // Σ min(count, cap) — set by LogPhotonStats
+    uint32_t m_PhotonSunState = 0;
+    float    m_PhotonFluxScale = 1.0f;
+    uint32_t m_PhotonDropped = 0;    // cap-clamped + out-of-grid
+    uint32_t m_PhotonCells = 0;      // cells with at least one deposit
 
     // Reads one probe's meta word out of the bake's meta readback. Returns Ok
     // and writes metaWord on success. The two failures are named so the readout

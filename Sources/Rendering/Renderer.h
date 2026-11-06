@@ -71,6 +71,12 @@ public:
                          BakedGI::RayDebugSource source,
                          uint32_t skyDirection,
                          uint32_t sunState = 8u);
+    // On-demand first-bounce photon-map emit for ONE sun hour state. Debug
+    // only (the transport bake reads nothing from it); the caller runs it on a
+    // synced GPU (the BakeGIProbes pattern) and LogPhotonStats rides the wait.
+    // sunState selects the emission direction from the baked equinox arc;
+    // raysPerAxis squares into the emission grid resolution.
+    bool PhotonBakeGI(class Model* model, uint32_t sunState, uint32_t raysPerAxis);
 
     // The sun column is the two-record hour blend. There is no other mode.
     void DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,

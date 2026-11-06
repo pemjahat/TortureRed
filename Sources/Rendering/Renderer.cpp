@@ -658,14 +658,15 @@ void Renderer::CreateRootSignature()
     // (grew to 17 uints — meshlet stream bindless indices), HZBDebugParams,
     // OccludedRectDrawParams, DepthReadoutParams, CullStatsParams, CullStatsCopyParams,
     // DDGIParams (30 DWORDs — the largest consumer of this slot).
-    // BakedGIRayDebugParams (18 DWORDs), BakedGIDilationParams (10 DWORDs), and
-    // BakedGIIterFoldParams (3 DWORDs) are smaller than DDGIParams. They do not
-    // change the slot size.
+    // BakedGIRayDebugParams (18 DWORDs), BakedGIDilationParams (10 DWORDs),
+    // BakedGIIterFoldParams (3 DWORDs), and BakedGIPhotonEmitParams (26 DWORDs)
+    // are smaller than DDGIParams. They do not change the slot size.
     constexpr size_t kParam12Max = std::max(sizeof(IrCacheBindlessIndices),
         std::max(sizeof(MeshletDebugParams), std::max(sizeof(BakedGIBakeParams),
         std::max(sizeof(BakedGIUpdateParams), std::max(sizeof(BakedGIVisParams),
         std::max(sizeof(BakedGIRayDebugParams), std::max(sizeof(BakedGIIterFoldParams),
-        std::max(sizeof(BakedGIDilationParams), sizeof(DDGIParams)))))))));
+        std::max(sizeof(BakedGIDilationParams), std::max(sizeof(BakedGIPhotonEmitParams),
+        sizeof(DDGIParams))))))))));
     rootParameters[12].InitAsConstants(static_cast<UINT>(kParam12Max / 4), 2, 0); // b2: max of all shared-slot params
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
@@ -1002,6 +1003,31 @@ bool Renderer::BakeGIProbes(Model* model, float spacing, uint32_t dilationIterat
     return ok;
 }
 
+bool Renderer::PhotonBakeGI(Model* model, uint32_t sunState, uint32_t raysPerAxis)
+{
+    if (!m_RayTracingSupported || !model)
+        return false;
+
+    // Reset for recording (the BakeGIProbes pattern). The caller invokes this
+    // on a synced GPU, so releasing and recreating the photon buffers inside
+    // RecordPhotonEmit is safe.
+    CHECK_HR(m_CommandAllocator->Reset(), "CommandAllocator Reset failed");
+    CHECK_HR(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "CommandList Reset failed");
+
+    const bool ok = m_BakedGI.RecordPhotonEmit(m_Device.Get(), m_CommandList.Get(), m_RootSignature.Get(), model,
+                                               m_FrameCB.gpuAddress,
+                                               m_AccelStructure.GetTLASGPUAddress(),
+                                               model->GetMaterialBufferAddress(),
+                                               model->GetDrawNodeBufferAddress(),
+                                               model->GetGlobalIndexBufferAddress(),
+                                               model->GetGlobalVertexBufferAddress(),
+                                               sunState, raysPerAxis);
+    ExecuteCommandList(); // close + execute + WaitForPreviousFrame
+    if (ok)
+        m_BakedGI.LogPhotonStats(m_Device.Get()); // fills the getters and the view's index list
+    return ok;
+}
+
 void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightConstants& sun,
                                     float giHour)
 {
@@ -1176,6 +1202,26 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
                 return;
             m_BakedGI.TransitionRayDebugForRead(cmdList);
             instanceCount = BakedGI::kCageInstances;
+        }
+        if (view == 10u)
+        {
+            // Photon Map. One small cube for each deposited photon of the
+            // RESIDENT map, so the dot spacing reads as the deposit density and
+            // the colour (power x fluxScale = the deposit's diffuse albedo)
+            // verifies where the flux landed. The instance count is the stored
+            // total from the count readout, not cells x cap: the collapsed
+            // slots would waste 746K degenerate cubes at Sponza scale. The
+            // vertex shader maps each instance to its deposit through the
+            // CPU-built index list (LogPhotonStats), which covers EVERY
+            // occupied cell — a dense walk would reach only the first cells of
+            // the grid. Without a map (never baked, or a re-bake voided it)
+            // there is nothing to read, and the app has published the no-map
+            // sentinel.
+            if (!m_BakedGI.HasPhotonMap())
+                return;
+            m_BakedGI.TransitionPhotonForRead(cmdList);
+            instanceCount = m_BakedGI.GetPhotonTotal();
+            // vertsPerInstance stays 36: the cube path, like Placement.
         }
 
         cmdList->SetPipelineState(pso);

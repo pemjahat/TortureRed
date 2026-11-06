@@ -168,6 +168,22 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 #define BAKED_GI_DEBUG_RAYFAN     7u
 #define BAKED_GI_DEBUG_EFB        8u
 #define BAKED_GI_DEBUG_CAGE       9u
+#define BAKED_GI_DEBUG_PHOTON    10u
+
+// "No photon map" sentinel for bakedGIPhotonSRVIndex. One value with two
+// spellings: this is the shader's, and BakedGI::kPhotonNoSRV (BakedGI.h) is
+// the C++ one. 0 is a legal descriptor index, so it cannot mean "none" — the
+// mode-10 branch early-outs on the sentinel before it declares the SRV.
+#define BAKED_GI_PHOTON_NO_SRV    0xFFFFFFFFu
+
+// "No index list" sentinel for bakedGIPhotonIdxSRVIndex. One value with two
+// spellings: this is the shader's, and BakedGI::kPhotonIdxNoSRV (BakedGI.h)
+// is the C++ one. The list is DERIVED data of one photon generation — the CPU
+// builds it from the count readback (BakedGI::LogPhotonStats) — so every emit
+// and every re-bake voids it until a new readout runs. The mode-10 branch
+// early-outs on the sentinel before it declares either SRV, so a stale list
+// can never be read against a new deposit buffer.
+#define BAKED_GI_PHOTON_IDX_NO_SRV 0xFFFFFFFFu
 
 // "No response ball" sentinel for bakedGIEfbIterSRVIndex /
 // bakedGIEfbBaseSRVIndex. One value with two spellings: this is the shader's,
@@ -1081,6 +1097,60 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
 
         o.color = float4(col, 1.0f);
         o.pos   = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+        return o;
+    }
+
+    // --- Mode 10: Photon Map — first-bounce sun deposits of ONE hour state ---
+    // One small cube per deposited photon, at the deposit's position. The DOT
+    // SPACING is the distribution read: dense where the sun's flux lands near
+    // the probe grid, empty where it does not. The COLOUR is the deposit's
+    // diffuse albedo, recovered as power * bakedGIPhotonFluxScale (fluxScale =
+    // rays / quadArea, and power = albedo * quadArea / rays by the emit's
+    // unit-delta convention), so a yellow dot on a red wall is a placement
+    // defect, not a colour choice. No arbitrary gain: the scale is physical.
+    //
+    // Deposits sit ON surfaces, so the manual depth test keeps the front half
+    // of each cube — the same half-marker reading the ball views give inside
+    // cells.
+    //
+    // The deposits are SPARSE: the record of cell c, slot s sits at
+    // (c * BAKED_GI_PHOTON_CAP + s) * BAKED_GI_PHOTON_F4, so a DENSE
+    // instance * F4 walk reads only the FIRST cells of the grid — a draw of
+    // total instances covers cells 0 to total/cap - 1 (capture-proven:
+    // 67,197 instances covered cells 0..1,049 of 11,616, so no cell past the
+    // z=1 slab could draw at any data quality). The instance -> record
+    // mapping is the CPU-built INDEX LIST (bakedGIPhotonIdxSRVIndex), one
+    // entry for each STORED deposit in cell order, built by LogPhotonStats
+    // while the count readback is mapped. Instance i reads record idx[i], so
+    // every occupied cell draws. The instance count is the STORED total
+    // (min(count, cap) summed on the CPU), so no degenerate slot is walked.
+    if (mode == BAKED_GI_DEBUG_PHOTON)
+    {
+        // Early-out BEFORE declaring either SRV, the same way modes 7 and 9
+        // do: 0 is a legal descriptor index, so a no-map sentinel cannot
+        // index it. The index list carries its own sentinel because it is
+        // derived data: a failed readout must leave the view dark rather
+        // than reading a stale list against a new deposit buffer.
+        if (FrameCB.bakedGIPhotonSRVIndex == BAKED_GI_PHOTON_NO_SRV ||
+            FrameCB.bakedGIPhotonIdxSRVIndex == BAKED_GI_PHOTON_IDX_NO_SRV)
+            return o;
+        if (instance >= FrameCB.bakedGIPhotonCount)
+            return o;
+
+        StructuredBuffer<uint>    idxList = ResourceDescriptorHeap[FrameCB.bakedGIPhotonIdxSRVIndex];
+        StructuredBuffer<float4>  photons = ResourceDescriptorHeap[FrameCB.bakedGIPhotonSRVIndex];
+        const uint rec  = idxList[instance];
+        const uint base = rec * BAKED_GI_PHOTON_F4;
+        const float3 pos   = photons[base + 0u].xyz;
+        const float3 power = float3(photons[base + 0u].w,
+                                    photons[base + 1u].x,
+                                    photons[base + 1u].y);
+
+        o.color = float4(saturate(power * FrameCB.bakedGIPhotonFluxScale), 1.0f);
+
+        const float3 c = kCubeTris[vid % 36u];
+        const float3 world = pos + c * (spacing * 0.035f);
+        o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
         return o;
     }
 

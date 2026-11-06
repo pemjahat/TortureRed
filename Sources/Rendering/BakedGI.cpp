@@ -105,7 +105,15 @@ static_assert(offsetof(FrameConstants, bakedGIUseFilled)       == 1168, "runtime
 // changes size or count.
 static_assert(offsetof(FrameConstants, bakedGIRayDebugSource)  == 1172, "ray-debug source field moved");
 static_assert(offsetof(FrameConstants, bakedGIRayDebugSkyDir)  == 1176, "ray-debug sky bin field moved");
-static_assert(sizeof(FrameConstants)                           == 1180, "FrameConstants size changed");
+// The photon-map fields are appended after the sky-bin field, all 4-byte
+// scalars, so no pad is needed on either side. Measured with dxc as well:
+// 1180, 1184, 1188, 1192, 1196, and the struct size 1200.
+static_assert(offsetof(FrameConstants, bakedGIPhotonSRVIndex)  == 1180, "photon SRV field moved");
+static_assert(offsetof(FrameConstants, bakedGIPhotonCount)     == 1184, "photon count field moved");
+static_assert(offsetof(FrameConstants, bakedGIPhotonSunState)  == 1188, "photon state field moved");
+static_assert(offsetof(FrameConstants, bakedGIPhotonFluxScale) == 1192, "photon flux scale moved");
+static_assert(offsetof(FrameConstants, bakedGIPhotonIdxSRVIndex) == 1196, "photon index list field moved");
+static_assert(sizeof(FrameConstants)                           == 1200, "FrameConstants size changed");
 // The SH9 sky-visibility SRV index. The two V views are its only readers, and the
 // response table carries no visibility. Measured with dxc on BakedGI_Debug.hlsl:
 // 732. Nothing downstream moved, so the pads further on still hold.
@@ -152,6 +160,13 @@ static_assert(BakedGI::kRayFanChannelVHitRay   == 8u, "ray fan: VHit Ray channel
 static_assert(BakedGI::kSkyVisModeCount        == 2u, "sky visibility: mode count changed");
 static_assert((uint32_t)BakedGI::SkyVisMode::SH9          == 0u, "sky visibility: SH9 is not mode 0");
 static_assert((uint32_t)BakedGI::SkyVisMode::NoVisibility == 1u, "sky visibility: NoVisibility is not mode 1");
+// The photon deposit stride and capacity are read by the emit dispatch's
+// buffer sizing, the shader's slot clamp and the debug view's record walk, so
+// a change must fail somewhere that names it. The shader's mirrors are
+// BAKED_GI_PHOTON_CAP / BAKED_GI_PHOTON_F4 (BakedGI.hlsli).
+static_assert(BakedGI::kPhotonCap == BAKED_GI_PHOTON_CAP, "photon map: capacity mirror changed");
+static_assert(BakedGI::kPhotonF4  == BAKED_GI_PHOTON_F4,  "photon map: record stride mirror changed");
+static_assert(BakedGI::kPhotonNoSRV == 0xFFFFFFFFu, "photon map: sentinel changed");
 
 // =============================================================================
 // Probes/ disk cache — the ShaderCache pattern applied to the bake outputs.
@@ -393,6 +408,20 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
             device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_DilatePSO));
         }
     }
+
+    // --- First-bounce photon-map emit (compute, on demand, debug-first) ---
+    {
+        std::cout << "[BakedGI] compiling photon emit shader..." << std::endl;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc = {};
+        computeDesc.pRootSignature = rootSignature;
+        auto cs = GraphicsHelper::CompileShader("Shaders/BakedGI_PhotonEmit.hlsl", "main", "cs_6_6");
+        std::cout << "[BakedGI] photon emit shader: " << (cs.empty() ? "FAILED" : "ok") << std::endl;
+        if (!cs.empty())
+        {
+            computeDesc.CS = { cs.data(), cs.size() };
+            device->CreateComputePipelineState(&computeDesc, IID_PPV_ARGS(&m_PhotonEmitPSO));
+        }
+    }
 }
 
 bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
@@ -441,6 +470,12 @@ bool BakedGI::RecordBake(ID3D12Device* device, ID3D12GraphicsCommandList* cmdLis
     // so the cache-load early return cannot leave a previous bake's balls
     // standing as if they described this grid.
     m_EfbBallsValid   = false;
+    // The photon map keys on the PREVIOUS bake's grid. Void it here, before
+    // any early return, so no view can read deposits against a grid that no
+    // longer exists. Both flags, so the validity pair never disagrees. A new
+    // map is one button press.
+    m_PhotonValid     = false;
+    m_PhotonIdxValid  = false;
 
     // --- Grid from the scene bounds (auto-grow spacing to fit the caps) ---
     const DirectX::BoundingBox bounds = model->GetSceneWorldBounds();
@@ -805,6 +840,329 @@ void BakedGI::LogBakeStats() const
               << " bad -> valid (yellow)" << std::endl;
     std::cout << "[BakedGI] Dilation (" << m_DilationIterations << " iterations): "
               << filled << " filled, " << unfilled << " invalid and unfilled" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+// Photon map — first-bounce sun deposits. Debug only, on demand. The transport
+// bake never reads these buffers; the "Photon Map" view and LogPhotonStats do.
+// -----------------------------------------------------------------------------
+
+bool BakedGI::RecordPhotonEmit(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+                               ID3D12RootSignature* rootSignature, Model* model,
+                               D3D12_GPU_VIRTUAL_ADDRESS frameCBAddress,
+                               D3D12_GPU_VIRTUAL_ADDRESS tlasAddress,
+                               D3D12_GPU_VIRTUAL_ADDRESS materialsAddress,
+                               D3D12_GPU_VIRTUAL_ADDRESS drawNodesAddress,
+                               D3D12_GPU_VIRTUAL_ADDRESS indicesAddress,
+                               D3D12_GPU_VIRTUAL_ADDRESS verticesAddress,
+                               uint32_t sunState, uint32_t raysPerAxis)
+{
+    if (!device || !cmdList || !rootSignature || !model || !m_PhotonEmitPSO)
+    {
+        std::cerr << "[BakedGI] Photon emit rejected: device, list, signature, model or PSO missing"
+                  << std::endl;
+        return false; // nothing was touched: the resident map, if any, stands
+    }
+    // The deposit grid keys on the probe grid, so a resident bake is a
+    // prerequisite: without one there is no grid to hash into.
+    if (!m_Valid)
+    {
+        std::cerr << "[BakedGI] Photon emit needs a valid probe bake first" << std::endl;
+        return false; // nothing was touched: the resident map, if any, stands
+    }
+    if (sunState >= kSunStates)
+    {
+        std::cerr << "[BakedGI] Photon emit rejected: sun state " << sunState
+                  << " out of range" << std::endl;
+        return false; // nothing was touched: the resident map, if any, stands
+    }
+    const uint32_t rays = std::clamp(raysPerAxis, 16u, 4096u);
+    const uint64_t rayTotal = (uint64_t)rays * rays;
+
+    // --- VOID FIRST, PUBLISH LAST (defect 2) ---
+    //
+    // The buffers below are recreated on EVERY press. A failure after this
+    // point leaves a recreated — therefore EMPTY — deposit buffer under the
+    // previous generation's numbers, which is exactly the captured defect
+    // (67,197 published instances over an all-zero buffer). Void the
+    // published state before the first creation, and re-publish only on the
+    // success path at the end. A failed press means NO map: the view declines
+    // to draw, the panel reports none. The returns above this block are
+    // different: they touch nothing, so the resident map stands.
+    m_PhotonValid    = false;
+    m_PhotonIdxValid = false;
+    m_PhotonTotal    = 0;
+    m_PhotonDropped  = 0;
+    m_PhotonCells    = 0;
+
+    // --- Buffers: deposits + append counters. The caller synced the GPU, and
+    // CreateStructuredBuffer reuses the existing descriptor slots (the
+    // ray-debug dump's property, so repeated emits leak nothing). ---
+    const uint64_t photonElems = (uint64_t)m_ProbeCount * kPhotonCap * kPhotonF4;
+    if (!CreateStructuredBuffer(m_Photons, sizeof(float) * 4, photonElems,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIPhotons") ||
+        !CreateStructuredBuffer(m_PhotonCounts, sizeof(uint32_t), (uint64_t)m_ProbeCount + 1u,
+                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "SB_BakedGIPhotonCounts"))
+    {
+        std::cerr << "[BakedGI] Failed to create the photon buffers" << std::endl;
+        return false;
+    }
+
+    // The counter clear below needs a UAV descriptor in the CPU-ONLY heap.
+    // CreateStructuredBuffer allocates only the shader-visible one: its
+    // cpuUavIndex path lives in CreateBuffer's createUAV branch, which no
+    // structured buffer takes, so m_PhotonCounts.cpuUavIndex is otherwise -1
+    // and ClearUnorderedAccessViewUint would dereference a wild CPU handle
+    // (access violation, found at runtime). Create the descriptor here,
+    // mirroring the shader-visible view exactly.
+    if (m_PhotonCounts.cpuUavIndex < 0)
+        m_PhotonCounts.cpuUavIndex = (int)GraphicsHelper::AllocateCpuUAV();
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC cpuUavDesc = {};
+        cpuUavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        cpuUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        cpuUavDesc.Buffer.FirstElement = 0;
+        cpuUavDesc.Buffer.NumElements = m_ProbeCount + 1u;
+        cpuUavDesc.Buffer.StructureByteStride = sizeof(uint32_t);
+        device->CreateUnorderedAccessView(
+            m_PhotonCounts.resource.Get(), nullptr, &cpuUavDesc,
+            GraphicsHelper::GetCpuUAVHandle((UINT)m_PhotonCounts.cpuUavIndex));
+    }
+
+    // --- Emission quad: the scene's projection perpendicular to the sun,
+    // placed outside the scene on the sun side. The CPU builds it, so the
+    // shader only interpolates (the CPU-is-the-authority rule). The AABB
+    // support function gives the projected half-extents without a corner
+    // loop: the box spans ±(sum |e_i * axis_i|) along each quad axis. ---
+    using namespace DirectX;
+    const XMFLOAT3 sunDir = SunDirectionAtHourCPU(sunState);
+    const XMFLOAT3 bc = model->GetSceneWorldBounds().Center;
+    const XMFLOAT3 be = model->GetSceneWorldBounds().Extents;
+
+    const XMVECTOR s = XMLoadFloat3(&sunDir);
+    XMVECTOR right = XMVector3Cross(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), s);
+    if (XMVectorGetX(XMVector3LengthSq(right)) < 1e-6f)
+        right = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f); // vertical sun: any perpendicular axis
+    right = XMVector3Normalize(right);
+    const XMVECTOR up = XMVector3Normalize(XMVector3Cross(s, right));
+
+    XMFLOAT3 r3, u3;
+    XMStoreFloat3(&r3, right);
+    XMStoreFloat3(&u3, up);
+    const float halfR = std::abs(be.x * r3.x) + std::abs(be.y * r3.y) + std::abs(be.z * r3.z);
+    const float halfU = std::abs(be.x * u3.x) + std::abs(be.y * u3.y) + std::abs(be.z * u3.z);
+    const float radius = std::sqrt(be.x * be.x + be.y * be.y + be.z * be.z);
+    const float dist = radius + 1.0f; // quad clearance on the sun side
+
+    const float quadW = 2.0f * halfR;
+    const float quadH = 2.0f * halfU;
+    const float quadArea = quadW * quadH;
+    XMFLOAT3 qo, qr, qu;
+    XMStoreFloat3(&qo, XMLoadFloat3(&bc) + s * dist - right * halfR - up * halfU);
+    XMStoreFloat3(&qr, right * quadW);
+    XMStoreFloat3(&qu, up * quadH);
+
+    BakedGIPhotonEmitParams p = {};
+    p.gridMinX = m_GridMin.x; p.gridMinY = m_GridMin.y; p.gridMinZ = m_GridMin.z;
+    p.spacing  = m_Spacing;
+    p.dimX = m_DimX; p.dimY = m_DimY; p.dimZ = m_DimZ;
+    p.probeCount = m_ProbeCount;
+    p.sunDirX = sunDir.x; p.sunDirY = sunDir.y; p.sunDirZ = sunDir.z;
+    p.sunState = sunState;
+    p.quadOriginX = qo.x; p.quadOriginY = qo.y; p.quadOriginZ = qo.z;
+    p.quadRightX = qr.x;  p.quadRightY = qr.y;  p.quadRightZ = qr.z;
+    p.quadUpX = qu.x;     p.quadUpY = qu.y;     p.quadUpZ = qu.z;
+    p.raysX = rays; p.raysY = rays;
+    p.photonUAVIdx = (uint32_t)m_Photons.uavIndex;
+    p.countUAVIdx = (uint32_t)m_PhotonCounts.uavIndex;
+    p.photonCap = kPhotonCap;
+    // From the quad, through the whole scene, with slack: dist + 2*radius is
+    // the geometric worst case and this is comfortably above it.
+    p.rayTMax = 2.0f * (radius + dist);
+
+    // Root bindings: the bake list's own set (CBV b0 + material/draw-node/
+    // TLAS/index/vertex SRVs), so the shader's CommonTracing includes resolve.
+    cmdList->SetDescriptorHeaps(1, GraphicsHelper::GetSRVHeapAddress());
+    cmdList->SetComputeRootSignature(rootSignature);
+    cmdList->SetComputeRootConstantBufferView(0, frameCBAddress);
+    cmdList->SetComputeRootShaderResourceView(1, materialsAddress);
+    cmdList->SetComputeRootShaderResourceView(2, drawNodesAddress);
+    cmdList->SetComputeRootShaderResourceView(3, tlasAddress);
+    cmdList->SetComputeRootShaderResourceView(4, indicesAddress);
+    cmdList->SetComputeRootShaderResourceView(5, verticesAddress);
+
+    // Counters to zero before the dispatch, including the out-of-grid slot
+    // (the GPUCulling counter-clear pattern).
+    const UINT zeroes[4] = { 0, 0, 0, 0 };
+    cmdList->ClearUnorderedAccessViewUint(
+        GraphicsHelper::GetSRVGPUHandle((UINT)m_PhotonCounts.uavIndex),
+        GraphicsHelper::GetCpuUAVHandle((UINT)m_PhotonCounts.cpuUavIndex),
+        m_PhotonCounts.resource.Get(), zeroes, 0, nullptr);
+
+    cmdList->SetComputeRoot32BitConstants(12, sizeof(p) / 4, &p, 0);
+    cmdList->SetPipelineState(m_PhotonEmitPSO.Get());
+    cmdList->Dispatch((uint32_t)((rayTotal + 63) / 64), 1, 1);
+
+    D3D12_RESOURCE_BARRIER photonBarriers[2] = {
+        CD3DX12_RESOURCE_BARRIER::UAV(m_Photons.resource.Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(m_PhotonCounts.resource.Get()),
+    };
+    cmdList->ResourceBarrier(2, photonBarriers);
+
+    // Count readback rides the same list (the meta-readback pattern), so
+    // LogPhotonStats can map it right after the caller's wait.
+    const UINT64 countBytes = ((uint64_t)m_ProbeCount + 1u) * sizeof(uint32_t);
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(countBytes);
+    if (FAILED(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &rd,
+                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&m_PhotonCountReadback))))
+    {
+        std::cerr << "[BakedGI] Failed to create the photon count readback" << std::endl;
+        return false;
+    }
+    GraphicsHelper::SetObjectName(m_PhotonCountReadback.Get(), "RB_BakedGIPhotonCounts");
+    m_PhotonCounts.Transition(cmdList, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyBufferRegion(m_PhotonCountReadback.Get(), 0, m_PhotonCounts.resource.Get(), 0, countBytes);
+    m_PhotonCounts.Transition(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // PUBLISH (the second half of void-first/publish-last). The getters'
+    // numbers describe the RESIDENT map. Total stays 0 until LogPhotonStats
+    // maps the readback, so the view draws nothing before that — correct,
+    // because the counts are not known yet. The index list is voided for the
+    // same reason: the new deposits have no list until the readout builds
+    // one, and a stale list would index the new buffer with the old
+    // generation's slots.
+    m_PhotonValid = true;
+    m_PhotonSunState = sunState;
+    m_PhotonFluxScale = (float)rayTotal / quadArea;
+    m_PhotonTotal = 0;
+    m_PhotonDropped = 0;
+    m_PhotonCells = 0;
+    m_PhotonIdxValid = false;
+
+    const float hour = kSunStateHour0 + kSunStateStepHours * (float)sunState;
+    std::cout << "[BakedGI] Photon emit recorded: state " << sunState << " (hour "
+              << hour << ", to-sun " << sunDir.x << ", " << sunDir.y << ", " << sunDir.z
+              << "), " << rays << "x" << rays << " = " << rayTotal << " rays, quad "
+              << quadW << "x" << quadH << " m, cap " << kPhotonCap << "/cell, deposits "
+              << (photonElems * 16ull / (1024ull * 1024ull)) << " MB" << std::endl;
+    return true;
+}
+
+void BakedGI::LogPhotonStats(ID3D12Device* device)
+{
+    m_PhotonTotal = 0;
+    m_PhotonDropped = 0;
+    m_PhotonCells = 0;
+    m_PhotonIdxValid = false;
+    if (!m_PhotonValid || !m_PhotonCountReadback)
+    {
+        // No valid map: the normal post-re-bake state, nothing to report. A
+        // valid map with no readback cannot be counted, and a silent zero
+        // would read as "the map is empty" — say so instead. Unreachable in
+        // the current flow (the emit that published the map made the
+        // readback), kept for the invariant, not for expectation.
+        if (m_PhotonValid)
+            std::cerr << "[BakedGI] Photon stats skipped: no count readback for the resident map"
+                      << std::endl;
+        return;
+    }
+
+    uint32_t* counts = nullptr;
+    if (FAILED(m_PhotonCountReadback->Map(0, nullptr, reinterpret_cast<void**>(&counts))))
+    {
+        // The map EXISTS (m_PhotonValid stays true) but its count is unknown,
+        // so the published totals stay 0 and the index list stays void: the
+        // view stays dark rather than drawing a wrong generation. A re-press
+        // of "Bake Photon Map" is the recovery.
+        std::cerr << "[BakedGI] Failed to map the photon count readback — totals stay 0"
+                     " and the view stays dark until a new bake" << std::endl;
+        return;
+    }
+
+    uint32_t saturated = 0;
+    for (uint32_t i = 0; i < m_ProbeCount; ++i)
+    {
+        const uint32_t c = counts[i];
+        const uint32_t stored = std::min(c, kPhotonCap);
+        m_PhotonTotal  += stored;
+        m_PhotonDropped += c - stored;
+        m_PhotonCells  += (c > 0u) ? 1u : 0u;
+        saturated      += (c >= kPhotonCap) ? 1u : 0u;
+    }
+    const uint32_t outOfGrid = counts[m_ProbeCount];
+    m_PhotonDropped += outOfGrid;
+
+    // --- The view's index list: instance -> STORED deposit record ---
+    //
+    // The deposits are SPARSE (record slot = cell * cap + slot), so a dense
+    // instance * kPhotonF4 walk reads only the first cells of the grid: a draw
+    // of `total` instances covers cells 0 to total/cap - 1, and no cell past
+    // them can draw (capture-proven: 67,197 instances, cells 0..1,049 of
+    // 11,616). The list below enumerates every stored deposit in cell order —
+    // one entry for each, so the list length IS m_PhotonTotal — and the view
+    // reads record idx[instance]. Built HERE because the counts are mapped
+    // here; the entries come from the same readout the stats above came from,
+    // so the list can never disagree with the totals.
+    //
+    // UPLOAD heap with a persistent Map (the SB_RtxdiNeighborOffsets pattern,
+    // PathTracing.cpp): written ONCE per bake on a synced GPU — the caller
+    // executed and waited before this call — and read by every later frame's
+    // view, so a copy queue or a default-heap staging hop buys nothing.
+    // GENERIC_READ is already a valid shader-read state, so the list needs no
+    // transition in TransitionPhotonForRead. Worst case at the probe cap:
+    // 131072 * 64 * 4 B = 33.5 MB, debug-only. Sponza scale is about 270 KB.
+    std::vector<uint32_t> indices;
+    if (m_PhotonTotal > 0u)
+    {
+        indices.reserve(m_PhotonTotal);
+        for (uint32_t i = 0; i < m_ProbeCount; ++i)
+        {
+            const uint32_t stored = std::min(counts[i], kPhotonCap);
+            const uint32_t cellBase = i * kPhotonCap;
+            for (uint32_t slot = 0; slot < stored; ++slot)
+                indices.push_back(cellBase + slot);
+        }
+    }
+    m_PhotonCountReadback->Unmap(0, nullptr);
+
+    if (!indices.empty())
+    {
+        if (!device ||
+            !CreateStructuredBuffer(m_PhotonIndices, sizeof(uint32_t), indices.size(),
+                                    D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                    "SB_BakedGIPhotonIndices"))
+        {
+            std::cerr << "[BakedGI] Failed to create the photon index list" << std::endl;
+            return; // m_PhotonIdxValid stays false: the view declines to draw
+        }
+        // CreateStructuredBuffer keeps the upload heap persistently mapped
+        // (CreateBuffer maps on HEAP_TYPE_UPLOAD), so one memcpy publishes the
+        // list to every later frame.
+        memcpy(m_PhotonIndices.cpuPtr, indices.data(), indices.size() * sizeof(uint32_t));
+        m_PhotonIdxValid = true;
+    }
+    // A zero-deposit bake leaves no buffer at all: m_PhotonTotal is 0, so the
+    // view draws no instance and never reads the (sentinel) index.
+
+    const float hour = kSunStateHour0 + kSunStateStepHours * (float)m_PhotonSunState;
+    const float cellPct = 100.0f * (float)m_PhotonCells / (float)m_ProbeCount;
+    std::cout << "[BakedGI] Photon map (state " << m_PhotonSunState << ", hour " << hour
+              << "): " << m_PhotonTotal << " deposits in " << m_PhotonCells << "/"
+              << m_ProbeCount << " cells (" << cellPct << "%), " << saturated
+              << " cells at cap, " << m_PhotonDropped << " dropped ("
+              << outOfGrid << " outside the grid)" << std::endl;
+}
+
+void BakedGI::TransitionPhotonForRead(ID3D12GraphicsCommandList* cmdList)
+{
+    // The index list is NOT transitioned: it lives on an UPLOAD heap in
+    // GENERIC_READ, which is already a shader-read state, so no barrier ever
+    // applies to it. Only the default-heap deposit buffer needs the move.
+    if (m_Photons.resource)
+        m_Photons.Transition(cmdList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
 // -----------------------------------------------------------------------------

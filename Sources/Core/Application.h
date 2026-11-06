@@ -139,6 +139,13 @@ private:
     bool  m_BakedGIVisCheck     = true;  // A/B: step-3 fetch weights (bias + backface + Chebyshev) vs plain step-1 trilinear
     int   m_RayDebugProbeIndex  = 0;     // Probe index for the "Dump Probe Ray Debug" tool
     bool  m_PendingRayDebug     = false; // Ray-debug dump request (set by the button)
+    // Photon map (first-bounce sun deposits, debug-first). The transport bake
+    // reads nothing from it. The state and ray count are the NEXT bake's
+    // inputs; the labels read the RESIDENT map's getters, so they cannot name
+    // a state the deposits do not describe. A re-bake voids the map.
+    int   m_PhotonSunState      = 8;     // hour state for the next photon bake (8 = noon)
+    int   m_PhotonRays          = 512;   // emission grid resolution per axis (squared)
+    bool  m_PendingPhotonBake   = false; // photon-map emit request (set by the button)
     // Which baked delta table the NEXT dump replays. The selection only; it never
     // claims what is already in the buffer — BakedGI::GetRayDebugSource reports the
     // source the resident records came from, and every label reads THAT.
