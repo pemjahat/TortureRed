@@ -1047,7 +1047,6 @@ void Renderer::DispatchBakedGIUpdate(const FrameConstants& frame, const LightCon
 // waits for the GPU, exactly like BakeGIProbes, so the caller runs it on a
 // synced GPU (before BeginFrame). The readout is printed after the sync.
 bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
-                               const DirectX::XMFLOAT3* sunToDir,
                                BakedGI::RayDebugSource source,
                                uint32_t skyDirection,
                                uint32_t sunState)
@@ -1068,7 +1067,7 @@ bool Renderer::RayDebugBakedGI(Model* model, uint32_t probeIndex,
                                              probeIndex, source, skyDirection, sunState);
     ExecuteCommandList(); // close + execute + WaitForPreviousFrame
     if (ok)
-        m_BakedGI.LogRayDebugReadout(sunToDir);
+        m_BakedGI.LogRayDebugReadout();
     return ok;
 }
 

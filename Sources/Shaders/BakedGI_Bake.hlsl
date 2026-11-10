@@ -87,9 +87,12 @@ ConstantBuffer<BakedGIBakeParams>   BakeParams : register(b2);
 // stride: the records per probe. BAKED_GI_DIRECTIONS for the 16-bin table,
 //         1 for the method-3 sun table (one record for each probe).
 // idx:    the bin index, or 0 for the sun table.
-// ONE function, two callers: the only difference between the binned feedback and
-// the sun feedback is the stride and the index, so a second copy would be a
-// second thing to get wrong.
+// ONE function per TABLE FORMAT, shared by the bake and the ray-debug replay
+// (each file carries the pair, copied verbatim — keep them in step). The RGB
+// spelling below reads the SUN table (float4 records). The MONO spelling
+// reads the SKY table (scalar records, the GoW factorization): only the
+// coefficient read and the accumulator type differ; the cage, the weights
+// and the basis are identical.
 float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<float2> vis,
                             uint stride, uint idx,
                             float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
@@ -168,6 +171,69 @@ float3 EvalResponseIndirect(StructuredBuffer<float4> resp, StructuredBuffer<floa
     return max(E, float3(0.0f, 0.0f, 0.0f));
 }
 
+// The MONOCHROME spelling — the SKY table's scalar records. Copied structure,
+// scalar accumulator, BAKED_GI_RESPONSE_F stride. Keep in step with the RGB
+// function above: any cage or weight change must reach both.
+float EvalResponseIndirectMono(StructuredBuffer<float> resp, StructuredBuffer<float2> vis,
+                               uint stride, uint idx,
+                               float3 worldPos, float3 n, uint3 dims, float3 gridMin, float spacing)
+{
+    float3 xq = worldPos + n * (0.1f * spacing);
+
+    float3 t = clamp((xq - gridMin) / spacing,
+                     float3(0.0f, 0.0f, 0.0f), dims - 1.0f);
+    int3 base = int3(min(floor(t), max(dims - 2.0f, float3(0.0f, 0.0f, 0.0f))));
+    float3 f  = t - base;
+
+    float e[9] = (float[9])0;
+    float wsum = 0.0f;
+    [unroll]
+    for (uint k = 0; k < 8; ++k)
+    {
+        int3 off = int3(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
+        float3 w3 = lerp(float3(1.0f, 1.0f, 1.0f) - f, f, off);
+        float w = w3.x * w3.y * w3.z;
+
+        uint flat = BakedGIFlatten(base + off, dims);
+        float3 p  = gridMin + float3(base + off) * spacing;
+
+        float3 toProbe = p - xq;
+        float  dist    = length(toProbe);
+        float  wFull;
+        if (dist < 1e-4f)
+        {
+            wFull = w;
+        }
+        else
+        {
+            float3 dirv = toProbe / dist;
+            float3 toHit = p - worldPos;
+            float  dHit  = length(toHit);
+            float  back  = (dHit < 1e-4f) ? 1.0f : saturate(dot(n, toHit / dHit));
+            if (back <= 0.0f)
+                continue;
+            float2 m = BakedGISampleMoments(vis, flat, -dirv);
+            wFull = w * back * BakedGIChebyshev(m, dist);
+        }
+
+        uint slot = (flat * stride + idx) * BAKED_GI_RESPONSE_F;
+        [unroll]
+        for (uint lm = 0; lm < 9; ++lm)
+            e[lm] += resp[slot + lm] * wFull;
+        wsum += wFull;
+    }
+    if (wsum < 1e-6f)
+        return 0.0f;
+
+    float basis[9];
+    EvalSH9Basis(n, basis);
+    float E = 0.0f;
+    [unroll]
+    for (uint lm2 = 0; lm2 < 9; ++lm2)
+        E += (e[lm2] / wsum) * basis[lm2];
+    return max(E, 0.0f);
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -216,9 +282,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
         wDelta = BakedGIDeltaDirection(dir);
     }
 
-    RWStructuredBuffer<float4> response = ResourceDescriptorHeap[BakeParams.responseUAVIdx];
-    RWStructuredBuffer<uint>    meta     = ResourceDescriptorHeap[BakeParams.metaUAVIdx];
-    uint slot = (probe * kRespStride + kRespIdx) * BAKED_GI_RESPONSE_F4;
+    // The response table. ONE descriptor index, TWO formats: the sky table is
+    // MONOCHROME (scalar SH9, the GoW factorization — the fold multiplies by
+    // the live RGB sky radiance), the sun table is full RGB. Only the pass's
+    // own table is touched, so the other declaration is dead code the
+    // compiler removes.
+    RWStructuredBuffer<float4> responseRGB = ResourceDescriptorHeap[BakeParams.responseUAVIdx];
+    RWStructuredBuffer<float>  responseMono = ResourceDescriptorHeap[BakeParams.responseUAVIdx];
+    RWStructuredBuffer<uint>   meta     = ResourceDescriptorHeap[BakeParams.metaUAVIdx];
+    const uint slot4 = (probe * kRespStride + kRespIdx) * BAKED_GI_RESPONSE_F4;
+    const uint slotF = (probe * kRespStride + kRespIdx) * BAKED_GI_RESPONSE_F;
 
     // --- Validity: classified by the visibility pass (dispatched BEFORE the
     // transport iterations — its UAV barrier orders the write). DDGI
@@ -231,9 +304,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     if (!valid)
     {
-        [unroll]
-        for (uint z = 0; z < BAKED_GI_RESPONSE_F4; ++z)
-            response[slot + z] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (isSunPass)
+        {
+            [unroll]
+            for (uint z = 0; z < BAKED_GI_RESPONSE_F4; ++z)
+                responseRGB[slot4 + z] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        else
+        {
+            [unroll]
+            for (uint z2 = 0; z2 < BAKED_GI_RESPONSE_F; ++z2)
+                responseMono[slotF + z2] = 0.0f;
+        }
         return;
     }
 
@@ -260,15 +342,25 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // BakedGIGuideSample documents — the replay discipline. The per-ray
     // branch is uniform across the wave: `guided` is a root constant and
     // `r` is the shared loop counter.
-    StructuredBuffer<float4> responsePrev = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
+    StructuredBuffer<float4> responsePrevRGB = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
+    StructuredBuffer<float>  responsePrevMono = ResourceDescriptorHeap[BakeParams.responsePrevSRVIdx];
     StructuredBuffer<float2> visMoments   = ResourceDescriptorHeap[BakeParams.visSRVIdx];
 
     const bool guided = BakeParams.iteration > 0u;
     BakedGIGuide guide; // read only when guided, so the unset state is inert
     if (guided)
-        guide = BakedGIGuideBuild(responsePrev, slot);
+    {
+        if (isSunPass)
+            guide = BakedGIGuideBuild(responsePrevRGB, slot4);
+        else
+            guide = BakedGIGuideBuild(responsePrevMono, slotF);
+    }
 
-    float3 acc[9] = (float3[9])0;
+    // The accumulator is RGB for the sun table and a SCALAR for the sky table
+    // (the mono transport). Both live paths below are selected by isSunPass,
+    // a root constant, so the branch is uniform across the wave.
+    float3 accRGB[9] = (float3[9])0;
+    float  accMono[9] = (float[9])0;
     // Dynamic loop on purpose: [unroll] here produces a kernel with 64
     // unrolled inline RayQuery objects and the inlined feedback evaluation,
     // which can make the driver's PSO compilation appear to hang. The small
@@ -331,20 +423,36 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
 
         // Feedback: previous iteration's indirect response at the hit,
-        // visibility-weighted so it cannot cross walls/roofs.
-        float3 Efb = (BakeParams.iteration > 0u)
-            ? EvalResponseIndirect(responsePrev, visMoments, kRespStride, kRespIdx, surf.worldPos, surf.normal, dims, gridMin, BakeParams.spacing)
-            : float3(0.0f, 0.0f, 0.0f);
+        // visibility-weighted so it cannot cross walls/roofs. The format
+        // follows the pass's table: RGB for the sun pass, scalar for the
+        // mono sky pass.
+        float3 EfbRGB  = float3(0.0f, 0.0f, 0.0f);
+        float  EfbMono = 0.0f;
+        if (BakeParams.iteration > 0u)
+        {
+            if (isSunPass)
+                EfbRGB = EvalResponseIndirect(responsePrevRGB, visMoments, kRespStride, kRespIdx, surf.worldPos, surf.normal, dims, gridMin, BakeParams.spacing);
+            else
+                EfbMono = EvalResponseIndirectMono(responsePrevMono, visMoments, kRespStride, kRespIdx, surf.worldPos, surf.normal, dims, gridMin, BakeParams.spacing);
+        }
 
-        // Lambertian outgoing radiance under the delta light.
+        // Lambertian outgoing radiance under the delta light. The sky pass
+        // collapses the albedo to its LUMINANCE (the GoW factorization): the
+        // transport carries the magnitude, the fold's live L_sky supplies the
+        // hue, and the stored table is a scalar field.
         float3 diffAlbedo = surf.albedo * (1.0f - surf.metallic);
-        float3 L = diffAlbedo / PI * (NdotD * Vhit + Efb);
+        float3 LRGB   = diffAlbedo / PI * (NdotD * Vhit + EfbRGB);
+        float  LMono  = Luminance(diffAlbedo) / PI * (NdotD * Vhit + EfbMono);
 
         float basis[9];
         EvalSH9Basis(gdir, basis);
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
-            acc[lm] += basis[lm] * L * rayWeight;
+        {
+            const float w = basis[lm] * rayWeight;
+            accRGB[lm] += w * LRGB;
+            accMono[lm] += w * LMono;
+        }
     }
 
     // Shared by both strata: a uniform ray is 4*PI/GATHER_RAYS * 1, a guided
@@ -356,10 +464,21 @@ void main(uint3 dtid : SV_DispatchThreadID)
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
     {
-        const float3 batchValue = acc[lm2] * norm * BakedGIA_l(lm2);
-        const float3 previousMean = response[slot + lm2].rgb;
-        const float3 mean = (BakeParams.batchIndex == 0u)
-            ? batchValue : lerp(previousMean, batchValue, batchWeight);
-        response[slot + lm2] = float4(mean, 0.0f);
+        if (isSunPass)
+        {
+            const float3 batchValue = accRGB[lm2] * norm * BakedGIA_l(lm2);
+            const float3 previousMean = responseRGB[slot4 + lm2].rgb;
+            const float3 mean = (BakeParams.batchIndex == 0u)
+                ? batchValue : lerp(previousMean, batchValue, batchWeight);
+            responseRGB[slot4 + lm2] = float4(mean, 0.0f);
+        }
+        else
+        {
+            const float batchValue = accMono[lm2] * norm * BakedGIA_l(lm2);
+            const float previousMean = responseMono[slotF + lm2];
+            const float mean = (BakeParams.batchIndex == 0u)
+                ? batchValue : lerp(previousMean, batchValue, batchWeight);
+            responseMono[slotF + lm2] = mean;
+        }
     }
 }

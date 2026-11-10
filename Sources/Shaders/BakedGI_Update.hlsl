@@ -42,8 +42,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
 
     // The sky quadrature reads the 16-record table below; the sun term reads the
-    // separate 17-state sun table. Two tables, one thread.
-    StructuredBuffer<float4> response = ResourceDescriptorHeap[Upd.responseSRVIdx];
+    // separate 17-state sun table. Two tables, one thread. The SKY table is
+    // MONOCHROME (scalar SH9 — the GoW factorization): the fold multiplies the
+    // scalar transport by the live RGB sky radiance, so the output stays RGB
+    // with the sky's own hue. The sun table stays float4.
+    StructuredBuffer<float>  response = ResourceDescriptorHeap[Upd.responseSRVIdx];
     StructuredBuffer<float4> skySH9   = ResourceDescriptorHeap[FrameCB.skySH9BufferIndex];
     RWStructuredBuffer<float4> lit     = ResourceDescriptorHeap[Upd.litUAVIdx];
     RWStructuredBuffer<float4> litSky  = ResourceDescriptorHeap[Upd.litSkyUAVIdx];
@@ -82,13 +85,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
                     float4(skyWeight * Lsky * BakedGIA_l(mlm) * basis[mlm], 0.0f);
         }
 
-        uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F4;
+        uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F;
 
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
         {
-            float3 Rbounce = response[slot + lm].rgb;                     // sky bounces
-            coefSky[lm] += skyWeight * Lsky * Rbounce;
+            // Scalar transport x RGB sky radiance (GoW factorization): the
+            // multiply broadcasts the mono coefficient over Lsky's channels,
+            // so the bounce keeps the sky's own hue.
+            const float Rmono = response[slot + lm];
+            coefSky[lm] += skyWeight * Lsky * Rmono;
         }
     }
 

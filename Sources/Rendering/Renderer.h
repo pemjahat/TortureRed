@@ -59,15 +59,11 @@ public:
     bool BakeGIProbes(class Model* model, float spacing);
     // On-demand ray-debug re-trace of ONE probe. Debug only; the caller runs it
     // on a synced GPU (the BakeGIProbes pattern) and then reads the log.
-    // sunToDir is required. Pass the to-sun direction to name the state the
-    // readout describes. Pass nullptr for a scene with no sun. Do not add a
-    // default value, for the reason in BakedGI.h.
     // source selects the baked table the replay reads: the sun hour-state table or
     // the sky quadrature table. skyDirection is the fibonacci bin, read only by the
     // SKY source. sunState must be the state the bake was asked for, or the replay
     // traces another state's rays and the self-check reports MISMATCH.
     bool RayDebugBakedGI(class Model* model, uint32_t probeIndex,
-                         const DirectX::XMFLOAT3* sunToDir,
                          BakedGI::RayDebugSource source,
                          uint32_t skyDirection,
                          uint32_t sunState = 8u);

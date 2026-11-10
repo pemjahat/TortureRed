@@ -28,7 +28,14 @@
 // =============================================================================
 
 #define BAKED_GI_DIRECTIONS    16
-#define BAKED_GI_RESPONSE_F4   9   // float4s per (probe, dir): [0..8] = SH9 RGB lm coeffs. No slot 9.
+#define BAKED_GI_RESPONSE_F4   9   // float4s per SUN record: [0..8] = SH9 RGB lm coeffs.
+#define BAKED_GI_RESPONSE_F    9   // SCALARS per SKY record: [0..8] = SH9 MONOCHROME
+                                    // lm coeffs. The sky table stores luminance-
+                                    // weighted transport (GoW factorization): the
+                                    // fold multiplies it by the live RGB L_sky, so
+                                    // the runtime product stays RGB — sky_color x
+                                    // mono_transport. 36 B per record vs the sun
+                                    // table's 144 B.
 
 // Fibonacci-hemisphere direction set (deterministic — bake and update MUST agree).
 // These 16 directions are the SKY QUADRATURE basis. They are not the sun: the sun
@@ -348,6 +355,37 @@ BakedGIGuide BakedGIGuideBuild(StructuredBuffer<float4> respPrev, uint slot)
         // negative in dark regions, and a probability cannot be negative.
         // Whatever the clamp removes, the uniform stratum still covers.
         cum += max(0.0f, Luminance(Lhat));
+        g.cdf[j] = cum;
+    }
+    g.total = cum;
+    return g;
+}
+
+// The MONOCHROME sky table's spelling. Same cells, same CDF arithmetic, same
+// RNG discipline (the build draws nothing) — only the coefficient read is a
+// scalar and L_hat needs no luminance step. The sun table keeps the RGB
+// overload above: the two table formats are permanent, so two spellings with
+// the rule written here (the replay discipline extends to both — the bake and
+// the ray-debug replay must call the SAME one for the same table).
+BakedGIGuide BakedGIGuideBuild(StructuredBuffer<float> respPrev, uint slot)
+{
+    BakedGIGuide g;
+    float coeff[9];
+    [unroll]
+    for (uint lm = 0; lm < 9; ++lm)
+        coeff[lm] = respPrev[slot + lm] / BakedGIA_l(lm);
+
+    float cum = 0.0f;
+    [loop]
+    for (uint j = 0; j < BAKED_GI_GUIDE_CELLS; ++j)
+    {
+        float basis[9];
+        EvalSH9Basis(BakedGIGuideCellCenter(j), basis);
+        float Lhat = 0.0f;
+        [unroll]
+        for (uint l2 = 0; l2 < 9; ++l2)
+            Lhat += coeff[l2] * basis[l2];
+        cum += max(0.0f, Lhat);
         g.cdf[j] = cum;
     }
     g.total = cum;

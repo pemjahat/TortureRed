@@ -1261,17 +1261,19 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
                 // in the ball AND in that ball's DC normaliser, so it cancels in
                 // the displayed ratio — it is kept so this branch is literally
                 // BakedGI_IterFold.hlsl's formula with the sum restricted to one
-                // direction.
+                // direction. The transport tables are the MONOCHROME sky tables
+                // (scalar records): the value broadcasts to rgb and the direction
+                // renders grayscale.
                 const float wq = 2.0f * PI / (float)BAKED_GI_DIRECTIONS;
                 const uint  slot = (probe * BAKED_GI_DIRECTIONS + FrameCB.bakedGIEfbDir)
-                                 * BAKED_GI_RESPONSE_F4;
-                StructuredBuffer<float4> tabSel  = ResourceDescriptorHeap[FrameCB.bakedGIEfbTermSelSRVIndex];
-                StructuredBuffer<float4> tabBase = ResourceDescriptorHeap[FrameCB.bakedGIEfbTermBaseSRVIndex];
+                                 * BAKED_GI_RESPONSE_F;
+                StructuredBuffer<float> tabSel  = ResourceDescriptorHeap[FrameCB.bakedGIEfbTermSelSRVIndex];
+                StructuredBuffer<float> tabBase = ResourceDescriptorHeap[FrameCB.bakedGIEfbTermBaseSRVIndex];
                 [unroll]
                 for (uint i = 0; i < 9; ++i)
                 {
-                    cSel[i]  = wq * tabSel[slot + i].rgb;
-                    cBase[i] = wq * tabBase[slot + i].rgb;
+                    cSel[i]  = (wq * tabSel[slot + i]).xxx;
+                    cBase[i] = (wq * tabBase[slot + i]).xxx;
                 }
             }
             else

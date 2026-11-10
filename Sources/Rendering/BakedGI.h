@@ -27,7 +27,9 @@ class BakedGI
 public:
     static constexpr uint32_t kDirections      = 16; // delta/sky-quadrature directions
     // float4s for each (probe, direction) record: 9 SH9 RGB and nothing else.
-    static constexpr uint32_t kResponseFloat4s = 9;
+    static constexpr uint32_t kResponseFloat4s = 9;  // float4s per SUN record (RGB SH9)
+    static constexpr uint32_t kResponseFloats  = 9;  // SCALARS per SKY record (mono SH9,
+                                                     // the GoW factorization: 36 B vs 144 B)
 
     // ---- Equinox hour states: the sun direction set ----
     //
@@ -157,7 +159,13 @@ public:
     static constexpr uint32_t kRayDebugTableBase = kDirections * kDebugGatherRays * kRayRecordF4;
     static constexpr uint32_t kRayDebugBufF4s    = kRayDebugTableBase + kDirections * kResponseFloat4s;
     static constexpr uint64_t kRayDebugBufBytes  = (uint64_t)kRayDebugBufF4s * 16;
+    // The STORED-TABLE region of the readback: a capacity, sized for the
+    // largest copy. The re-accumulated table region above keeps the debug
+    // buffer's float4 layout (mono values land in channel 0); the stored copy
+    // preserves the SOURCE table's own layout — the MONOCHROME sky slice (9
+    // floats per record, kRayDebugSkyTableBytes) or ONE RGB sun record (144 B).
     static constexpr uint64_t kRayDebugTableBytes = (uint64_t)kDirections * kResponseFloat4s * 16;
+    static constexpr uint64_t kRayDebugSkyTableBytes = (uint64_t)kDirections * kResponseFloats * 4;
     static constexpr uint64_t kRayDebugStoredOff = kRayDebugBufBytes; // stored table copy follows the debug buffer
     static constexpr uint64_t kRayDebugReadbackBytes = kRayDebugBufBytes + kRayDebugTableBytes;
 
@@ -339,20 +347,6 @@ public:
     static const char* RayDebugSourceName(RayDebugSource source)
     {
         return (source == RayDebugSource::Sky) ? "SKY" : "SUN";
-    }
-
-    // The same spelling for the SECONDARY ray status of a record (rec6.w). The
-    // three numbers are BAKED_GI_RAY_SHADOW_NONE / _OPEN / _BLOCKED
-    // (SharedTypes.h), which the shader writer and the shader viewer read too, so
-    // the log, the geometry and the pixels name one state. An unknown value is
-    // reported as "?" rather than folded into NONE: a record whose status is
-    // neither of the three is a writer defect and must not read as "no ray".
-    static const char* RayDebugShadowStatusName(float status)
-    {
-        if (status < 0.5f) return "none";
-        if (status < 1.5f) return "open";
-        if (status < 2.5f) return "blocked";
-        return "?";
     }
 
     // "No direction recorded" for the sky bin and for the fan's record group.
@@ -580,7 +574,7 @@ public:
     // Names the delta source the fan draws. Pass nullptr for a scene with no sun.
     // Do not add a default value: a forgotten argument would print "no sun" while
     // the fan draws a real one, and the log and the picture would disagree.
-    void LogRayDebugReadout(const DirectX::XMFLOAT3* sunToDir) const;
+    void LogRayDebugReadout() const;
 
     // ---------------------------------------------------------------------
     // PHOTON MAP — first-bounce sun deposits. DEBUG-FIRST.

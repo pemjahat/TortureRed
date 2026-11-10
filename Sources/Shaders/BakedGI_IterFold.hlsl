@@ -49,21 +49,27 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
 
     // No validity gate: an invalid probe's stored row is already all zeroes
-    // (BakedGI_Bake.hlsl:147-155), so its ball is zero and the view's subtract
+    // (BakedGI_Bake.hlsl), so its ball is zero and the view's subtract
     // yields zero. Reading meta here would add a buffer dependency for nothing.
-    StructuredBuffer<float4>   table = ResourceDescriptorHeap[Fold.tableSRVIdx];
+    //
+    // The table is the SKY transport — MONOCHROME scalars since the GoW
+    // factorization (9 floats per record). The ball keeps the lit buffer's
+    // float4 layout, so this view evaluates it with the lit-ball code; the
+    // scalar is broadcast to rgb and the ball renders grayscale, an honest
+    // display of mono data.
+    StructuredBuffer<float>   table = ResourceDescriptorHeap[Fold.tableSRVIdx];
     RWStructuredBuffer<float4> ball  = ResourceDescriptorHeap[Fold.ballUAVIdx];
 
     const float wq = 2.0f * PI / (float)BAKED_GI_DIRECTIONS;
 
-    float3 coef[9] = (float3[9])0;
+    float coef[9] = (float[9])0;
     [unroll]
     for (uint i = 0; i < BAKED_GI_DIRECTIONS; ++i)
     {
-        const uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F4;
+        const uint slot = (probe * BAKED_GI_DIRECTIONS + i) * BAKED_GI_RESPONSE_F;
         [unroll]
         for (uint lm = 0; lm < 9; ++lm)
-            coef[lm] += wq * table[slot + lm].rgb;
+            coef[lm] += wq * table[slot + lm];
     }
 
     // 9 float4 for each probe — the lit buffer's layout (BakedGI::kLitFloat4s),
@@ -71,5 +77,5 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // lit balls. The w channel is unused there and stays 0.
     [unroll]
     for (uint lm2 = 0; lm2 < 9; ++lm2)
-        ball[probe * 9u + lm2] = float4(coef[lm2], 0.0f);
+        ball[probe * 9u + lm2] = float4(coef[lm2].xxx, 0.0f);
 }

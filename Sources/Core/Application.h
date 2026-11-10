@@ -222,14 +222,9 @@ private:
     // a bake or a method change, for the same reason.
     float m_ProbeFoldHour   = -1.0f;
 
-    // ONE definition of the to-sun direction: the light's travel direction,
-    // negated, exactly as BakedGI_Update.hlsl negates it. Four inline copies had
-    // accumulated, and the mode-swap check compares DIRECTIONS, so a divergence
-    // between two of them would silently disable that check.
-    // SunToDirNow returns +Y when the scene has no light, so a caller that cares
-    // must ask HasSunLight() as well.
-    bool HasSunLight() { return !m_Scene.GetLights().empty(); }
-    DirectX::XMFLOAT3 SunToDirNow();
+    // (The ONE-definition helpers HasSunLight/SunToDirNow that lived here are
+    // retired — 2026-11-10, when the ray-debug readout's compact form dropped
+    // their only remaining callers.)
     bool  m_GIIndirectOnly      = false; // Indirect-only scene view: draw just the indirect GI term
     int   m_GIIndirectOnlySource = 0;    // Indirect source split: 0 = full (sky + sun), 1 = sky only, 2 = sun only
     int   m_GIIndirectOnlyAlbedo = 0;    // Indirect-only albedo override: 0 = surface albedo, 1 = all white

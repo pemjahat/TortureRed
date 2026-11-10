@@ -958,19 +958,16 @@ void Application::Render()
     }
 
     // Ray-debug dump — same synced-list pattern, debug only. Runs after the
-    // bake so it reads a complete table. Logs the direction ranking, the ray
-    // ranking and the self-check.
+    // bake so it reads a complete table. Logs one DC line per dumped record
+    // and the self-check verdict.
     if (m_PendingRayDebug)
     {
         m_PendingRayDebug = false;
-        // The readout names a direction only for its message. The GI sun itself
-        // comes from the hour, and the replay's state index is what selects the
-        // record, so the light's current direction has no bearing on the trace.
-        const bool haveSunToDir = HasSunLight();
-        const DirectX::XMFLOAT3 sunToDir = SunToDirNow();
         // The SAME state the fold is interpolating, so the dump describes the
         // record the frame actually reads. A different state replays a different
-        // bake and the self-check reports MISMATCH — a true report.
+        // bake and the self-check reports MISMATCH — a true report. The GI sun
+        // comes from the hour, so the light's live direction never enters the
+        // dump: the replay traces the state's own baked direction.
         //
         // The source comes from the UI selection, which is the ONLY way it enters the
         // dump. The sky bin is the bin ON DISPLAY: a SKY dump records every bin, so
@@ -984,7 +981,6 @@ void Application::Render()
         const uint32_t skyDirection =
             (m_BakedGIRayDebugSkyDir < 0) ? 0u : (uint32_t)m_BakedGIRayDebugSkyDir;
         m_Renderer.RayDebugBakedGI(&m_Model, (uint32_t)std::max(0, m_RayDebugProbeIndex),
-                                   haveSunToDir ? &sunToDir : nullptr,
                                    source, skyDirection,
                                    (uint32_t)m_BakedGISunState);
         // The dump replaced the ray-debug buffer and cached a new verdict. Fill
@@ -1624,22 +1620,6 @@ void Application::Render()
 static const char* kMethod3WordingCaveat =
     "Probe (Baked Sun) bakes 17 hour states and blends the two that bracket Hour. "
     "The help text below describes a 16-direction SUN fold that this method does not run.";
-
-// The to-sun direction, negated from the light's travel direction exactly as the
-// sky bake and the direct lighting read it. One definition for every reader: the
-// ray-debug readout and the debug panels all call it, and the
-// mode-swap check compares directions, so a divergence between two copies would
-// silently disable that check.
-//
-// The GI sun itself comes from m_GIHour through BakedGI::SunDirectionAtHour, not
-// from here. See the note on the hour control in the Light Editor.
-DirectX::XMFLOAT3 Application::SunToDirNow()
-{
-    if (!HasSunLight())
-        return DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
-    const LightConstants& sun = m_Scene.GetLights()[0];
-    return DirectX::XMFLOAT3(-sun.direction.x, -sun.direction.y, -sun.direction.z);
-}
 
 void Application::RenderImGui()
 {
