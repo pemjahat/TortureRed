@@ -87,7 +87,12 @@ static_assert(offsetof(FrameConstants, bakedGIPhotonIdxSRVIndex) == 1196, "photo
 static_assert(offsetof(FrameConstants, bakedGIVisBinsSRVIndex)      == 1200, "ambient bins SRV moved");
 static_assert(offsetof(FrameConstants, bakedGIAmbientMatrixSRVIndex) == 1204, "ambient matrix SRV moved");
 static_assert(offsetof(FrameConstants, bakedGIAmbientSky)            == 1208, "ambient flag moved");
-static_assert(sizeof(FrameConstants)                           == 1212, "FrameConstants size changed");
+// Chebyshev Visibility debug view (view 11) colour channel. Measured with
+// dxc on BakedGI_Debug.hlsl too.
+static_assert(offsetof(FrameConstants, bakedGIMomentsChannel)        == 1212, "moments-channel field moved");
+// Probe-debug overlay composite. Measured with dxc on BakedGI_Debug.hlsl too.
+static_assert(offsetof(FrameConstants, bakedGIDebugOverlaySRVIndex) == 1216, "debug overlay SRV moved");
+static_assert(sizeof(FrameConstants)                           == 1220, "FrameConstants size changed");
 // The retired SH9 sky-visibility SRV index. The FIELD is permanently inert
 // (the V views that read it are gone; FrameConstants is append-only), and the
 // assert keeps the offset stable for the fields after it. Measured with dxc:
@@ -314,7 +319,7 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
         }
     }
 
-    // --- Probe placement debug cubes (post-composite LDR overlay) ---
+    // --- Probe placement debug cubes (depth-tested, internal-res overlay) ---
     {
         std::cout << "[BakedGI] compiling debug shaders..." << std::endl;
         auto vs = GraphicsHelper::CompileShader("Shaders/BakedGI_Debug.hlsl", "VSMain", "vs_6_6");
@@ -335,11 +340,61 @@ void BakedGI::CreatePipelines(ID3D12Device* device, ID3D12RootSignature* rootSig
             desc.PrimitiveTopologyType   = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             desc.NumRenderTargets        = 1;
             desc.SampleDesc.Count        = 1;
-            desc.RTVFormats[0]           = DXGI_FORMAT_R8G8B8A8_UNORM; // backbuffer (post-composite)
-            // No DSV: occlusion is a manual reverse-Z compare in PSMain against
-            // the GBuffer depth SRV (internal-res, mapped in the shader).
-            desc.DepthStencilState.DepthEnable = FALSE;
+            // The overlay target (Renderer::m_ProbeDebugOverlayTex), internal
+            // resolution, LDR.
+            desc.RTVFormats[0]           = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.DSVFormat               = DXGI_FORMAT_D32_FLOAT;
+            // Adria-style occlusion: the DSV holds a COPY of the GBuffer depth
+            // (the copy is the TAAU answer — a DSV must match its render
+            // target, so the overlay is internal-res like the depth). Reverse-Z
+            // means NEARER = LARGER, so GreaterEqual passes a probe at the same
+            // depth or in front, and DepthWriteMask ALL makes the balls occlude
+            // EACH OTHER in draw order — the one thing the old manual compare
+            // could never do.
+            desc.DepthStencilState.DepthEnable    = TRUE;
+            desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            desc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
             device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_DebugPSO));
+
+            // X-RAY variant for the cage trace: same shaders, depth disabled,
+            // so the whole trace chain stays visible through walls.
+            desc.DepthStencilState.DepthEnable = FALSE;
+            device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_DebugXrayPSO));
+        }
+    }
+
+    // --- Overlay composite (overlay RT -> backbuffer, alpha-blended) ---
+    {
+        auto vs = GraphicsHelper::CompileShader("Shaders/BakedGI_Debug.hlsl", "CompVS", "vs_6_6");
+        auto ps = GraphicsHelper::CompileShader("Shaders/BakedGI_Debug.hlsl", "CompPS", "ps_6_6");
+        std::cout << "[BakedGI] debug composite shaders: " << (vs.empty() || ps.empty() ? "FAILED" : "ok") << std::endl;
+        if (!vs.empty() && !ps.empty())
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+            desc.pRootSignature         = rootSignature;
+            desc.VS                      = { vs.data(), vs.size() };
+            desc.PS                      = { ps.data(), ps.size() };
+            desc.BlendState              = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            desc.SampleMask              = UINT_MAX;
+            desc.RasterizerState         = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // fullscreen triangle
+            desc.PrimitiveTopologyType   = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            desc.NumRenderTargets        = 1;
+            desc.SampleDesc.Count        = 1;
+            desc.RTVFormats[0]           = DXGI_FORMAT_R8G8B8A8_UNORM; // backbuffer
+            desc.DepthStencilState.DepthEnable = FALSE;
+            // The overlay clears to alpha 0 and geometry writes alpha 1, so
+            // the blend shows the tonemapped scene through empty regions and
+            // replaces it under drawn probes — the leak map's blend, with the
+            // same reasoning.
+            desc.BlendState.RenderTarget[0].BlendEnable    = TRUE;
+            desc.BlendState.RenderTarget[0].SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+            desc.BlendState.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
+            desc.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+            desc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+            device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_DebugCompositePSO));
         }
     }
 

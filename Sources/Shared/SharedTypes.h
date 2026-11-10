@@ -543,6 +543,34 @@ struct FrameConstants {
     uint  bakedGIVisBinsSRVIndex;      // 1200: per-bin sky visibility SRV, or 0xFFFFFFFF
     uint  bakedGIAmbientMatrixSRVIndex; // 1204: the fold's ambient matrix SRV, or 0xFFFFFFFF
     uint  bakedGIAmbientSky;            // 1208: retired — always 0
+
+    // Colour channel of the Chebyshev Visibility debug view (bakedGIDebugView
+    // 11). The view shows what the runtime fetch's Chebyshev gating sees, one
+    // UV sphere per probe, sampling the probe's octahedral depth-moment map at
+    // each sphere point through the fetch's OWN BakedGISampleMoments helper:
+    //   0 = mean distance M1 (grayscale, M1 / (2 x spacing): sky clamp reads
+    //       white, near geometry reads black),
+    //   1 = moment variance M2 - M1^2 (the penumbra signal, normalized by
+    //       spacing^2 and saturated),
+    //   2 = the Chebyshev weight BakedGIChebyshev evaluates at 1 x spacing —
+    //       what a receiver one spacing away would get from this probe.
+    // Debug-view state only: nothing on the runtime path reads it.
+    //
+    // Appended last on purpose: every earlier offset is unchanged. A uint
+    // after a uint, so no pad on either side. Measured on both sides: 1212,
+    // sizeof 1216.
+    uint  bakedGIMomentsChannel;       // 1212: view-11 colour channel, 0..2
+
+    // SRV of the probe-debug overlay (Renderer::m_ProbeDebugOverlayTex,
+    // internal resolution, R8G8B8A8). The geometry views draw into it
+    // depth-tested against a copy of the GBuffer depth; the composite pass
+    // reads it through this index and blends it onto the backbuffer. Valid
+    // after the first CreateInternalResolutionResources; debug-only.
+    //
+    // Appended last on purpose: every earlier offset is unchanged. A uint
+    // after a uint, so no pad on either side. Measured on both sides: 1216,
+    // sizeof 1220.
+    uint  bakedGIDebugOverlaySRVIndex; // 1216: the debug overlay RT's SRV
 };
 
 // Root constants (compute slot 12 / b2) for the BakedGI bake dispatches.

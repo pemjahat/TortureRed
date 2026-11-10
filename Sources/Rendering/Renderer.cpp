@@ -1082,10 +1082,12 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
     auto* cmdList = m_CommandList.Get();
     GPU_MARKER(cmdList, L"BakedGI Probe Debug");
 
-    // Post-composite LDR overlay: draw onto the final backbuffer at output
-    // resolution. Occlusion is a manual reverse-Z compare in the pixel shader
-    // (the internal-res GBuffer DSV cannot be bound at output resolution under
-    // TAAU), so bind the depth as an SRV instead.
+    // Post-composite LDR overlay. The LEAK MAP draws straight onto the
+    // backbuffer (output res, alpha-blended) reading the GBuffer depth as an
+    // SRV. The GEOMETRY views draw at INTERNAL resolution into the overlay
+    // target against the companion depth — a copy of the GBuffer depth — with
+    // test+write (Adria-style), so probes hide behind walls AND behind each
+    // other; the composite pass then blends the overlay onto the backbuffer.
     GBuffer& gbuffer = m_GBufferPass.GetGBuffer();
     GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
@@ -1114,22 +1116,26 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
 
     if (frame.bakedGIDebugView != 0)
     {
-        ID3D12PipelineState* pso = m_BakedGI.GetDebugPSO();
+        // The depth-tested PSO for every geometry view except the X-RAY cage
+        // trace (view 9), which takes the depth-less variant so the whole
+        // chain stays visible through walls.
+        const uint32_t view = frame.bakedGIDebugView;
+        ID3D12PipelineState* pso = (view == 9u) ? m_BakedGI.GetDebugXrayPSO()
+                                                 : m_BakedGI.GetDebugPSO();
         if (!pso)
             return;
 
         // Geometry per view: cube (36 verts) for placement, UV spheres
-        // (8x8x6 = 384 verts) for the five ball views (2 lit irradiance, 3 sky
-        // visibility, 5 lit sky, 6 lit sun, 8 Efb contribution), per-direction
-        // instances for the one per-direction ray view (7 ray fan, one thin box
-        // per gather ray of the displayed record) and a fixed thin-box set for the
-        // Cage Trace (9), which draws one probe's trace chain.
-        // View 4 draws nothing: its index is skipped, and the shader early-outs on
-        // 4, so a stale value draws nothing.
-        const uint32_t view = frame.bakedGIDebugView;
+        // (8x8x6 = 384 verts) for the ball views (2 lit irradiance, 5 lit
+        // sky, 6 lit sun, 8 Efb contribution, 11 Chebyshev visibility), per-
+        // direction instances for the one per-direction ray view (7 ray fan,
+        // one thin box per gather ray of the displayed record) and a fixed
+        // thin-box set for the Cage Trace (9), which draws one probe's trace
+        // chain. Views 3 and 4 draw nothing: their indexes are skipped, and
+        // the shader early-outs on both, so a stale value draws nothing.
         uint32_t vertsPerInstance = 36;
         uint32_t instanceCount    = m_BakedGI.GetProbeCount();
-        if (view == 2u || view == 3u || view == 5u || view == 6u || view == 8u)
+        if (view == 2u || view == 5u || view == 6u || view == 8u || view == 11u)
             vertsPerInstance = 384;
         if (view == 7u)
         {
@@ -1224,8 +1230,59 @@ void Renderer::DrawBakedGIProbeDebug(const FrameConstants& frame, uint32_t outpu
             // vertsPerInstance stays 36: the cube path, like Placement.
         }
 
+        // ---- Adria-style depth setup: copy the GBuffer depth, bind it as a DSV ----
+        //
+        // The companion depth (m_ProbeDebugDepthTex) matches the overlay's
+        // internal resolution, so the DSV can bind with the overlay RT — the
+        // TAAU constraint that once forced a manual compare. CopyResource
+        // brings the scene's reverse-Z depth across, so the GREATER_EQUAL
+        // test rejects probes behind geometry exactly (no output-to-internal
+        // pixel mapping at all), and DepthWriteMask ALL lets the probes
+        // occlude each other in draw order.
+        GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        GraphicsHelper::TransitionResource(cmdList, m_ProbeDebugDepthTex, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyResource(m_ProbeDebugDepthTex.resource.Get(), gbuffer.depth.resource.Get());
+        GraphicsHelper::TransitionResource(cmdList, m_ProbeDebugDepthTex, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        // Restore the SRV state: the leak map above read it, and the frame's
+        // end-state contract is PIXEL_SHADER_RESOURCE (the state the next
+        // frame's GBuffer transition expects to find, unchanged from before
+        // this pass existed).
+        GraphicsHelper::TransitionResource(cmdList, gbuffer.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        // Bind the overlay RT + the companion DSV at internal resolution, and
+        // clear the overlay to transparent (alpha 0) so the composite shows the
+        // tonemapped scene through empty regions.
+        GraphicsHelper::TransitionResource(cmdList, m_ProbeDebugOverlayTex, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const float kOverlayClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        cmdList->ClearRenderTargetView(m_ProbeDebugOverlayTex.rtvHandle, kOverlayClear, 0, nullptr);
+        D3D12_CPU_DESCRIPTOR_HANDLE overlayRtv = m_ProbeDebugOverlayTex.rtvHandle;
+        D3D12_CPU_DESCRIPTOR_HANDLE overlayDsv = m_ProbeDebugDepthTex.dsvHandle;
+        cmdList->OMSetRenderTargets(1, &overlayRtv, FALSE, &overlayDsv);
+
+        D3D12_VIEWPORT internalViewport = CD3DX12_VIEWPORT(0.0f, 0.0f,
+            static_cast<float>(m_InternalWidth), static_cast<float>(m_InternalHeight));
+        D3D12_RECT internalScissor = CD3DX12_RECT(0, 0, m_InternalWidth, m_InternalHeight);
+        cmdList->RSSetViewports(1, &internalViewport);
+        cmdList->RSSetScissorRects(1, &internalScissor);
+
         cmdList->SetPipelineState(pso);
         cmdList->DrawInstanced(vertsPerInstance, instanceCount, 0, 0);
+
+        // ---- Composite: overlay -> backbuffer, output resolution ----
+        GraphicsHelper::TransitionResource(cmdList, m_ProbeDebugOverlayTex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv2 = GetCurrentBackBufferRTV();
+        cmdList->OMSetRenderTargets(1, &rtv2, FALSE, nullptr);
+        D3D12_VIEWPORT outViewport = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(outputWidth), static_cast<float>(outputHeight));
+        D3D12_RECT outScissor = CD3DX12_RECT(0, 0, outputWidth, outputHeight);
+        cmdList->RSSetViewports(1, &outViewport);
+        cmdList->RSSetScissorRects(1, &outScissor);
+
+        ID3D12PipelineState* compPso = m_BakedGI.GetDebugCompositePSO();
+        if (compPso)
+        {
+            cmdList->SetPipelineState(compPso);
+            cmdList->DrawInstanced(3, 1, 0, 0);
+        }
     }
 }
 
@@ -1438,6 +1495,18 @@ void Renderer::CreateInternalResolutionResources(uint32_t w, uint32_t h)
     CreateTexture(m_RasterHdrOutputTex, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, 1, 1, "Tex_RasterHdrOutput");
+    // ---- BakedGI probe-debug overlay + companion depth ----
+    // The overlay holds the depth-tested probe geometry at internal res (the
+    // DSV must match its render target — the reason the old design did a
+    // manual compare); the composite upscales it onto the backbuffer. The
+    // companion depth receives a CopyResource of the GBuffer depth each debug
+    // frame, so the GBuffer's own resource never binds as a DSV twice.
+    CreateTexture(m_ProbeDebugOverlayTex, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET,
+        nullptr, 1, 1, "Tex_ProbeDebugOverlay");
+    CreateTexture(m_ProbeDebugDepthTex, w, h, DXGI_FORMAT_R32_TYPELESS,
+        D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        nullptr, 1, 1, "Tex_ProbeDebugDepth");
     // NRD/Denoise resolution-dependent resources (Rendering/Denoise.h/.cpp)
     m_Denoise.OnResolutionChanged(w, h);
     // Universal interchange textures: SSO writes, NrdPackNoise+Lighting read

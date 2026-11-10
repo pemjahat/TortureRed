@@ -1,8 +1,8 @@
 // =============================================================================
 // BakedGI_Debug.hlsl — probe debug overlay (post-composite LDR).
 //
-// Eight views (FrameConstants::bakedGIDebugView). Index 4 draws nothing, so the
-// other indices do not shift:
+// The views (FrameConstants::bakedGIDebugView). Indexes 3 and 4 draw nothing,
+// so the other indices do not shift:
 //   1 Placement      — cube per grid cell, classification A/B: green = valid
 //                      under both criteria, red = bad under both, BLUE =
 //                      newly bad (the 1cm test says valid, DDGI's >= 25%
@@ -138,6 +138,27 @@
 //                      absolute ramp would paint all eight dark red and say
 //                      nothing. The absolute level is a readout number, not a
 //                      colour — see BakedGI::LogRayDebugReadout.
+//  11 Chebyshev Visibility — the depth-moment maps as one UV sphere per
+//                      probe, sampled per sphere point through the runtime
+//                      fetch's OWN BakedGISampleMoments (the exact manual
+//                      bilerp, seam-wrapped — what the Chebyshev gating
+//                      actually reads, not an approximation). Invalid probes
+//                      draw a red ball (the house convention). Three colour
+//                      channels (bakedGIMomentsChannel):
+//                        0 Mean M1: grayscale M1 / (2 x spacing). The bake's
+//                          sky clamp is 2 x spacing, so open-sky directions
+//                          read WHITE and near geometry reads black — the
+//                          inverse of Adria's 3x ramp, chosen so the sky is
+//                          the reference maximum.
+//                        1 Variance M2 - M1^2: the penumbra signal, saturated
+//                          after / spacing^2. Grey = one clean depth; bright =
+//                          mixed-depth texels (window frames, foliage) that
+//                          soften the Chebyshev rejection.
+//                        2 Chebyshev at 1 x spacing: BakedGIChebyshev(m,
+//                          spacing) — the weight a receiver one spacing away
+//                          would get from this probe in this direction. The
+//                          leak-hunting channel: corner-band and seam
+//                          artifacts read as unexpected bright directions.
 //
 // Post-composite: drawn after the TAA resolve/tonemap directly onto the
 // backbuffer at output resolution — display-referred colors, no taaEnabled
@@ -164,6 +185,7 @@ ConstantBuffer<FrameConstants> FrameCB : register(b0);
 #define BAKED_GI_DEBUG_EFB        8u
 #define BAKED_GI_DEBUG_CAGE       9u
 #define BAKED_GI_DEBUG_PHOTON    10u
+#define BAKED_GI_DEBUG_CHEBYSHEV 11u
 
 // "No photon map" sentinel for bakedGIPhotonSRVIndex. One value with two
 // spellings: this is the shader's, and BakedGI::kPhotonNoSRV (BakedGI.h) is
@@ -1128,12 +1150,15 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
     const bool   hasData  = BakedGIProbeHasData(metaWord);
 
     if (mode == BAKED_GI_DEBUG_LIT || mode == BAKED_GI_DEBUG_LIT_SKY || mode == BAKED_GI_DEBUG_LIT_SUN ||
-        mode == BAKED_GI_DEBUG_EFB)
+        mode == BAKED_GI_DEBUG_EFB || mode == BAKED_GI_DEBUG_CHEBYSHEV)
     {
         // Lit views show the probes the runtime fetch admits (VALID; the
         // FILLED donor path is retired). Efb remains a raw bake view
-        // and admits only geometrically valid probes.
-        if (mode == BAKED_GI_DEBUG_EFB ? !valid : !hasData)
+        // and admits only geometrically valid probes. Chebyshev draws EVERY
+        // probe: invalid ones are red balls, because the fetch still reads
+        // their moments through the tier-0 ladder and leak hunting needs to
+        // see them.
+        if (mode == BAKED_GI_DEBUG_EFB ? !valid : (!hasData && mode != BAKED_GI_DEBUG_CHEBYSHEV))
             return o;
 
         // UV-sphere vertex: unit sphere position doubles as the eval normal.
@@ -1148,6 +1173,52 @@ VSOut VSMain(uint vid : SV_VertexID, uint instance : SV_InstanceID)
         const float sph   = (float)si / (float)DBG_N_STACKS * PI;         // [0, PI]
         const float theta = (float)li / (float)DBG_N_SLICES * 2.0f * PI;  // [0, 2PI]
         const float3 n = float3(sin(sph) * cos(theta), cos(sph), sin(sph) * sin(theta));
+
+        // --- Chebyshev Visibility (11): the moment map the fetch gates on ---
+        //
+        // One BakedGISampleMoments call per VERTEX (the SH balls evaluate
+        // their basis here too, so this is the established cost shape): the
+        // manual bilerp reads 4 padded-map texels and wraps the seam, exactly
+        // as the deferred fetch does. The channel formulas match the header
+        // comment and the UI tooltip.
+        if (mode == BAKED_GI_DEBUG_CHEBYSHEV)
+        {
+            if (!valid)
+            {
+                o.color = float4(0.95f, 0.15f, 0.15f, 1.0f); // the house invalid red
+            }
+            else
+            {
+                StructuredBuffer<float2> vis = ResourceDescriptorHeap[FrameCB.bakedGIProbeVisSRVIndex];
+                const float2 m = BakedGISampleMoments(vis, probe, n);
+
+                float value = 0.0f;
+                if (FrameCB.bakedGIMomentsChannel == 0u)
+                {
+                    // Mean distance: the bake clamps every stored depth at the
+                    // sky distance (2 x spacing), so the ramp needs no saturate —
+                    // white IS the clamp, black is contact geometry.
+                    value = m.x / (BAKED_GI_SKY_DISTANCE_SPACINGS * spacing);
+                }
+                else if (FrameCB.bakedGIMomentsChannel == 1u)
+                {
+                    // Variance: the penumbra signal. Spacing^2 puts "the whole
+                    // map mixed across one cell" at 1.
+                    value = saturate(max(m.y - m.x * m.x, 0.0f) / (spacing * spacing));
+                }
+                else
+                {
+                    // The gating itself: the Chebyshev weight a receiver one
+                    // spacing away would get from this probe along n.
+                    value = BakedGIChebyshev(m, spacing);
+                }
+                o.color = float4(value.xxx, 1.0f);
+            }
+
+            const float3 world = probePos + n * (spacing * 0.12f);
+            o.pos = mul(float4(world, 1.0f), FrameCB.viewProjUnjittered);
+            return o;
+        }
 
         float basis[9];
         EvalSH9Basis(n, basis);
@@ -1306,34 +1377,53 @@ float4 PSMain(VSOut i) : SV_Target
 {
     // Cage Trace is X-RAY. A wiring trace is only legible if the whole cage is
     // visible, and its probes sit around, behind and inside the very surface the
-    // traced ray hit. Decided BEFORE the depth fetch, so this view does not read
-    // the depth descriptor at all. Every other view keeps its test.
+    // traced ray hit. The renderer binds the DEPTH-LESS PSO variant for this
+    // view, so the bound DSV never rejects its geometry; this early return is
+    // the shader-side half of the same contract.
     if (FrameCB.bakedGIDebugView == BAKED_GI_DEBUG_CAGE)
         return i.color;
 
-    // Manual occlusion against the GBuffer depth (same intent as the old DSV
-    // GREATER_EQUAL test): map this output-res pixel to its internal-res
-    // texel the way NaiveTsr_Resolve does. NDC z is unaffected by the xy
-    // jitter, so the comparison is exact.
-    //
-    // CONVENTION (capture-verified, ProbeGI5 pixelhistory): this engine's
-    // projection produces clip.z = near (0.1) * view.w and clip.w = view
-    // depth, so SV_Position.z = near/dist — EXACTLY the encoding the GBuffer
-    // depth texture stores (the viewport's MinDepth/MaxDepth are 0/1, so
-    // viewport z equals NDC z; nearer = larger). The fragment z and the
-    // stored scene z are directly comparable — no remap. (An earlier edit
-    // remapped z*2-1 "back to NDC" on a wrong GL-style assumption and
-    // clipped every ball; reverted after pixelhistory proved occluded ball
-    // fragments are discarded by the plain comparison.)
-    Texture2D<float> depthTex = ResourceDescriptorHeap[FrameCB.depthIndex];
-    float2 scale = float2(FrameCB.internalWidth, FrameCB.internalHeight)
-                 / float2(FrameCB.outputWidth, FrameCB.outputHeight);
-    int2 ip = min(int2(i.pos.xy * scale),
-                  int2(FrameCB.internalWidth, FrameCB.internalHeight) - 1);
-    float sceneZ = depthTex[ip];
-    clip(i.pos.z - sceneZ + 1e-5f); // visible when the ball is nearer
-
+    // Scene occlusion is the DSV now: the geometry views draw at INTERNAL
+    // resolution into the overlay target, against a COPY of the GBuffer depth
+    // (test GreaterEqual, reverse-Z, writes ON, so the balls occlude each
+    // other too — the manual per-pixel compare this block once did could never
+    // give ball-vs-ball order, and its output-pixel-to-internal-texel mapping
+    // was exact only without TAAU's reprojection). The composite pass then
+    // blends the overlay onto the backbuffer. See CompVS/CompPS below.
     return i.color;
+}
+
+// =============================================================================
+// Probe-debug overlay composite — the second half of the depth-tested debug
+// pass. The geometry views rendered into FrameCB.bakedGIDebugOverlaySRVIndex
+// (internal res, alpha 0 where nothing drew, alpha 1 on geometry); this
+// fullscreen pass alpha-blends it onto the tonemapped backbuffer at output
+// resolution. The leak map drew EARLIER and directly onto the backbuffer, so
+// the two keep their historical order: leak, then balls over it.
+// =============================================================================
+struct CompOut
+{
+    float4 pos : SV_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+CompOut CompVS(uint vid : SV_VertexID)
+{
+    // Y-flipped fullscreen triangle (front-facing under default culling), the
+    // LeakVS pattern. tc doubles as the overlay sample coordinate.
+    CompOut o;
+    float2 tc = float2((vid << 1) & 2, vid & 2);
+    o.pos = float4(tc.x * 2.0f - 1.0f, 1.0f - tc.y * 2.0f, 0.0f, 1.0f);
+    o.uv  = tc;
+    return o;
+}
+
+float4 CompPS(CompOut i) : SV_Target
+{
+    Texture2D<float4> overlay = ResourceDescriptorHeap[FrameCB.bakedGIDebugOverlaySRVIndex];
+    // Bilinear across the internal->output upscale; the overlay is LDR debug
+    // colour, so a one-tap smooth sample is fine at any ratio.
+    return overlay.SampleLevel(g_LinearSampler, i.uv, 0.0f);
 }
 
 // =============================================================================

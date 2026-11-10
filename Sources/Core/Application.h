@@ -84,7 +84,8 @@ private:
     int   m_BakedGIDebugView    = 0;     // Probe debug overlay: 0 off, 1 placement, 2 lit irradiance,
                                          // 3 RETIRED (was sky visibility; gone with SkyVisSH, 2026-11-06),
                                          // 4 unused, 5 lit sky source, 6 lit sun source,
-                                         // 7 ray fan, 8 Efb contribution, 9 cage trace
+                                         // 7 ray fan, 8 Efb contribution, 9 cage trace,
+                                         // 10 photon map, 11 Chebyshev visibility (moment-map balls)
     float m_BakedGIDebugScale   = 1.0f;  // Lit-ball gain (DC-normalized shading multiplier)
     int   m_BakedGIEfbIter      = 2;     // Efb contribution (view 8) bake term, 0-based: 0 = term 1 (no feedback ->
                                          // black), 1 = term 2, 2 = term 3 (the last, converged term). The UI shows
@@ -99,6 +100,9 @@ private:
     int   m_BakedGIRayDebugChannel = 1;  // Ray Fan (view 7) colour channel: 0 status, 1 albedo, 2 NdotD,
                                          // 3 Vhit, 4 Efb, 5 distance, 6 direct-vs-Efb, 7 DeltaDirections,
                                          // 8 VHit Ray.
+    int   m_BakedGIMomentsChannel = 0;  // Chebyshev Visibility (view 11) colour channel: 0 mean M1
+                                         // (white = the 2x-spacing sky clamp), 1 variance (penumbra),
+                                         // 2 the Chebyshev weight at 1x spacing (leak hunting).
                                          // Channel 7 swaps the geometry to the 16 sky-quadrature directions of
                                          // the fan's probe (grayscale, uniform weight), adds one orange marker
                                          // box for the real sun and, in the SKY source, one thicker cyan box for

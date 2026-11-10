@@ -147,6 +147,7 @@ void Application::Initialize()
     m_FrameConstants.bakedGIRayDebugProbe = 0;
     m_FrameConstants.bakedGIRayDebugChannel = 1;   // albedo
     m_FrameConstants.bakedGIRayDebugLength = 8.0f; // probe spacings
+    m_FrameConstants.bakedGIMomentsChannel = 0;    // mean distance (view 11)
     // The record group and the delta source: "no dump yet". kRayDebugNoDir is
     // 0xFFFFFFFF, and the fan's direction guard rejects it the same way it rejects
     // a group past the basis, so frame 0 draws nothing and marks no bin.
@@ -569,6 +570,10 @@ void Application::Update(float deltaTime)
     m_FrameConstants.normalIndex = gbuffer.normal.srvIndex;
     m_FrameConstants.materialIndex = gbuffer.material.srvIndex;
     m_FrameConstants.depthIndex = gbuffer.depth.srvIndex;
+    // The BakedGI debug overlay's SRV (the composite pass reads it through
+    // this index). Valid from the first CreateInternalResolutionResources on.
+    m_FrameConstants.bakedGIDebugOverlaySRVIndex =
+        (uint32_t)m_Renderer.GetProbeDebugOverlaySRVIndex();
     m_FrameConstants.exposure = m_Exposure;
     m_FrameConstants.numLights = (uint32_t)m_Scene.GetLights().size();
     m_FrameConstants.lightLUTBufferIndex = m_Renderer.GetLightLUTDescriptorIndex();
@@ -624,6 +629,7 @@ void Application::Update(float deltaTime)
         m_FrameConstants.bakedGIUseFilled          = 0u;
         m_FrameConstants.bakedGIDebugView          = (uint32_t)m_BakedGIDebugView;
         m_FrameConstants.bakedGIDebugScale         = m_BakedGIDebugScale;
+        m_FrameConstants.bakedGIMomentsChannel     = (uint32_t)m_BakedGIMomentsChannel;
         FillEfbBallConstants();
         // Ray Fan (view 7) constants. The pending dump runs later, in
         // Application::Render, so the dump-derived values here (SRV index, probe,
@@ -2344,19 +2350,20 @@ void Application::RenderImGui()
                 // nothing: 3 was the Sky Visibility view, retired with its
                 // SkyVisSH data source (2026-11-06), and 4 was never a view.
                 // The shader, the renderer and every `m_BakedGIDebugView == N`
-                // test below name a view by number, so the numbers 5..10 must
+                // test below name a view by number, so the numbers 5..11 must
                 // not move down to fill the gap.
                 struct ProbeViewEntry { const char* label; int view; };
                 static constexpr ProbeViewEntry kProbeViews[] = {
-                    { "Off",              0 },
-                    { "Placement",        1 },
-                    { "Lit Irradiance",   2 },
-                    { "Lit Sky Source",   5 },
-                    { "Lit Sun Source",   6 },
-                    { "Ray Fan",          7 },
-                    { "Efb Contribution", 8 },
-                    { "Cage Trace",       9 },
-                    { "Photon Map",      10 },
+                    { "Off",                    0 },
+                    { "Placement",              1 },
+                    { "Lit Irradiance",         2 },
+                    { "Lit Sky Source",         5 },
+                    { "Lit Sun Source",         6 },
+                    { "Ray Fan",                7 },
+                    { "Efb Contribution",       8 },
+                    { "Cage Trace",             9 },
+                    { "Photon Map",            10 },
+                    { "Chebyshev Visibility",  11 },
                 };
                 constexpr int kProbeViewCount = (int)IM_ARRAYSIZE(kProbeViews);
 
@@ -2433,7 +2440,36 @@ void Application::RenderImGui()
                                       "deposit's diffuse albedo (power x rays / quadArea — physical, no gain), so a dot that\n"
                                       "disagrees with the surface under it is a placement defect. Deposits sit ON surfaces, so\n"
                                       "the depth test keeps each cube's front half. Needs a bake; the hour state is the one\n"
-                                      "the map was baked for, named under the button.");
+                                      "the map was baked for, named under the button.\n"
+                                      "Chebyshev Visibility: the depth-moment maps as one ball per probe, sampled by the\n"
+                                      "runtime fetch's OWN bilinear (the exact gating input, seam-correct). Invalid probes\n"
+                                      "are red balls. Cycle the three channels with the combo below: Mean (white = the\n"
+                                      "2x-spacing sky clamp, black = contact geometry — sky is the reference maximum,\n"
+                                      "inverted vs Adria's 3x ramp on purpose), Variance (bright = the mixed-depth texels\n"
+                                      "that soften the rejection — the penumbra signal), Chebyshev at 1x spacing (the\n"
+                                      "weight a receiver one spacing away would get: the leak-hunting channel — a\n"
+                                      "corner-band or seam artifact reads as an unexpected bright direction).");
+
+                if (m_BakedGIDebugView == 11)
+                {
+                    // Chebyshev Visibility colour channel — the Ray Fan channel
+                    // pattern: one combo, one int member, one FrameConstants
+                    // uint the shader branches on.
+                    const char* momentsChannels[] = { "Mean (M1)", "Variance", "Chebyshev @ 1x" };
+                    ImGui::SetNextItemWidth(180.f);
+                    ImGui::Combo("Moments Channel", &m_BakedGIMomentsChannel, momentsChannels,
+                                 IM_ARRAYSIZE(momentsChannels));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Mean: M1 / (2 x spacing), no clamp — the bake's sky clamp IS 2x\n"
+                                          "spacing, so white means open sky and black means contact geometry.\n"
+                                          "Variance: (M2 - M1^2) / spacing^2, saturated — grey is one clean\n"
+                                          "depth, bright is a texel mixing depths (window frames, foliage),\n"
+                                          "which is what softens the Chebyshev rejection into a penumbra.\n"
+                                          "Chebyshev @ 1x: the cubed one-sided bound the fetch evaluates at\n"
+                                          "one spacing of receiver distance. Bright = the probe stays a\n"
+                                          "strong contributor to a receiver there; an unexpected bright\n"
+                                          "direction at a wall or seam is a leak.");
+                }
 
                 if (m_BakedGIDebugView == 2 || m_BakedGIDebugView == 5 || m_BakedGIDebugView == 6 ||
                     m_BakedGIDebugView == 8)

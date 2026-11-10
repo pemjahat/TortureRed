@@ -184,6 +184,11 @@ public:
     GPUTexture& GetFinalDiffuseTex()        { return m_FinalDiffuseTex; }
     GPUTexture& GetFinalSpecularTex()       { return m_FinalSpecularTex; }
     GPUTexture& GetRasterHdrOutputTex() { return m_RasterHdrOutputTex; }
+    // The BakedGI debug overlay's SRV (internal-res R8G8B8A8). Published once
+    // per frame into FrameConstants for the composite pass. -1 before the
+    // first CreateInternalResolutionResources, which cannot happen before the
+    // first frame.
+    int GetProbeDebugOverlaySRVIndex() const { return m_ProbeDebugOverlayTex.srvIndex; }
     GPUTexture& GetRestirDebugHeatmap()       { return m_PathTracing.GetRestirDebugHeatmap(); }
     GPUTexture& GetFullScreenDebugTex()       { return m_FullScreenDebugTex; }
     ID3D12PipelineState* GetFullScreenDebugPSO() const { return m_FullScreenDebugPSO.Get(); }
@@ -319,6 +324,12 @@ private:
     DDGI m_DDGI;
 
     GPUTexture m_RasterHdrOutputTex;          // Internal-res HDR output for rasterizer TAA
+    // BakedGI probe-debug overlay (internal res, LDR) + its companion depth:
+    // the geometry views draw here against a COPY of the GBuffer depth
+    // (test+write — Adria-style occlusion, balls hide behind walls AND each
+    // other), and the composite pass blends the overlay onto the backbuffer.
+    GPUTexture m_ProbeDebugOverlayTex;
+    GPUTexture m_ProbeDebugDepthTex;
     // ---- NRD/Denoise textures/state: moved to Rendering/Denoise.h/.cpp ----
     Denoise m_Denoise;
     GPUTexture m_FinalDiffuseTex;          // Universal interchange: SSO writes, NrdPackNoise+Lighting read

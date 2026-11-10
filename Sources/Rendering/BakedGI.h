@@ -520,6 +520,12 @@ public:
     }
 
     ID3D12PipelineState* GetDebugPSO() const { return m_DebugPSO.Get(); }
+    // The depth-less variant for the X-RAY cage trace: same shaders, DSV bound
+    // but the test disabled, so the whole trace chain stays visible.
+    ID3D12PipelineState* GetDebugXrayPSO() const { return m_DebugXrayPSO.Get(); }
+    // The overlay->backbuffer composite: fullscreen, alpha-blended (the
+    // overlay clears to alpha 0, so empty regions show the scene through).
+    ID3D12PipelineState* GetDebugCompositePSO() const { return m_DebugCompositePSO.Get(); }
     ID3D12PipelineState* GetLeakDebugPSO() const { return m_LeakDebugPSO.Get(); }
 
     // Post-bake stats logging. Scene bounds / grid dims are logged inside
@@ -899,7 +905,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_BakePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_VisBakePSO; // step-3 depth-moment visibility bake
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_UpdatePSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO; // RTV R8G8B8A8 (post-composite overlay)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugPSO; // RTV R8G8B8A8 (internal-res overlay), depth test+write vs the GBuffer-depth copy
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugXrayPSO; // same, DepthEnable FALSE (the cage trace)
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_DebugCompositePSO; // overlay->backbuffer, alpha-blended
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_LeakDebugPSO; // fullscreen leak map (post-composite, alpha-blended)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_RayDebugPSO;  // on-demand ray-debug re-trace (compute)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_IterFoldPSO;  // per-term response-ball fold (compute, debug)
